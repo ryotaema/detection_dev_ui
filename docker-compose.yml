@@ -1,0 +1,365 @@
+# =============================================================================
+# MLOps Pipeline - Docker Compose 統合設定
+# Ubuntu 22.04 / GPU対応 (NVIDIA Container Toolkit 必須)
+# =============================================================================
+
+version: "3.8"
+
+# ---------------------------------------------------------------------------
+# 共有ボリューム定義
+# ---------------------------------------------------------------------------
+volumes:
+  # CVAT 内部データ
+  cvat_db:
+  cvat_redis:
+  cvat_data:
+  cvat_keys:
+  cvat_logs:
+  cvat_iam_db:
+  cvat_inmem_db:
+  cvat_cache_db:
+  # ClearML 内部データ
+  clearml_mongo:
+  clearml_elastic:
+  clearml_fileserver:
+  # プロジェクト共有ディレクトリ (ホスト bind mount)
+  # → ./data, ./models, ./predictions はホスト側で管理
+
+# ---------------------------------------------------------------------------
+# ネットワーク定義
+# ---------------------------------------------------------------------------
+networks:
+  mlops_net:
+    driver: bridge
+  cvat_net:
+    driver: bridge
+  clearml_net:
+    driver: bridge
+
+# ===========================================================================
+# CVAT (アノテーション)
+# 公式: https://github.com/cvat-ai/cvat
+# ===========================================================================
+services:
+
+  # --- CVAT 依存サービス ---
+  cvat_db:
+    image: postgres:15-alpine
+    container_name: cvat_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cvat
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+    volumes:
+      - cvat_db:/var/lib/postgresql/data
+    networks:
+      - cvat_net
+
+  cvat_redis:
+    image: redis:7-alpine
+    container_name: cvat_redis
+    restart: unless-stopped
+    networks:
+      - cvat_net
+
+  cvat_redis_inmem:
+    container_name: cvat_redis_inmem
+    image: redis:7.2.3-alpine
+    restart: unless-stopped
+    command: [
+      "redis-server",
+      "--save", "60", "100",
+      "--appendonly", "yes",
+    ]
+    volumes:
+      - cvat_inmem_db:/data
+    networks:
+      - cvat_net
+
+  cvat_redis_ondisk:
+    container_name: cvat_redis_ondisk
+    image: apache/kvrocks:2.7.0
+    restart: unless-stopped
+    init: true
+    command: [
+      "--dir", "/var/lib/kvrocks/data"
+    ]
+    volumes:
+      - cvat_cache_db:/var/lib/kvrocks/data
+    networks:
+      - cvat_net
+
+  opa:
+    image: openpolicyagent/opa:0.63.0
+    container_name: cvat_opa
+    restart: unless-stopped
+    command:
+      - run
+      - --server
+      - --log-level=error
+      - --set=services.cvat.url=http://cvat-server:8080
+      - --set=bundles.cvat.service=cvat
+      - --set=bundles.cvat.resource=/api/auth/rules
+      - --set=bundles.cvat.polling.min_delay_seconds=5
+      - --set=bundles.cvat.polling.max_delay_seconds=15
+    networks:
+      cvat_net:
+        aliases:
+          - opa
+      mlops_net: {}
+
+  cvat_iam_db:
+    image: postgres:15-alpine
+    container_name: cvat_iam_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: iam
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${CVAT_IAM_DB_PASSWORD:-iam_secret}
+    volumes:
+      - cvat_iam_db:/var/lib/postgresql/data
+    networks:
+      - cvat_net
+
+  # --- CVAT 本体 ---
+  cvat_server:
+    image: cvat/server:v2.17.0
+    command: run server
+    container_name: cvat_server
+    restart: unless-stopped
+    depends_on:
+      - cvat_db
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
+      - cvat_iam_db
+      - opa
+    environment:
+      DJANGO_MODWSGI_EXTRA_ARGS: ""
+      ALLOWED_HOSTS: "*,cvat_server,cvat-server,cvat_proxy,localhost,127.0.0.1"
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      IAM_OIDC_PROVIDER: ""
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+      # エクスポート先を共有ボリューム側へ
+      CVAT_SHARE_URL: /home/django/share
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      # ホスト側 data/ ディレクトリをエクスポート先として共有
+      - ./data:/home/django/share
+    networks:
+      cvat_net:
+        aliases:
+          - cvat-server
+      mlops_net: {}
+
+  cvat_worker_export:
+    image: cvat/server:v2.17.0
+    container_name: cvat_worker_export
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+    environment:
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+    command: run worker.export
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      - ./data:/home/django/share
+    networks:
+      - cvat_net
+
+  cvat_ui:
+    image: cvat/ui:v2.17.0
+    container_name: cvat_ui
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+    networks:
+      - cvat_net
+      - mlops_net
+
+  cvat_proxy:
+    image: nginx:1.25-alpine
+    container_name: cvat_proxy
+    restart: unless-stopped
+    depends_on:
+      - cvat_ui
+      - cvat_server
+    ports:
+      - "8080:80"   # CVAT UI → http://localhost:8080
+    volumes:
+      - ./nginx/cvat.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - cvat_net
+      - mlops_net
+
+# ===========================================================================
+# ClearML Server (実験管理)
+# 公式: https://github.com/allegroai/clearml-server
+# ===========================================================================
+
+  clearml_mongo:
+    image: mongo:8.0.15
+    container_name: clearml_mongo
+    restart: unless-stopped
+    volumes:
+      - clearml_mongo:/data/db
+    networks:
+      - clearml_net
+
+  clearml_elastic:
+    image: elasticsearch:8.19.9
+    container_name: clearml_elastic
+    restart: unless-stopped
+    environment:
+      - xpack.security.enabled=false
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - clearml_elastic:/usr/share/elasticsearch/data
+    networks:
+      - clearml_net
+
+  clearml_redis:
+    image: redis:8.2.3
+    container_name: clearml_redis
+    restart: unless-stopped
+    networks:
+      - clearml_net
+
+  clearml_apiserver:
+    image: clearml/server:latest
+    container_name: clearml_apiserver
+    restart: unless-stopped
+    depends_on:
+      - clearml_mongo
+      - clearml_elastic
+      - clearml_redis
+    ports:
+      - "8008:8008"  # API
+    environment:
+      CLEARML_ELASTIC_SERVICE_HOST: clearml_elastic
+      CLEARML_ELASTIC_SERVICE_PORT: 9200
+      CLEARML_MONGODB_SERVICE_HOST: clearml_mongo
+      CLEARML_MONGODB_SERVICE_PORT: 27017
+      CLEARML_REDIS_SERVICE_HOST: clearml_redis
+      CLEARML_REDIS_SERVICE_PORT: 6379
+      CLEARML__apiserver__default_company: "9eb790333f02d5c6218be9b9"
+    command: apiserver
+    networks:
+      clearml_net:
+        aliases:
+          - apiserver
+      mlops_net: {}
+
+  clearml_fileserver:
+    image: clearml/server:latest
+    container_name: clearml_fileserver
+    restart: unless-stopped
+    depends_on:
+      - clearml_apiserver
+    ports:
+      - "8081:8081"  # File server
+    environment:
+      CLEARML_ELASTIC_SERVICE_HOST: clearml_elastic
+      CLEARML_MONGODB_SERVICE_HOST: clearml_mongo
+      CLEARML_REDIS_SERVICE_HOST: clearml_redis
+    volumes:
+      - clearml_fileserver:/opt/clearml/data/fileserver
+      - ./models:/opt/clearml/data/models   # 学習済みモデルも参照可能
+    command: fileserver
+    networks:
+      clearml_net:
+        aliases:
+          - fileserver
+      mlops_net: {}
+
+  clearml_webserver:
+    image: clearml/server:latest
+    command: webserver
+    container_name: clearml_webserver
+    restart: unless-stopped
+    depends_on:
+      - clearml_apiserver
+    ports:
+      - "8082:80"   # ClearML UI → ※CVATと競合する場合は8082等に変更
+    environment:
+      CLEARML_API_HOST: http://clearml_apiserver:8008
+      CLEARML_FILES_HOST: http://clearml_fileserver:8081
+    networks:
+      - clearml_net
+      - mlops_net
+
+# ===========================================================================
+# Streamlit 統合UI (YOLO学習 + FiftyOne 可視化 内包)
+# ===========================================================================
+
+  streamlit_app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: streamlit_app
+    restart: unless-stopped
+    runtime: nvidia
+    ports:
+      - "8501:8501"   # Streamlit UI  → http://localhost:8501
+      - "5151:5151"   # FiftyOne App  → http://localhost:5151
+    environment:
+      # CVAT接続情報
+      CVAT_HOST: http://cvat_server:8080
+      CVAT_USERNAME: ${CVAT_USERNAME:-admin}
+      CVAT_PASSWORD: ${CVAT_PASSWORD:-admin}
+      # ClearML接続情報 (clearml.conf で上書き可)
+      CLEARML_API_HOST: http://clearml_apiserver:8008
+      CLEARML_WEB_HOST: http://localhost:8082
+      CLEARML_FILES_HOST: http://clearml_fileserver:8081
+      CLEARML_API_ACCESS_KEY: ${CLEARML_ACCESS_KEY:-}
+      CLEARML_API_SECRET_KEY: ${CLEARML_SECRET_KEY:-}
+      # パス設定
+      DATA_DIR: /workspace/data
+      MODELS_DIR: /workspace/models
+      PREDICTIONS_DIR: /workspace/predictions
+      # GPU使用設定
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+    volumes:
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./predictions:/workspace/predictions
+      - ./app:/app  # ソースコードのホットリロード用
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - mlops_net
+    depends_on:
+      - cvat_server
+      - clearml_apiserver
