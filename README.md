@@ -7,15 +7,18 @@ CVAT → YOLO → ClearML → FiftyOne を Docker Compose で統合した、
 
 ## 動作確認済み環境
 
-| 項目 | バージョン |
+| 項目 | 要件 |
 |---|---|
 | OS | Ubuntu 22.04 LTS |
-| Docker | 28.2.2 |
-| Docker Compose | v5.1.0 |
-| GPU | NVIDIA GeForce RTX 5070 Ti (VRAM 16GB) |
-| Driver | 575.57.08 |
-| CUDA | 12.9 |
-| nvidia-container-toolkit | 1.19.0 |
+| Docker | 24.x 以上 |
+| Docker Compose | v2.x 以上 |
+| GPU | NVIDIA GPU（VRAM 8GB 以上推奨） |
+| NVIDIAドライバ | 520 以上 |
+| CUDA | 12.x 系 |
+| nvidia-container-toolkit | 1.14 以上 |
+
+> GPU非搭載環境でも動作しますが、YOLO学習はCPUのみとなり速度が大幅に低下します。  
+> CPU動作時は `docker-compose.yml` の `deploy.resources.reservations` ブロックを削除してください。
 
 ---
 
@@ -53,8 +56,6 @@ mlops_workspace/
 
 ### Step 1 — nvidia-container-toolkit のインストール
 
-> RTX 40/50系など新世代GPUでは必須です。
-
 ```bash
 # GPGキーとリポジトリ追加
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
@@ -85,8 +86,8 @@ docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu22.04 nvidia-smi
 ### Step 3 — プロジェクトファイルの配置
 
 ```bash
-mkdir -p ~/pepper_ws/mlops_workspace/{data,models,predictions,app,nginx}
-cd ~/pepper_ws/mlops_workspace
+mkdir -p ~/mlops_workspace/{data,models,predictions,app,nginx}
+cd ~/mlops_workspace
 
 # 各ファイルを所定のディレクトリに配置
 # app/Dockerfile, app/requirements.txt, app/main.py
@@ -99,7 +100,7 @@ cd ~/pepper_ws/mlops_workspace
 ```bash
 cat > .env << 'EOF'
 CVAT_USERNAME=admin
-CVAT_PASSWORD=admin1234
+CVAT_PASSWORD=your_password_here
 CVAT_DB_PASSWORD=cvat_db_secret
 CVAT_IAM_DB_PASSWORD=iam_db_secret
 CLEARML_ACCESS_KEY=
@@ -108,10 +109,12 @@ NVIDIA_VISIBLE_DEVICES=all
 EOF
 ```
 
+> `CVAT_PASSWORD` は必ず任意の強いパスワードに変更してください。
+
 ### Step 5 — CVATデータベースの初期化
 
 ```bash
-# DB系コンテナを先に起動
+# DB系コンテナを先に起動（初回のみ）
 docker compose up -d cvat_db cvat_redis cvat_iam_db clearml_mongo clearml_elastic clearml_redis
 sleep 30
 
@@ -121,7 +124,7 @@ docker compose run --rm cvat_server bash -c "python manage.py migrate"
 # スーパーユーザー作成（初回のみ）
 docker compose run --rm cvat_server bash -c \
   "python manage.py createsuperuser --username admin --email admin@local.com"
-# パスワード入力を求められるので admin1234 を入力
+# パスワード入力を求められるので .env に設定したパスワードを入力
 ```
 
 ### Step 6 — 全サービス起動
@@ -151,7 +154,7 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:8501
 ## 日常的な起動・停止
 
 ```bash
-cd ~/pepper_ws/mlops_workspace
+cd ~/mlops_workspace
 
 # 起動
 docker compose up -d
@@ -170,7 +173,7 @@ docker compose logs -f cvat_server
 
 ```
 ① CVATでアノテーション
-   http://localhost:8080 → admin/admin1234 でログイン
+   http://localhost:8080 → admin / 設定したパスワード でログイン
    プロジェクト作成 → 画像アップロード → バウンディングボックスを付ける
 
 ② Streamlit タブ① でエクスポート
@@ -191,6 +194,34 @@ docker compose logs -f cvat_server
 
 ---
 
+## Dockerfile の CUDA バージョン設定
+
+`app/Dockerfile` のベースイメージと PyTorch インストール URL は、  
+**お使いの CUDA バージョンに合わせて変更**してください。
+
+```dockerfile
+# ベースイメージの例（CUDA 12.6）
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+# PyTorch インストール（CUDA 12.6 対応ビルド）
+RUN pip install --no-cache-dir torch torchvision torchaudio \
+      --index-url https://download.pytorch.org/whl/cu126
+```
+
+お使いの CUDA バージョンに対応する設定値：
+
+| CUDA | `--index-url` の末尾 | ベースイメージタグ例 |
+|---|---|---|
+| 11.8 | `cu118` | `cuda:11.8.0-cudnn8-runtime-ubuntu22.04` |
+| 12.1 | `cu121` | `cuda:12.1.1-cudnn8-runtime-ubuntu22.04` |
+| 12.4 | `cu124` | `cuda:12.4.1-cudnn-runtime-ubuntu22.04` |
+| 12.6 | `cu126` | `cuda:12.6.3-cudnn-runtime-ubuntu22.04` |
+
+利用可能なイメージ一覧: https://hub.docker.com/r/nvidia/cuda/tags  
+PyTorch 対応ビルド一覧: https://pytorch.org/get-started/locally/
+
+---
+
 ## トラブルシューティング
 
 ### `docker` コマンドで permission denied が出る
@@ -202,19 +233,17 @@ newgrp docker   # ログアウト不要でグループを即時反映
 
 ### コンテナ名が競合してエラーになる
 
-他のDockerプロジェクト（例: `~/pepper_ws/cvat/` の公式CVAT）が動いている場合、  
-先にそちらを停止してから起動してください。
+他の Docker プロジェクトが同じポートやコンテナ名を使っている場合、先に停止してください。
 
 ```bash
 # 競合しているコンテナを確認
 docker ps --format "table {{.Names}}\t{{.Ports}}" | grep 8080
 
-# 該当プロジェクトを停止
-cd ~/pepper_ws/cvat && docker compose down
-cd ~/pepper_ws/mlops_workspace && docker compose up -d
+# 該当プロジェクトを停止してから再起動
+docker compose down && docker compose up -d
 ```
 
-### Elasticsearchが起動しない（OOMエラー）
+### Elasticsearch が起動しない（OOM エラー）
 
 ```bash
 echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
@@ -224,7 +253,7 @@ docker compose restart clearml_elastic
 
 ### cvat_server が `ENV_SMOKESCREEN_OPTS` エラーでクラッシュする
 
-`docker-compose.yml` の `cvat_server` の environment に以下を追加してください：
+`docker-compose.yml` の `cvat_server` の `environment` に以下を追加してください：
 
 ```yaml
 environment:
@@ -233,7 +262,7 @@ environment:
 
 ### clearml_webserver が `host not found: apiserver` でクラッシュする
 
-`clearml_apiserver` のネットワーク設定に `apiserver` エイリアスが必要です：
+`clearml_apiserver` のネットワーク設定にエイリアスが必要です：
 
 ```yaml
 clearml_apiserver:
@@ -244,22 +273,37 @@ clearml_apiserver:
     mlops_net: {}
 ```
 
-同様に `clearml_fileserver` にも `fileserver` エイリアスを追加してください。
+同様に `clearml_fileserver` にも `fileserver` エイリアスを追加してください：
 
-### RTX 50系（Blackwell）でCUDAエラーが出る
+```yaml
+clearml_fileserver:
+  networks:
+    clearml_net:
+      aliases:
+        - fileserver
+    mlops_net: {}
+```
 
-PyTorchはCUDA 12.6以上のビルドが必要です。`Dockerfile` のpipインストール行を確認してください：
+### GPU 非搭載環境で動かしたい（CPU のみ）
 
-```dockerfile
-RUN pip install --no-cache-dir torch torchvision torchaudio \
-      --index-url https://download.pytorch.org/whl/cu126
+`docker-compose.yml` の `streamlit_app` から以下のブロックを削除してください：
+
+```yaml
+# 以下を削除
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
 ```
 
 ---
 
-## ClearML APIキーの取得（任意）
+## ClearML API キーの取得（任意）
 
-ClearMLに認証ありでアクセスしたい場合：
+ClearML に認証ありでアクセスしたい場合：
 
 1. http://localhost:8082 を開く
 2. Settings → Workspace → **Create new credentials**
@@ -270,7 +314,7 @@ ClearMLに認証ありでアクセスしたい場合：
 CLEARML_ACCESS_KEY=your_access_key
 CLEARML_SECRET_KEY=your_secret_key
 
-# Streamlitコンテナを再起動して反映
+# Streamlit コンテナを再起動して反映
 docker compose restart streamlit_app
 ```
 
@@ -278,6 +322,6 @@ docker compose restart streamlit_app
 
 ## 備考
 
-- `version: "3.8"` の警告（`the attribute version is obsolete`）は Docker Compose v2系の仕様変更によるもので、動作には影響ありません。
+- `version: "3.8"` の警告（`the attribute version is obsolete`）は Docker Compose v2 系の仕様変更によるもので、動作には影響ありません。
 - 本システムは完全ローカル動作のため、外部ネットワークへのデータ転送は発生しません。
-- `data/`・`models/`・`predictions/` はホスト側のbind mountのため、コンテナを削除してもデータは保持されます。
+- `data/`・`models/`・`predictions/` はホスト側の bind mount のため、コンテナを削除してもデータは保持されます。
