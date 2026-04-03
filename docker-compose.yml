@@ -1,6 +1,10 @@
 # =============================================================================
 # MLOps Pipeline - Docker Compose 統合設定
 # Ubuntu 22.04 / GPU対応 (NVIDIA Container Toolkit 必須)
+#
+# [FIX] CVATバージョンをv2.17.0からdevに変更
+#       v2.17.0には worker.chunks / worker.utils 等の
+#       supervisord設定ファイルが存在せずクラッシュするため
 # =============================================================================
 
 version: "3.8"
@@ -22,8 +26,6 @@ volumes:
   clearml_mongo:
   clearml_elastic:
   clearml_fileserver:
-  # プロジェクト共有ディレクトリ (ホスト bind mount)
-  # → ./data, ./models, ./predictions はホスト側で管理
 
 # ---------------------------------------------------------------------------
 # ネットワーク定義
@@ -38,7 +40,8 @@ networks:
 
 # ===========================================================================
 # CVAT (アノテーション)
-# 公式: https://github.com/cvat-ai/cvat
+# [FIX] イメージタグを v2.17.0 → dev に統一
+#       dev タグ = developブランチ最新ビルド（全workerが揃っている）
 # ===========================================================================
 services:
 
@@ -122,9 +125,15 @@ services:
     networks:
       - cvat_net
 
+  # ---------------------------------------------------------------------------
+  # CVAT Workers 共通環境変数
+  # ---------------------------------------------------------------------------
+  # [FIX] 全workerでCVAT_REDIS_HOST / CVAT_REDIS_INMEM_HOST / CVAT_REDIS_ONDISK_HOST
+  #       を明示的に設定（devイメージはデフォルト値が異なる場合あり）
+
   # --- CVAT 本体 ---
   cvat_server:
-    image: cvat/server:v2.17.0
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev
     command: run server
     container_name: cvat_server
     restart: unless-stopped
@@ -149,14 +158,15 @@ services:
       CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
       CVAT_POSTGRES_DBNAME: cvat
       IAM_OIDC_PROVIDER: ""
+      CSRF_TRUSTED_ORIGINS: "http://localhost:8080,http://localhost,http://127.0.0.1:8080"
+      UI_URL: "http://localhost:8080"
       SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
-      # エクスポート先を共有ボリューム側へ
       CVAT_SHARE_URL: /home/django/share
+      NUMPROCS: "2"
     volumes:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
-      # ホスト側 data/ ディレクトリをエクスポート先として共有
       - ./data:/home/django/share
     networks:
       cvat_net:
@@ -164,20 +174,230 @@ services:
           - cvat-server
       mlops_net: {}
 
+  # ---------------------------------------------------------------------------
+  # CVAT Workers
+  # [FIX] 正しいコマンド名（devブランチの supervisord conf に合わせた形式）
+  #   worker.export     → run worker export
+  #   worker.import     → run worker import
+  #   worker.annotation → run worker annotation
+  #   worker.chunks     → run worker chunks
+  #   worker.utils      → run worker notifications cleaning  ← ここが重要！
+  #   worker.quality_reports → run worker quality_reports
+  #   worker.webhooks   → run worker webhooks
+  # ---------------------------------------------------------------------------
+
   cvat_worker_export:
-    image: cvat/server:v2.17.0
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev
     container_name: cvat_worker_export
     restart: unless-stopped
     depends_on:
       - cvat_server
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
     environment:
       CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
       CVAT_POSTGRES_HOST: cvat_db
       CVAT_POSTGRES_USER: root
       CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
       CVAT_POSTGRES_DBNAME: cvat
       SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
-    command: run worker.export
+      NUMPROCS: "2"
+    command: run worker export
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      - ./data:/home/django/share
+    networks:
+      - cvat_net
+
+  cvat_worker_import:
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    container_name: cvat_worker_import
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
+    environment:
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+      NUMPROCS: "2"
+    command: run worker import
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      - ./data:/home/django/share
+    networks:
+      - cvat_net
+
+  cvat_worker_annotation:
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    container_name: cvat_worker_annotation
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
+    environment:
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+      NUMPROCS: "1"
+    command: run worker annotation
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      - ./data:/home/django/share
+    networks:
+      - cvat_net
+
+  cvat_worker_chunks:
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev（v2.17.0には worker.chunks が存在しない）
+    container_name: cvat_worker_chunks
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
+    environment:
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+      NUMPROCS: "2"
+    command: run worker chunks
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      - ./data:/home/django/share
+    networks:
+      - cvat_net
+
+  cvat_worker_utils:
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    container_name: cvat_worker_utils
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
+    environment:
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+      NUMPROCS: "1"
+    # [FIX] "run worker.utils" は存在しない
+    #       devブランチでの正しいコマンドは "run worker notifications cleaning"
+    command: run worker notifications cleaning
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      - ./data:/home/django/share
+    networks:
+      - cvat_net
+
+  cvat_worker_quality_reports:
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    container_name: cvat_worker_quality_reports
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
+    environment:
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+      NUMPROCS: "1"
+    # [FIX] "run worker.quality.reports" → "run worker quality_reports"
+    command: run worker quality_reports
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+      - ./data:/home/django/share
+    networks:
+      - cvat_net
+
+  cvat_worker_webhooks:
+    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    container_name: cvat_worker_webhooks
+    restart: unless-stopped
+    depends_on:
+      - cvat_server
+      - cvat_redis
+      - cvat_redis_inmem
+      - cvat_redis_ondisk
+    environment:
+      CVAT_REDIS_HOST: cvat_redis
+      CVAT_REDIS_PORT: "6379"
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6666"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_USER: root
+      CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
+      CVAT_POSTGRES_DBNAME: cvat
+      SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
+      NUMPROCS: "1"
+    command: run worker webhooks
     volumes:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
@@ -187,7 +407,7 @@ services:
       - cvat_net
 
   cvat_ui:
-    image: cvat/ui:v2.17.0
+    image: cvat/ui:dev   # [FIX] v2.17.0 → dev（serverと揃える）
     container_name: cvat_ui
     restart: unless-stopped
     depends_on:
@@ -213,7 +433,6 @@ services:
 
 # ===========================================================================
 # ClearML Server (実験管理)
-# 公式: https://github.com/allegroai/clearml-server
 # ===========================================================================
 
   clearml_mongo:
@@ -270,6 +489,8 @@ services:
       CLEARML_REDIS_SERVICE_HOST: clearml_redis
       CLEARML_REDIS_SERVICE_PORT: 6379
       CLEARML__apiserver__default_company: "9eb790333f02d5c6218be9b9"
+      CLEARML__apiserver__auth__session_same_site: "None"
+      CLEARML__services__auth__csrf__trusted_origins: "http://localhost:8082,http://localhost:8080,http://localhost:8008"
     command: apiserver
     networks:
       clearml_net:
@@ -291,7 +512,7 @@ services:
       CLEARML_REDIS_SERVICE_HOST: clearml_redis
     volumes:
       - clearml_fileserver:/opt/clearml/data/fileserver
-      - ./models:/opt/clearml/data/models   # 学習済みモデルも参照可能
+      - ./models:/opt/clearml/data/models
     command: fileserver
     networks:
       clearml_net:
@@ -307,7 +528,7 @@ services:
     depends_on:
       - clearml_apiserver
     ports:
-      - "8082:80"   # ClearML UI → ※CVATと競合する場合は8082等に変更
+      - "8082:80"   # ClearML UI → http://localhost:8082
     environment:
       CLEARML_API_HOST: http://clearml_apiserver:8008
       CLEARML_FILES_HOST: http://clearml_fileserver:8081
@@ -331,10 +552,10 @@ services:
       - "5151:5151"   # FiftyOne App  → http://localhost:5151
     environment:
       # CVAT接続情報
-      CVAT_HOST: http://cvat_server:8080
+      CVAT_HOST: http://cvat-server:8080
       CVAT_USERNAME: ${CVAT_USERNAME:-admin}
       CVAT_PASSWORD: ${CVAT_PASSWORD:-admin}
-      # ClearML接続情報 (clearml.conf で上書き可)
+      # ClearML接続情報
       CLEARML_API_HOST: http://clearml_apiserver:8008
       CLEARML_WEB_HOST: http://localhost:8082
       CLEARML_FILES_HOST: http://clearml_fileserver:8081
@@ -350,7 +571,7 @@ services:
       - ./data:/workspace/data
       - ./models:/workspace/models
       - ./predictions:/workspace/predictions
-      - ./app:/app  # ソースコードのホットリロード用
+      - ./app:/app
     deploy:
       resources:
         reservations:
