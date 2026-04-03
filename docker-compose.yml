@@ -171,9 +171,11 @@ services:
     networks:
       cvat_net:
         aliases:
-          - cvat-server
-      mlops_net: {}
-
+          - cvat-server   
+      mlops_net:
+        aliases:
+          - cvat-server 
+          
   # ---------------------------------------------------------------------------
   # CVAT Workers
   # [FIX] 正しいコマンド名（devブランチの supervisord conf に合わせた形式）
