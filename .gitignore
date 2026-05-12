@@ -1,0 +1,18 @@
+# 認証情報
+.env
+
+# 学習データ・成果物 (大容量 / 機密)
+data/
+models/
+predictions/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pt
+*.onnx
+
+# 一時ファイル
+*.zip
+*.bak
+docker-compose.yml.bak

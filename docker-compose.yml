@@ -1,10 +1,7 @@
 # =============================================================================
 # MLOps Pipeline - Docker Compose 統合設定
 # Ubuntu 22.04 / GPU対応 (NVIDIA Container Toolkit 必須)
-#
-# [FIX] CVATバージョンをv2.17.0からdevに変更
-#       v2.17.0には worker.chunks / worker.utils 等の
-#       supervisord設定ファイルが存在せずクラッシュするため
+# CVAT: v2.64.0 (cvat-sdk と同一バージョンに固定)
 # =============================================================================
 
 version: "3.8"
@@ -40,8 +37,6 @@ networks:
 
 # ===========================================================================
 # CVAT (アノテーション)
-# [FIX] イメージタグを v2.17.0 → dev に統一
-#       dev タグ = developブランチ最新ビルド（全workerが揃っている）
 # ===========================================================================
 services:
 
@@ -128,12 +123,10 @@ services:
   # ---------------------------------------------------------------------------
   # CVAT Workers 共通環境変数
   # ---------------------------------------------------------------------------
-  # [FIX] 全workerでCVAT_REDIS_HOST / CVAT_REDIS_INMEM_HOST / CVAT_REDIS_ONDISK_HOST
-  #       を明示的に設定（devイメージはデフォルト値が異なる場合あり）
 
   # --- CVAT 本体 ---
   cvat_server:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    image: cvat/server:v2.64.0
     command: run server
     container_name: cvat_server
     restart: unless-stopped
@@ -178,18 +171,10 @@ services:
           
   # ---------------------------------------------------------------------------
   # CVAT Workers
-  # [FIX] 正しいコマンド名（devブランチの supervisord conf に合わせた形式）
-  #   worker.export     → run worker export
-  #   worker.import     → run worker import
-  #   worker.annotation → run worker annotation
-  #   worker.chunks     → run worker chunks
-  #   worker.utils      → run worker notifications cleaning  ← ここが重要！
-  #   worker.quality_reports → run worker quality_reports
-  #   worker.webhooks   → run worker webhooks
   # ---------------------------------------------------------------------------
 
   cvat_worker_export:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    image: cvat/server:v2.64.0
     container_name: cvat_worker_export
     restart: unless-stopped
     depends_on:
@@ -220,7 +205,7 @@ services:
       - cvat_net
 
   cvat_worker_import:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    image: cvat/server:v2.64.0
     container_name: cvat_worker_import
     restart: unless-stopped
     depends_on:
@@ -251,7 +236,7 @@ services:
       - cvat_net
 
   cvat_worker_annotation:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    image: cvat/server:v2.64.0
     container_name: cvat_worker_annotation
     restart: unless-stopped
     depends_on:
@@ -282,7 +267,7 @@ services:
       - cvat_net
 
   cvat_worker_chunks:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev（v2.17.0には worker.chunks が存在しない）
+    image: cvat/server:v2.64.0
     container_name: cvat_worker_chunks
     restart: unless-stopped
     depends_on:
@@ -313,7 +298,7 @@ services:
       - cvat_net
 
   cvat_worker_utils:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    image: cvat/server:v2.64.0
     container_name: cvat_worker_utils
     restart: unless-stopped
     depends_on:
@@ -334,8 +319,6 @@ services:
       CVAT_POSTGRES_DBNAME: cvat
       SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
       NUMPROCS: "1"
-    # [FIX] "run worker.utils" は存在しない
-    #       devブランチでの正しいコマンドは "run worker notifications cleaning"
     command: run worker notifications cleaning
     volumes:
       - cvat_data:/home/django/data
@@ -346,7 +329,7 @@ services:
       - cvat_net
 
   cvat_worker_quality_reports:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    image: cvat/server:v2.64.0
     container_name: cvat_worker_quality_reports
     restart: unless-stopped
     depends_on:
@@ -367,7 +350,6 @@ services:
       CVAT_POSTGRES_DBNAME: cvat
       SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
       NUMPROCS: "1"
-    # [FIX] "run worker.quality.reports" → "run worker quality_reports"
     command: run worker quality_reports
     volumes:
       - cvat_data:/home/django/data
@@ -378,7 +360,7 @@ services:
       - cvat_net
 
   cvat_worker_webhooks:
-    image: cvat/server:dev   # [FIX] v2.17.0 → dev
+    image: cvat/server:v2.64.0
     container_name: cvat_worker_webhooks
     restart: unless-stopped
     depends_on:
@@ -409,7 +391,7 @@ services:
       - cvat_net
 
   cvat_ui:
-    image: cvat/ui:dev   # [FIX] v2.17.0 → dev（serverと揃える）
+    image: cvat/ui:v2.64.0
     container_name: cvat_ui
     restart: unless-stopped
     depends_on:
@@ -548,7 +530,6 @@ services:
       dockerfile: Dockerfile
     container_name: streamlit_app
     restart: unless-stopped
-    runtime: nvidia
     ports:
       - "8501:8501"   # Streamlit UI  → http://localhost:8501
       - "5151:5151"   # FiftyOne App  → http://localhost:5151

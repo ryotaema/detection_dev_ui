@@ -6,17 +6,16 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import threading
 import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from cvat_sdk.core.client import Client
-import zipfile
 
 import streamlit as st
+
+_train_log_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # 定数・環境変数
@@ -171,38 +170,23 @@ def fetch_cvat_tasks() -> list[dict]:
 
 
 def export_cvat_task_yolo(task_id: int, out_dir: Path) -> Optional[Path]:
-    """
-    指定タスクを YOLO 1.1 フォーマットでエクスポートし、
-    out_dir に解凍したパスを返す。
-    """
+    """指定タスクを YOLO Segmentation フォーマットでエクスポートし、out_dir に解凍したパスを返す。"""
     zip_path = out_dir / "dataset.zip"
-    
+    client = get_cvat_client()
+    if not client:
+        return None
     try:
-        # SDKでCVATにログイン
-        with Client(url=CVAT_HOST) as client:
-            client.login((CVAT_USER, CVAT_PASS))
-            
-            # タスクを取得
-            task = client.tasks.retrieve(task_id)
-            
-            # データセットのZIPダウンロード（自動で進捗を待機してくれます）
-            task.export_dataset(
-                format_name="Ultralytics YOLO Segmentation 1.0",
-                filename=str(zip_path),
-                include_images=True
-            )
-            
-        # ダウンロードしたZIPファイルを指定のディレクトリに解凍
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        task = client.tasks.retrieve(task_id)
+        task.export_dataset(
+            format_name="Ultralytics YOLO Segmentation 1.0",
+            filename=str(zip_path),
+            include_images=True,
+        )
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(out_dir)
-            
-        # 解凍が終わったら元のZIPファイルは削除してスッキリさせる
         zip_path.unlink()
-        
         return out_dir
-    
     except Exception as e:
-        import streamlit as st
         st.error(f"CVATからのエクスポート中にエラーが発生しました: {e}")
         return None
 
@@ -242,9 +226,22 @@ def _train_worker(
     run_name: str,
 ):
     """バックグラウンドスレッドで YOLO 学習を実行する"""
-    log = st.session_state.training_log
 
-    # ClearML タスク開始
+    def _log(msg: str) -> None:
+        with _train_log_lock:
+            st.session_state.training_log.append(msg)
+
+    def _on_epoch_end(trainer) -> None:
+        cur = trainer.epoch + 1
+        total = trainer.epochs
+        st.session_state.training_progress = int(cur / total * 95)
+        m_str = "  ".join(
+            f"{k.split('/')[-1]}: {v:.4f}"
+            for k, v in trainer.metrics.items()
+            if isinstance(v, float)
+        )
+        _log(f"[Epoch {cur}/{total}] {m_str or 'training...'}")
+
     clearml_task = init_clearml(project_name, run_name)
     if clearml_task:
         clearml_task.connect({
@@ -253,18 +250,17 @@ def _train_worker(
             "batch_size": batch_size,
             "data_yaml": data_yaml,
         })
-        log.append(f"[ClearML] タスク開始: {clearml_task.id}")
+        _log(f"[ClearML] タスク開始: {clearml_task.id}")
 
     try:
         from ultralytics import YOLO
 
-        model_name = f"yolo11{model_size}.pt"   # 例: yolo11n.pt, yolo11s.pt …
-        log.append(f"[YOLO] モデルロード: {model_name}")
-
+        model_name = f"yolo11{model_size}.pt"
+        _log(f"[YOLO] モデルロード: {model_name}")
         model = YOLO(model_name)
+        model.add_callback("on_train_epoch_end", _on_epoch_end)
 
-        # --- 学習実行 ---
-        log.append("[YOLO] 学習開始...")
+        _log("[YOLO] 学習開始...")
         results = model.train(
             data=data_yaml,
             epochs=epochs,
@@ -272,20 +268,19 @@ def _train_worker(
             project=str(MODELS_DIR),
             name=run_name,
             exist_ok=True,
-            # ClearML 統合は自動検出 (clearml が init されていれば有効)
         )
 
         best_model = Path(results.save_dir) / "weights" / "best.pt"
         st.session_state.last_model_path = str(best_model)
-        log.append(f"[YOLO] 学習完了: {best_model}")
         st.session_state.training_progress = 100
+        _log(f"[YOLO] 学習完了: {best_model}")
 
         if clearml_task:
             clearml_task.upload_artifact("best_model", str(best_model))
             clearml_task.close()
 
     except Exception as e:
-        log.append(f"[ERROR] {e}")
+        _log(f"[ERROR] {e}")
 
     finally:
         st.session_state.training_running = False
