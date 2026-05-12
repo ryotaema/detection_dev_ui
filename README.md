@@ -18,7 +18,7 @@ CVAT → YOLO → ClearML → FiftyOne を Docker Compose で統合した、
 | nvidia-container-toolkit | 1.14 以上 |
 
 > GPU非搭載環境でも動作しますが、YOLO学習はCPUのみとなり速度が大幅に低下します。  
-> CPU動作時は `docker-compose.yml` の `deploy.resources.reservations` ブロックを削除してください。
+> CPU動作時は `docker-compose.yml` の `streamlit_app` から `deploy.resources.reservations` ブロックを削除してください。
 
 ---
 
@@ -27,7 +27,8 @@ CVAT → YOLO → ClearML → FiftyOne を Docker Compose で統合した、
 ```
 mlops_workspace/
 ├── docker-compose.yml       # 全コンテナ統括
-├── .env                     # 認証情報（要作成）
+├── .env                     # 認証情報（要作成・gitignore済み）
+├── .gitignore
 ├── nginx/
 │   └── cvat.conf            # CVATリバースプロキシ
 ├── app/
@@ -83,16 +84,11 @@ newgrp docker
 docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu22.04 nvidia-smi
 ```
 
-### Step 3 — プロジェクトファイルの配置
+### Step 3 — リポジトリのクローン
 
 ```bash
-mkdir -p ~/mlops_workspace/{data,models,predictions,app,nginx}
-cd ~/mlops_workspace
-
-# 各ファイルを所定のディレクトリに配置
-# app/Dockerfile, app/requirements.txt, app/main.py
-# nginx/cvat.conf
-# docker-compose.yml
+git clone git@github.com:ryotaema/mlops_workspace.git
+cd mlops_workspace
 ```
 
 ### Step 4 — .env ファイルの作成
@@ -101,15 +97,15 @@ cd ~/mlops_workspace
 cat > .env << 'EOF'
 CVAT_USERNAME=admin
 CVAT_PASSWORD=your_password_here
-CVAT_DB_PASSWORD=cvat_db_secret
-CVAT_IAM_DB_PASSWORD=iam_db_secret
+CVAT_DB_PASSWORD=your_db_password_here
+CVAT_IAM_DB_PASSWORD=your_iam_db_password_here
 CLEARML_ACCESS_KEY=
 CLEARML_SECRET_KEY=
 NVIDIA_VISIBLE_DEVICES=all
 EOF
 ```
 
-> `CVAT_PASSWORD` は必ず任意の強いパスワードに変更してください。
+> `.env` はGitの追跡対象外です。各パスワードは必ず強い値に変更してください。
 
 ### Step 5 — CVATデータベースの初期化
 
@@ -154,7 +150,7 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:8501
 ## 日常的な起動・停止
 
 ```bash
-cd ~/mlops_workspace
+cd mlops_workspace
 
 # 起動
 docker compose up -d
@@ -183,7 +179,8 @@ docker compose logs -f cvat_server
 
 ③ Streamlit タブ② でYOLO学習
    モデルサイズ（n/s/m/l/x）・エポック数・バッチサイズを設定
-   「学習開始」→ バックグラウンドで実行・ログ表示
+   「学習開始」→ バックグラウンドで実行
+   → エポックごとに mAP 等のメトリクスがログに表示される
    → ClearMLに自動でメトリクスが記録される（http://localhost:8082）
 
 ④ Streamlit タブ③ で推論・可視化
@@ -251,39 +248,6 @@ sudo sysctl -p
 docker compose restart clearml_elastic
 ```
 
-### cvat_server が `ENV_SMOKESCREEN_OPTS` エラーでクラッシュする
-
-`docker-compose.yml` の `cvat_server` の `environment` に以下を追加してください：
-
-```yaml
-environment:
-  SMOKESCREEN_OPTS: ""
-```
-
-### clearml_webserver が `host not found: apiserver` でクラッシュする
-
-`clearml_apiserver` のネットワーク設定にエイリアスが必要です：
-
-```yaml
-clearml_apiserver:
-  networks:
-    clearml_net:
-      aliases:
-        - apiserver
-    mlops_net: {}
-```
-
-同様に `clearml_fileserver` にも `fileserver` エイリアスを追加してください：
-
-```yaml
-clearml_fileserver:
-  networks:
-    clearml_net:
-      aliases:
-        - fileserver
-    mlops_net: {}
-```
-
 ### GPU 非搭載環境で動かしたい（CPU のみ）
 
 `docker-compose.yml` の `streamlit_app` から以下のブロックを削除してください：
@@ -325,3 +289,4 @@ docker compose restart streamlit_app
 - `version: "3.8"` の警告（`the attribute version is obsolete`）は Docker Compose v2 系の仕様変更によるもので、動作には影響ありません。
 - 本システムは完全ローカル動作のため、外部ネットワークへのデータ転送は発生しません。
 - `data/`・`models/`・`predictions/` はホスト側の bind mount のため、コンテナを削除してもデータは保持されます。
+- CVAT: `v2.64.0` / cvat-sdk: `2.64.0`（サーバーと SDK を同一バージョンに固定）
