@@ -125,6 +125,7 @@ defaults = {
     "training_log": [],
     "training_running": False,
     "training_progress": 0,
+    "training_error": None,
     "fiftyone_session": None,
     "fiftyone_port": None,
     "last_model_path": None,
@@ -281,6 +282,7 @@ def _train_worker(
 
     except Exception as e:
         _log(f"[ERROR] {e}")
+        st.session_state.training_error = str(e)
 
     finally:
         st.session_state.training_running = False
@@ -458,10 +460,11 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # タブ構成
 # ---------------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "① CVAT エクスポート",
     "② YOLO 学習",
     "③ 推論 & 可視化",
+    "④ データ管理",
 ])
 
 # ===========================================================================
@@ -579,6 +582,7 @@ with tab2:
             st.session_state.training_log = []
             st.session_state.training_progress = 0
             st.session_state.training_running = True
+            st.session_state.training_error = None
 
             t = threading.Thread(
                 target=_train_worker,
@@ -602,6 +606,9 @@ with tab2:
         if st.session_state.training_running:
             time.sleep(2)
             st.rerun()
+
+    if st.session_state.training_error:
+        st.error(f"学習エラー: {st.session_state.training_error}")
 
     # --- 完了後: モデル選択 ---
     if st.session_state.last_model_path:
@@ -709,6 +716,76 @@ with tab3:
                                 st.json(json.load(f))
         else:
             st.info("predictions/ にJSONファイルがありません。先に推論を実行してください。")
+
+# ===========================================================================
+# タブ4: データ管理
+# ===========================================================================
+with tab4:
+    import shutil
+
+    st.markdown('<div class="pipeline-card"><h3>📁 データ管理</h3>', unsafe_allow_html=True)
+
+    # --- data/ データセット一覧 ---
+    st.markdown("#### 学習データセット (`data/`)")
+    datasets = sorted(DATA_DIR.iterdir()) if DATA_DIR.exists() else []
+    datasets = [d for d in datasets if d.is_dir()]
+    if not datasets:
+        st.info("data/ にデータセットがありません。")
+    else:
+        for ds in datasets:
+            all_files = [f for f in ds.rglob("*") if f.is_file()]
+            file_count = len(all_files)
+            size_mb = sum(f.stat().st_size for f in all_files) / (1024 * 1024)
+            col1, col2, col3 = st.columns([4, 2, 1])
+            with col1:
+                st.text(ds.name)
+            with col2:
+                st.text(f"{file_count} files  /  {size_mb:.1f} MB")
+            with col3:
+                if st.button("🗑", key=f"del_ds_{ds.name}", help=f"{ds.name} を削除"):
+                    shutil.rmtree(ds)
+                    st.success(f"{ds.name} を削除しました")
+                    st.rerun()
+
+    st.markdown("---")
+
+    # --- models/ モデル一覧 ---
+    st.markdown("#### 学習済みモデル (`models/`)")
+    model_files = sorted(MODELS_DIR.rglob("*.pt")) if MODELS_DIR.exists() else []
+    if not model_files:
+        st.info("models/ に .pt ファイルがありません。")
+    else:
+        for mp in model_files:
+            size_mb = mp.stat().st_size / (1024 * 1024)
+            col1, col2, col3 = st.columns([4, 2, 1])
+            with col1:
+                st.text(str(mp.relative_to(MODELS_DIR)))
+            with col2:
+                st.text(f"{size_mb:.1f} MB")
+            with col3:
+                if st.button("🗑", key=f"del_model_{mp}", help=f"{mp.name} を削除"):
+                    mp.unlink()
+                    if st.session_state.last_model_path == str(mp):
+                        st.session_state.last_model_path = None
+                    st.success(f"{mp.name} を削除しました")
+                    st.rerun()
+
+    st.markdown("---")
+
+    # --- predictions/ 一括クリア ---
+    st.markdown("#### 推論結果 (`predictions/`)")
+    pred_files = list(PREDICTIONS_DIR.glob("*.json")) if PREDICTIONS_DIR.exists() else []
+    if not pred_files:
+        st.info("predictions/ に結果 JSON がありません。")
+    else:
+        st.text(f"{len(pred_files)} 件の結果ファイル")
+        if st.button("🗑 predictions/ をすべてクリア", type="secondary"):
+            for jf in pred_files:
+                jf.unlink()
+            st.success("predictions/ をクリアしました")
+            st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # フッター

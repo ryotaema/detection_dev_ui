@@ -187,6 +187,11 @@ docker compose logs -f cvat_server
    学習済みモデルを選択 →「推論実行」
    → predictions/ にJSONで結果保存
    「FiftyOneで可視化」→ http://localhost:5151 でブラウザ確認
+
+⑤ Streamlit タブ④ でデータ管理（任意）
+   data/ のデータセット一覧・削除
+   models/ の学習済みモデル一覧・削除
+   predictions/ の推論結果一括クリア
 ```
 
 ---
