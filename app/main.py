@@ -13,6 +13,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from cvat_sdk.core.client import Client
+import zipfile
 
 import streamlit as st
 
@@ -22,7 +24,7 @@ import streamlit as st
 DATA_DIR       = Path(os.getenv("DATA_DIR",       "/workspace/data"))
 MODELS_DIR     = Path(os.getenv("MODELS_DIR",     "/workspace/models"))
 PREDICTIONS_DIR= Path(os.getenv("PREDICTIONS_DIR","/workspace/predictions"))
-CVAT_HOST      = os.getenv("CVAT_HOST",  "http://cvat_server:8080")
+CVAT_HOST      = os.getenv("CVAT_HOST",  "http://cvat-server:8080")
 CVAT_USER      = os.getenv("CVAT_USERNAME","admin")
 CVAT_PASS      = os.getenv("CVAT_PASSWORD","admin")
 CLEARML_API    = os.getenv("CLEARML_API_HOST","http://clearml_apiserver:8008")
@@ -74,11 +76,11 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
 
 /* ステータスバッジ */
 .badge-ok   { background:#1a3a2a; color:#4caf7d; border:1px solid #2d6b47;
-              padding:2px 10px; border-radius:4px; font-size:.78rem; }
+                padding:2px 10px; border-radius:4px; font-size:.78rem; }
 .badge-warn { background:#3a2a10; color:#f0a830; border:1px solid #7a5520;
-              padding:2px 10px; border-radius:4px; font-size:.78rem; }
+                padding:2px 10px; border-radius:4px; font-size:.78rem; }
 .badge-err  { background:#3a1a1a; color:#f06060; border:1px solid #7a3030;
-              padding:2px 10px; border-radius:4px; font-size:.78rem; }
+                padding:2px 10px; border-radius:4px; font-size:.78rem; }
 
 /* ログエリア */
 .log-area {
@@ -162,7 +164,7 @@ def fetch_cvat_tasks() -> list[dict]:
     try:
         tasks = client.tasks.list()
         return [{"id": t.id, "name": t.name, "size": t.size,
-                 "status": t.status} for t in tasks]
+                "status": t.status} for t in tasks]
     except Exception as e:
         st.error(f"タスク取得エラー: {e}")
         return []
@@ -173,28 +175,35 @@ def export_cvat_task_yolo(task_id: int, out_dir: Path) -> Optional[Path]:
     指定タスクを YOLO 1.1 フォーマットでエクスポートし、
     out_dir に解凍したパスを返す。
     """
-    client = get_cvat_client()
-    if not client:
-        return None
-
-    export_path = out_dir / f"cvat_export_task{task_id}.zip"
+    zip_path = out_dir / "dataset.zip"
+    
     try:
-        st.info(f"タスク {task_id} をエクスポート中…")
-        # SDK の export_dataset メソッドを利用
-        client.tasks.retrieve(task_id).export_dataset(
-            format_name="YOLO 1.1",
-            filename=str(export_path),
-            include_images=True,
-        )
-        # ZIP 展開
-        extract_dir = out_dir / f"task_{task_id}"
-        with zipfile.ZipFile(export_path, "r") as zf:
-            zf.extractall(extract_dir)
-        export_path.unlink()  # ZIPは削除
-        st.success(f"エクスポート完了: {extract_dir}")
-        return extract_dir
+        # SDKでCVATにログイン
+        with Client(url=CVAT_HOST) as client:
+            client.login((CVAT_USER, CVAT_PASS))
+            
+            # タスクを取得
+            task = client.tasks.retrieve(task_id)
+            
+            # データセットのZIPダウンロード（自動で進捗を待機してくれます）
+            task.export_dataset(
+                format_name="Ultralytics YOLO Segmentation 1.0",
+                filename=str(zip_path),
+                include_images=True
+            )
+            
+        # ダウンロードしたZIPファイルを指定のディレクトリに解凍
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(out_dir)
+            
+        # 解凍が終わったら元のZIPファイルは削除してスッキリさせる
+        zip_path.unlink()
+        
+        return out_dir
+    
     except Exception as e:
-        st.error(f"エクスポートエラー: {e}")
+        import streamlit as st
+        st.error(f"CVATからのエクスポート中にエラーが発生しました: {e}")
         return None
 
 
@@ -291,7 +300,7 @@ def launch_fiftyone(dataset_name: str, predictions_dir: Path) -> Optional[int]:
     既存のセッションがあれば再利用。
 
     Fix: remote=True → remote=False, address="0.0.0.0"
-         コンテナ内で 0.0.0.0:5151 でListenさせてホストブラウザからアクセス可能にする。
+        コンテナ内で 0.0.0.0:5151 でListenさせてホストブラウザからアクセス可能にする。
     """
     try:
         import fiftyone as fo
@@ -641,7 +650,7 @@ with tab3:
     # --- 推論実行ボタン ---
     with col_run:
         if st.button("▶ 推論実行", type="primary", use_container_width=True,
-                     disabled=not current_model):
+                    disabled=not current_model):
             img_dir = Path(test_image_dir)
             if not img_dir.exists():
                 st.error(f"画像ディレクトリが存在しません: {img_dir}")
@@ -675,16 +684,16 @@ with tab3:
         fo_url = f"http://localhost:{st.session_state.fiftyone_port}"
         st.markdown(f"""
 <div style="margin-top:16px;">
-  <p style="color:#4a6080; font-size:.85rem;">
-    FiftyOne App が別ポートで起動中。同一ホストの場合は以下から直接アクセスできます。
-  </p>
-  <a href="{fo_url}" target="_blank" style="color:#7ecff4; font-family:'JetBrains Mono',monospace;">
-    🔗 FiftyOne App を開く → {fo_url}
-  </a>
+    <p style="color:#4a6080; font-size:.85rem;">
+        FiftyOne App が別ポートで起動中。同一ホストの場合は以下から直接アクセスできます。
+    </p>
+    <a href="{fo_url}" target="_blank" style="color:#7ecff4; font-family:'JetBrains Mono',monospace;">
+        🔗 FiftyOne App を開く → {fo_url}
+    </a>
 </div>
 <iframe src="{fo_url}" width="100%" height="600px"
-  style="border:1px solid #1e2330; border-radius:8px; margin-top:12px;"
-  allow="fullscreen">
+    style="border:1px solid #1e2330; border-radius:8px; margin-top:12px;"
+    allow="fullscreen">
 </iframe>
 """, unsafe_allow_html=True)
 
@@ -712,6 +721,6 @@ with tab3:
 st.markdown("""
 <div style="border-top:1px solid #1e2330; margin-top:40px; padding-top:12px;
             text-align:center; color:#2a3a50; font-size:.75rem; font-family:'JetBrains Mono',monospace;">
-  MLOps Pipeline v1.0 · CVAT · YOLO · ClearML · FiftyOne · Streamlit
+    MLOps Pipeline v1.0 · CVAT · YOLO · ClearML · FiftyOne · Streamlit
 </div>
 """, unsafe_allow_html=True)
