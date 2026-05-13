@@ -6,7 +6,7 @@
 streamlit==1.35.0
 
 # --- YOLO (Ultralytics) ---
-ultralytics==8.2.48           # YOLOv8 / YOLO11 対応
+ultralytics==8.4.48           # YOLO11 対応 (8.3.0以降でYOLO11追加)
 
 # --- 実験管理 ---
 clearml==1.16.2

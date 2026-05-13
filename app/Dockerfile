@@ -4,7 +4,7 @@
 # Python 3.11 / Ubuntu 22.04
 # =============================================================================
 
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 # ---------------------------------------------------------------------------
 # システム依存パッケージ
@@ -40,7 +40,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
       torch torchvision torchaudio \
-      --index-url https://download.pytorch.org/whl/cu126 && \
+      --index-url https://download.pytorch.org/whl/cu128 && \
     pip install --no-cache-dir -r requirements.txt
 
 # ---------------------------------------------------------------------------

@@ -555,6 +555,7 @@ services:
       - ./models:/workspace/models
       - ./predictions:/workspace/predictions
       - ./app:/app
+    shm_size: "2gb"
     deploy:
       resources:
         reservations:
