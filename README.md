@@ -87,8 +87,8 @@ docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu22.04 nvidia-smi
 ### Step 3 — リポジトリのクローン
 
 ```bash
-git clone git@github.com:ryotaema/mlops_workspace.git
-cd mlops_workspace
+git clone git@github.com:ryotaema/detection_dev_ui.git
+cd detection_dev_ui
 ```
 
 ### Step 4 — .env ファイルの作成
