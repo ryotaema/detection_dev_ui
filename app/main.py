@@ -47,7 +47,7 @@ for d in [DATA_DIR, MODELS_DIR, PREDICTIONS_DIR]:
 # Streamlit ページ設定
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="MLOps Pipeline",
+    page_title="detection_dev_ui",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -806,7 +806,7 @@ def _ckw(label: str, val: bool,
 st.markdown("""
 <div style="border-bottom:1px solid #1e2330; padding-bottom:16px; margin-bottom:24px;">
   <h1 style="color:#7ecff4; font-family:'JetBrains Mono',monospace; font-size:1.6rem; margin:0;">
-    🔬 MLOps Pipeline
+    🔬 detection_dev_ui
   </h1>
   <p style="color:#4a6080; font-size:.85rem; margin:4px 0 0;">
     CVAT → YOLO → ClearML → FiftyOne 統合ダッシュボード
@@ -1567,6 +1567,6 @@ with tab4:
 st.markdown("""
 <div style="border-top:1px solid #1e2330; margin-top:40px; padding-top:12px;
             text-align:center; color:#2a3a50; font-size:.75rem; font-family:'JetBrains Mono',monospace;">
-    MLOps Pipeline v1.0 · CVAT · YOLO · ClearML · FiftyOne · Streamlit
+    detection_dev_ui v1.0 · CVAT · YOLO · ClearML · FiftyOne · Streamlit
 </div>
 """, unsafe_allow_html=True)

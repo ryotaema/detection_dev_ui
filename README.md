@@ -1,4 +1,4 @@
-# MLOps Pipeline — 完全ローカル完結型 画像検出パイプライン
+# detection_dev_ui — 完全ローカル完結型 画像検出パイプライン
 
 CVAT → YOLO → ClearML → FiftyOne を Docker Compose で統合した、  
 **ターミナル操作不要・GUI完結**の物体検出MLOpsシステムです。
