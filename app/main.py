@@ -738,6 +738,67 @@ def run_inference(
 
 
 # ===========================================================================
+# UI ヘルパー：ポップオーバー付きウィジェット
+# ===========================================================================
+_DOC_TRAIN = "https://docs.ultralytics.com/modes/train/#train-settings"
+_DOC_AUG   = "https://docs.ultralytics.com/modes/train/#augmentation-settings-and-hyperparameters"
+
+
+def _ph(name: str, desc: str, url: str) -> None:
+    """ポップオーバー形式のパラメータヘルプボタン（❓）を描画する。"""
+    with st.popover("❓", use_container_width=True):
+        st.markdown(f"**`{name}`**\n\n{desc}")
+        st.markdown(f"[📖 Ultralytics ドキュメント]({url})")
+
+
+def _sw(label: str, lo: float, hi: float, val: float, step: float,
+        name: str, desc: str, url: str = _DOC_AUG, **kw) -> float:
+    """slider + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
+    c, h = st.columns([5, 1])
+    with c:
+        v = st.slider(label, lo, hi, val, step=step, **kw)
+    with h:
+        st.markdown('<div style="margin-top:28px"></div>', unsafe_allow_html=True)
+        _ph(name, desc, url)
+    return v
+
+
+def _nw(label: str, lo: float, hi: float, val: float,
+        name: str, desc: str, url: str = _DOC_TRAIN, **kw):
+    """number_input + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
+    c, h = st.columns([5, 1])
+    with c:
+        v = st.number_input(label, lo, hi, val, **kw)
+    with h:
+        st.markdown('<div style="margin-top:28px"></div>', unsafe_allow_html=True)
+        _ph(name, desc, url)
+    return v
+
+
+def _selw(label: str, options: list, idx: int,
+          name: str, desc: str, url: str = _DOC_TRAIN, **kw) -> str:
+    """selectbox + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
+    c, h = st.columns([5, 1])
+    with c:
+        v = st.selectbox(label, options, index=idx, **kw)
+    with h:
+        st.markdown('<div style="margin-top:28px"></div>', unsafe_allow_html=True)
+        _ph(name, desc, url)
+    return v
+
+
+def _ckw(label: str, val: bool,
+         name: str, desc: str, url: str = _DOC_TRAIN, **kw) -> bool:
+    """checkbox + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
+    c, h = st.columns([5, 1])
+    with c:
+        v = st.checkbox(label, value=val, **kw)
+    with h:
+        _ph(name, desc, url)
+    return v
+
+
+# ===========================================================================
 # UI レイアウト
 # ===========================================================================
 
@@ -998,54 +1059,195 @@ with tab2:
 
     # ── 学習設定（最適化・正則化）────────────────────────────────────────────
     with st.expander("⚙️ 学習設定（最適化・正則化）", expanded=False):
-        _oc1, _oc2, _oc3 = st.columns(3)
+        _oc1, _oc2, _oc3, _oc4 = st.columns(4)
         with _oc1:
-            imgsz      = st.number_input("画像サイズ (imgsz)", 128, 1280, 640, step=32)
-            patience   = st.number_input("EarlyStopping patience (0=無効)", 0, 500, 50, step=10)
-            save_period= st.number_input("定期保存エポック間隔 (0=無効)", 0, 500, 0, step=10)
+            imgsz       = _nw("imgsz", 128, 1280, 640, step=32,
+                               name="imgsz",
+                               desc="学習・推論時の画像サイズ（ピクセル）。大きいほど精度が上がるが計算コストが増加する。")
+            patience    = _nw("patience（0=無効）", 0, 1000, 50, step=10,
+                               name="patience",
+                               desc="EarlyStopping の待機エポック数。N エポック間 val metrics が改善しなければ自動終了。0 で無効。")
+            save_period = _nw("save_period（0=無効）", 0, 500, 0, step=10,
+                               name="save_period",
+                               desc="N エポックごとにチェックポイントを保存する間隔。0 で無効。長期学習での途中確認に便利。")
+            workers     = _nw("workers", 0, 32, 8, step=1,
+                               name="workers",
+                               desc="DataLoader の CPU ワーカースレッド数。多すぎるとメモリ不足になることがある。")
         with _oc2:
-            optimizer  = st.selectbox("オプティマイザ", ["auto", "SGD", "Adam", "AdamW", "NAdam", "RAdam"])
-            lr0        = st.number_input("初期学習率 (lr0)", 1e-5, 1.0, 0.01, format="%.5f", step=0.001)
-            warmup_epochs = st.number_input("ウォームアップエポック数", 0, 50, 3, step=1)
+            optimizer   = _selw("optimizer", ["auto","SGD","Adam","AdamW","NAdam","RAdam"], 0,
+                                 name="optimizer",
+                                 desc="`auto` はモデルに応じて自動選択。細かく制御する場合は SGD または AdamW 推奨。")
+            lr0         = _nw("lr0（初期学習率）", 1e-5, 1.0, 0.01, format="%.5f", step=0.001,
+                               name="lr0",
+                               desc="初期学習率。SGD では 0.01、Adam/AdamW では 0.001 が一般的な推奨値。")
+            lrf         = _nw("lrf（最終LR係数）", 1e-4, 1.0, 0.01, format="%.4f", step=0.001,
+                               name="lrf",
+                               desc="学習率スケジューラの終端係数。最終学習率 = `lr0 × lrf`。")
+            cos_lr      = _ckw("cos_lr（コサイン学習率）", False,
+                                name="cos_lr",
+                                desc="True でコサイン学習率スケジューラを使用。学習後半を滑らかに減衰させる。")
         with _oc3:
-            weight_decay = st.number_input("Weight Decay", 0.0, 0.01, 0.0005, format="%.5f", step=0.0001)
-            dropout    = st.slider("Dropout", 0.0, 0.5, 0.0, step=0.05)
-            workers    = st.number_input("DataLoader workers", 0, 32, 8, step=1)
-        _fc1, _fc2, _fc3 = st.columns(3)
-        with _fc1:
-            cos_lr = st.checkbox("コサイン学習率スケジューラ (cos_lr)", value=False)
-        with _fc2:
-            amp    = st.checkbox("混合精度学習 (AMP)", value=True)
-        with _fc3:
-            cache  = st.checkbox("画像キャッシュ (cache)", value=False,
-                                 help="RAM/diskに画像をキャッシュして速度向上。RAMに余裕がある場合に有効")
+            momentum    = _nw("momentum（SGD/Adam β1）", 0.5, 0.999, 0.937, format="%.3f", step=0.01,
+                               name="momentum",
+                               desc="SGD のモメンタム係数、または Adam 系の β1 パラメータ。")
+            warmup_epochs = _nw("warmup_epochs", 0, 50, 3, step=1,
+                                 name="warmup_epochs",
+                                 desc="ウォームアップのエポック数。最初の N エポックで学習率を 0 から lr0 まで徐々に増加させる。")
+            warmup_momentum = _nw("warmup_momentum", 0.0, 1.0, 0.8, format="%.2f", step=0.05,
+                                   name="warmup_momentum",
+                                   desc="ウォームアップ中の初期モメンタム値。")
+            warmup_bias_lr  = _nw("warmup_bias_lr", 0.0, 1.0, 0.1, format="%.3f", step=0.01,
+                                   name="warmup_bias_lr",
+                                   desc="ウォームアップ中のバイアス層の学習率。")
+        with _oc4:
+            weight_decay = _nw("weight_decay", 0.0, 0.01, 0.0005, format="%.5f", step=0.0001,
+                                name="weight_decay",
+                                desc="L2 正則化（重み減衰）の強度。過学習の抑制に効果的。")
+            dropout      = _sw("dropout", 0.0, 0.5, 0.0, step=0.05,
+                                name="dropout",
+                                desc="Dropout の確率。0 で無効。学習時にランダムにユニットを無効化して汎化性を高める。",
+                                url=_DOC_TRAIN)
+            nbs          = _nw("nbs（損失正規化基準バッチ）", 1, 256, 64, step=8,
+                                name="nbs",
+                                desc="名目バッチサイズ。実バッチサイズが異なる場合に損失をスケーリングする基準値。")
+            amp          = _ckw("AMP（混合精度学習）", True,
+                                 name="amp",
+                                 desc="True で FP16 演算を混在させ GPU メモリを節約しつつ速度を向上させる。Blackwell GPU では有効推奨。")
+            cache        = _ckw("cache（画像キャッシュ）", False,
+                                 name="cache",
+                                 desc="学習画像を RAM/disk にキャッシュ。繰り返しのディスク読み込みを削減して高速化。大規模データセットでは RAM 不足に注意。")
 
     # ── データ拡張（Augmentation）────────────────────────────────────────────
     with st.expander("🎨 データ拡張（Augmentation）", expanded=False):
-        _ac1, _ac2, _ac3 = st.columns(3)
-        with _ac1:
-            st.markdown("**幾何変換**")
-            degrees    = st.slider("回転 degrees",    0.0, 180.0,  0.0,  step=1.0)
-            scale      = st.slider("拡大縮小 scale",  0.0,   0.9,  0.5,  step=0.05)
-            translate  = st.slider("平行移動 translate", 0.0, 0.9, 0.1,  step=0.05)
-            fliplr     = st.slider("左右反転 fliplr", 0.0,   1.0,  0.5,  step=0.05)
-            flipud     = st.slider("上下反転 flipud", 0.0,   1.0,  0.0,  step=0.05)
-            perspective= st.number_input("透視変換 perspective", 0.0, 0.001, 0.0,
-                                         format="%.4f", step=0.0001)
-        with _ac2:
-            st.markdown("**色・明度**")
-            hsv_h      = st.slider("色相 hsv_h",     0.0,  0.1, 0.015, step=0.005)
-            hsv_s      = st.slider("彩度 hsv_s",     0.0,  1.0,  0.7,  step=0.05)
-            hsv_v      = st.slider("明度 hsv_v",     0.0,  1.0,  0.4,  step=0.05)
-        with _ac3:
-            st.markdown("**合成拡張**")
-            mosaic     = st.slider("モザイク mosaic",   0.0, 1.0, 1.0, step=0.05)
-            mixup      = st.slider("ミックスアップ mixup", 0.0, 1.0, 0.0, step=0.05)
-            erasing    = st.slider("ランダム消去 erasing", 0.0, 0.9, 0.4, step=0.05)
-            close_mosaic = st.number_input(
-                "モザイク無効化（終盤Nエポック）", 0, 100, 10, step=5,
-                help="最後のNエポックでモザイクをOFFにして精度を安定させる",
-            )
+        _mn      = model_name.lower()
+        _is_seg  = "-seg"  in _mn
+        _is_pose = "-pose" in _mn
+        _is_cls  = "-cls"  in _mn
+        _is_obb  = "-obb"  in _mn
+        _has_box = not _is_cls
+        _task_label = ("segment" if _is_seg else "pose" if _is_pose
+                       else "classify" if _is_cls else "obb" if _is_obb else "detect")
+        st.caption(
+            f"推定タスク: **{_task_label}** — タスクに適用されないパラメータはグレーアウトされます"
+        )
+
+        # ── 幾何変換 ──────────────────────────────────────────────────────────
+        st.markdown("##### 🔁 幾何変換")
+        _g1, _g2, _g3, _g4 = st.columns(4)
+        with _g1:
+            degrees = _sw("degrees（回転 ±°）", 0.0, 180.0, 0.0, step=1.0,
+                           name="degrees",
+                           desc="画像をランダムに回転させる角度範囲（±degrees°）。0 で無効。ロボット視点など姿勢が変化する環境で有効。",
+                           disabled=not _has_box)
+            shear   = _sw("shear（せん断 ±°）", 0.0, 10.0, 0.0, step=0.5,
+                           name="shear",
+                           desc="せん断変形（ずれ歪み）の角度範囲（±degrees°）。画像を平行四辺形状に歪める。",
+                           disabled=not _has_box)
+        with _g2:
+            scale     = _sw("scale（拡大縮小）", 0.0, 0.9, 0.5, step=0.05,
+                             name="scale",
+                             desc="ランダムスケーリングの変化幅。0.5 なら画像サイズが ×0.5〜×1.5 の範囲で変化。距離・解像度の変動に対応。",
+                             disabled=not _has_box)
+            translate = _sw("translate（平行移動）", 0.0, 0.9, 0.1, step=0.05,
+                             name="translate",
+                             desc="水平・垂直方向の平行移動量（画像サイズ比）。物体が画像端にある場合への対応。",
+                             disabled=not _has_box)
+        with _g3:
+            fliplr = _sw("fliplr（左右反転）", 0.0, 1.0, 0.5, step=0.05,
+                          name="fliplr",
+                          desc="水平（左右）反転の確率。文字・数字など向きが意味を持つタスクでは 0.0 を推奨。")
+            flipud = _sw("flipud（上下反転）", 0.0, 1.0, 0.0, step=0.05,
+                          name="flipud",
+                          desc="垂直（上下）反転の確率。重力方向が重要なタスクでは 0.0 を推奨。")
+        with _g4:
+            perspective = _nw("perspective（透視変換）", 0.0, 0.001, 0.0,
+                               format="%.4f", step=0.0001,
+                               name="perspective",
+                               desc="透視投影変換の強度（0〜0.001 程度）。平面を斜めから見たような 3D 的歪みを追加。",
+                               url=_DOC_AUG, disabled=not _has_box)
+            bgr = _sw("bgr（BGR↔RGB 反転確率）", 0.0, 1.0, 0.0, step=0.05,
+                       name="bgr",
+                       desc="BGR と RGB のチャンネル順をランダムに入れ替える確率。色に依存しない特徴を学習させる。")
+
+        # ── 色調・明度変換 ───────────────────────────────────────────────────
+        st.markdown("##### 🌈 色調・明度変換")
+        _c1, _c2, _c3 = st.columns(3)
+        with _c1:
+            hsv_h = _sw("hsv_h（色相変動）", 0.0, 0.10, 0.015, step=0.005,
+                         name="hsv_h",
+                         desc="HSV 色空間の色相（Hue）の変動量。照明条件の変化や異なる色帯域への汎化に効果的。")
+        with _c2:
+            hsv_s = _sw("hsv_s（彩度変動）", 0.0, 1.0, 0.7, step=0.05,
+                         name="hsv_s",
+                         desc="HSV 色空間の彩度（Saturation）の変動量。色の鮮やかさをランダムに変化させる。")
+        with _c3:
+            hsv_v = _sw("hsv_v（明度変動）", 0.0, 1.0, 0.4, step=0.05,
+                         name="hsv_v",
+                         desc="HSV 色空間の明度（Value）の変動量。屋内外の照明差や露出変化に対応させる。")
+
+        # ── 合成拡張 ─────────────────────────────────────────────────────────
+        st.markdown("##### 🔀 合成拡張")
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        with _m1:
+            mosaic = _sw("mosaic（4 画像合成）", 0.0, 1.0,
+                          1.0 if _has_box else 0.0, step=0.05,
+                          name="mosaic",
+                          desc="4 枚の画像をランダムにモザイク結合する確率。小物体の検出精度向上に非常に効果的。detect/segment/pose 向け。",
+                          disabled=not _has_box)
+            close_mosaic = _nw("close_mosaic（終盤N エポックOFF）", 0, 200, 10, step=5,
+                                name="close_mosaic",
+                                desc="最後の N エポックでモザイク拡張を OFF にする。学習終盤に拡張なしの本来の分布で収束させ精度を安定させる。",
+                                url=_DOC_AUG, disabled=not _has_box)
+        with _m2:
+            mixup  = _sw("mixup", 0.0, 1.0, 0.0, step=0.05,
+                          name="mixup",
+                          desc="2 枚の画像とラベルを α ブレンドで混合する確率。クラス境界付近の汎化性向上に有効。detect/segment 向け。",
+                          disabled=not _has_box)
+            cutmix = _sw("cutmix", 0.0, 1.0, 0.0, step=0.05,
+                          name="cutmix",
+                          desc="ランダムに切り抜いた領域を別画像で置き換える確率。MixUp の空間的バリアント。",
+                          disabled=not _has_box)
+        with _m3:
+            copy_paste = _sw("copy_paste（セグのみ）", 0.0, 1.0, 0.0, step=0.05,
+                              name="copy_paste",
+                              desc="【セグメンテーション専用】別画像のセグメント済みオブジェクトをコピーして貼り付ける確率。クラス不均衡の解消やレアオブジェクト増強に有効。",
+                              disabled=not _is_seg)
+            _cp_c, _cp_h = st.columns([5, 1])
+            with _cp_c:
+                copy_paste_mode = st.selectbox(
+                    "copy_paste_mode", ["flip", "mixup"],
+                    disabled=not (_is_seg and copy_paste > 0.0),
+                )
+            with _cp_h:
+                st.markdown('<div style="margin-top:28px"></div>', unsafe_allow_html=True)
+                _ph("copy_paste_mode",
+                    "`flip` は対象を反転して貼り付け、`mixup` はブレンドして貼り付け。copy_paste > 0 のときのみ有効。",
+                    _DOC_AUG)
+        with _m4:
+            erasing = _sw("erasing（ランダム消去）", 0.0, 0.9, 0.4, step=0.05,
+                           name="erasing",
+                           desc="ランダムな矩形領域を消去する確率（Random Erasing）。オクルージョン（物体が部分的に隠れる）への耐性を向上させる。")
+
+        # ── 分類専用 ─────────────────────────────────────────────────────────
+        if _is_cls:
+            st.markdown("##### 📋 分類専用")
+            _cl1, _cl2 = st.columns(2)
+            with _cl1:
+                crop_fraction = _sw("crop_fraction（ランダムクロップ割合）",
+                                    0.1, 1.0, 1.0, step=0.05,
+                                    name="crop_fraction",
+                                    desc="分類タスク専用。画像を中心からランダムにクロップする際の最小割合。",
+                                    url=_DOC_AUG)
+            with _cl2:
+                auto_augment = _selw(
+                    "auto_augment", ["randaugment", "autoaugment", "augmix"], 0,
+                    name="auto_augment",
+                    desc="分類タスク専用の自動拡張ポリシー。`randaugment`（ランダム操作）、`autoaugment`（AutoAugment）、`augmix`（AugMix）から選択。",
+                    url=_DOC_AUG,
+                )
+        else:
+            crop_fraction = 1.0
+            auto_augment  = "randaugment"
 
     st.markdown("---")
 
@@ -1070,31 +1272,53 @@ with tab2:
             st.error(f"data.yaml が見つかりません: {yaml_p}")
         else:
             _train_kwargs: dict = {
+                # ── 基本 ──────────────────────────────────────────────────
                 "imgsz": int(imgsz),
                 "device": 0,
                 "workers": int(workers),
+                "nbs": int(nbs),
+                # ── 最適化 ────────────────────────────────────────────────
+                "optimizer": optimizer,
+                "lr0": float(lr0),
+                "lrf": float(lrf),
+                "momentum": float(momentum),
+                "warmup_epochs": float(warmup_epochs),
+                "warmup_momentum": float(warmup_momentum),
+                "warmup_bias_lr": float(warmup_bias_lr),
+                "weight_decay": float(weight_decay),
+                "dropout": float(dropout),
                 "cos_lr": cos_lr,
                 "amp": amp,
                 "cache": cache,
-                "optimizer": optimizer,
-                "lr0": float(lr0),
-                "warmup_epochs": int(warmup_epochs),
-                "weight_decay": float(weight_decay),
-                "dropout": float(dropout),
+                # ── 幾何変換 ──────────────────────────────────────────────
                 "degrees": float(degrees),
                 "scale": float(scale),
                 "translate": float(translate),
-                "fliplr": float(fliplr),
-                "flipud": float(flipud),
+                "shear": float(shear),
                 "perspective": float(perspective),
+                "flipud": float(flipud),
+                "fliplr": float(fliplr),
+                "bgr": float(bgr),
+                # ── 色調変換 ──────────────────────────────────────────────
                 "hsv_h": float(hsv_h),
                 "hsv_s": float(hsv_s),
                 "hsv_v": float(hsv_v),
+                # ── 合成拡張 ──────────────────────────────────────────────
                 "mosaic": float(mosaic),
                 "mixup": float(mixup),
+                "cutmix": float(cutmix),
                 "erasing": float(erasing),
                 "close_mosaic": int(close_mosaic),
             }
+            # セグメンテーション専用
+            if _is_seg:
+                _train_kwargs["copy_paste"] = float(copy_paste)
+                _train_kwargs["copy_paste_mode"] = copy_paste_mode
+            # 分類専用
+            if _is_cls:
+                _train_kwargs["crop_fraction"] = float(crop_fraction)
+                _train_kwargs["auto_augment"] = auto_augment
+            # 条件付き
             if patience > 0:
                 _train_kwargs["patience"] = int(patience)
             if save_period > 0:
