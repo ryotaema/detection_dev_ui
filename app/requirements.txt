@@ -9,7 +9,7 @@ streamlit==1.35.0
 ultralytics==8.4.48           # YOLO11 対応 (8.3.0以降でYOLO11追加)
 
 # --- 実験管理 ---
-clearml==1.16.2
+mlflow==2.16.2
 
 # --- アノテーション連携 (CVAT REST API) ---
 cvat-sdk==2.64.0

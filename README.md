@@ -1,6 +1,6 @@
 # detection_dev_ui — 完全ローカル完結型 画像検出パイプライン
 
-CVAT → YOLO → ClearML → FiftyOne を Docker Compose で統合した、  
+CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、  
 **ターミナル操作不要・GUI完結**の物体検出MLOpsシステムです。
 
 ---
@@ -45,9 +45,7 @@ mlops_workspace/
 | サービス | コンテナ名 | URL | 役割 |
 |---|---|---|---|
 | CVAT UI | `cvat_proxy` | http://localhost:8080 | アノテーション |
-| ClearML WebUI | `clearml_webserver` | http://localhost:8082 | 実験管理 |
-| ClearML API | `clearml_apiserver` | http://localhost:8008 | 内部API |
-| ClearML FileServer | `clearml_fileserver` | http://localhost:8081 | ファイル管理 |
+| MLflow UI | `mlflow` | http://localhost:5000 | 実験管理 |
 | Streamlit | `streamlit_app` | http://localhost:8501 | 統合UI（メイン） |
 | FiftyOne | `streamlit_app` | http://localhost:5151 | 推論結果可視化 |
 
@@ -99,8 +97,6 @@ CVAT_USERNAME=admin
 CVAT_PASSWORD=your_password_here
 CVAT_DB_PASSWORD=your_db_password_here
 CVAT_IAM_DB_PASSWORD=your_iam_db_password_here
-CLEARML_ACCESS_KEY=
-CLEARML_SECRET_KEY=
 NVIDIA_VISIBLE_DEVICES=all
 EOF
 ```
@@ -111,7 +107,7 @@ EOF
 
 ```bash
 # DB系コンテナを先に起動（初回のみ）
-docker compose up -d cvat_db cvat_redis cvat_iam_db clearml_mongo clearml_elastic clearml_redis
+docker compose up -d cvat_db cvat_redis cvat_iam_db
 sleep 30
 
 # マイグレーション実行（初回のみ）
@@ -138,8 +134,8 @@ sleep 30 && docker compose ps
 # CVAT
 curl -s http://localhost:8080/api/server/about | python3 -m json.tool | head -3
 
-# ClearML
-curl -s http://localhost:8008/debug.ping
+# MLflow
+curl -s http://localhost:5000/health
 
 # Streamlit
 curl -s -o /dev/null -w "%{http_code}" http://localhost:8501
@@ -181,7 +177,7 @@ docker compose logs -f cvat_server
    モデルサイズ（n/s/m/l/x）・エポック数・バッチサイズを設定
    「学習開始」→ バックグラウンドで実行
    → エポックごとに mAP 等のメトリクスがログに表示される
-   → ClearMLに自動でメトリクスが記録される（http://localhost:8082）
+   → MLflowに自動でメトリクスが記録される（http://localhost:5000）
 
 ④ Streamlit タブ③ で推論・可視化
    学習済みモデルを選択 →「推論実行」
@@ -245,14 +241,6 @@ docker ps --format "table {{.Names}}\t{{.Ports}}" | grep 8080
 docker compose down && docker compose up -d
 ```
 
-### Elasticsearch が起動しない（OOM エラー）
-
-```bash
-echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
-sudo sysctl -p
-docker compose restart clearml_elastic
-```
-
 ### GPU 非搭載環境で動かしたい（CPU のみ）
 
 `docker-compose.yml` の `streamlit_app` から以下のブロックを削除してください：
@@ -266,25 +254,6 @@ deploy:
         - driver: nvidia
           count: all
           capabilities: [gpu]
-```
-
----
-
-## ClearML API キーの取得（任意）
-
-ClearML に認証ありでアクセスしたい場合：
-
-1. http://localhost:8082 を開く
-2. Settings → Workspace → **Create new credentials**
-3. 表示された Access Key / Secret Key を `.env` に記入
-
-```bash
-# .env に追記
-CLEARML_ACCESS_KEY=your_access_key
-CLEARML_SECRET_KEY=your_secret_key
-
-# Streamlit コンテナを再起動して反映
-docker compose restart streamlit_app
 ```
 
 ---

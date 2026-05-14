@@ -19,10 +19,8 @@ volumes:
   cvat_iam_db:
   cvat_inmem_db:
   cvat_cache_db:
-  # ClearML 内部データ
-  clearml_mongo:
-  clearml_elastic:
-  clearml_fileserver:
+  # MLflow
+  mlflow_data:
 
 # ---------------------------------------------------------------------------
 # ネットワーク定義
@@ -31,8 +29,6 @@ networks:
   mlops_net:
     driver: bridge
   cvat_net:
-    driver: bridge
-  clearml_net:
     driver: bridge
 
 # ===========================================================================
@@ -416,108 +412,24 @@ services:
       - mlops_net
 
 # ===========================================================================
-# ClearML Server (実験管理)
+# MLflow (実験管理)
 # ===========================================================================
 
-  clearml_mongo:
-    image: mongo:8.0.15
-    container_name: clearml_mongo
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    container_name: mlflow
     restart: unless-stopped
-    volumes:
-      - clearml_mongo:/data/db
-    networks:
-      - clearml_net
-
-  clearml_elastic:
-    image: elasticsearch:8.19.9
-    container_name: clearml_elastic
-    restart: unless-stopped
-    environment:
-      - xpack.security.enabled=false
-      - discovery.type=single-node
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    volumes:
-      - clearml_elastic:/usr/share/elasticsearch/data
-    networks:
-      - clearml_net
-
-  clearml_redis:
-    image: redis:8.2.3
-    container_name: clearml_redis
-    restart: unless-stopped
-    networks:
-      - clearml_net
-
-  clearml_apiserver:
-    image: clearml/server:latest
-    container_name: clearml_apiserver
-    restart: unless-stopped
-    depends_on:
-      - clearml_mongo
-      - clearml_elastic
-      - clearml_redis
     ports:
-      - "8008:8008"  # API
-    environment:
-      CLEARML_ELASTIC_SERVICE_HOST: clearml_elastic
-      CLEARML_ELASTIC_SERVICE_PORT: 9200
-      CLEARML_MONGODB_SERVICE_HOST: clearml_mongo
-      CLEARML_MONGODB_SERVICE_PORT: 27017
-      CLEARML_REDIS_SERVICE_HOST: clearml_redis
-      CLEARML_REDIS_SERVICE_PORT: 6379
-      CLEARML__apiserver__default_company: "9eb790333f02d5c6218be9b9"
-      CLEARML__apiserver__auth__session_same_site: "None"
-      CLEARML__services__auth__csrf__trusted_origins: "http://localhost:8082,http://localhost:8080,http://localhost:8008"
-    command: apiserver
-    networks:
-      clearml_net:
-        aliases:
-          - apiserver
-      mlops_net: {}
-
-  clearml_fileserver:
-    image: clearml/server:latest
-    container_name: clearml_fileserver
-    restart: unless-stopped
-    depends_on:
-      - clearml_apiserver
-    ports:
-      - "8081:8081"  # File server
-    environment:
-      CLEARML_ELASTIC_SERVICE_HOST: clearml_elastic
-      CLEARML_MONGODB_SERVICE_HOST: clearml_mongo
-      CLEARML_REDIS_SERVICE_HOST: clearml_redis
+      - "5000:5000"   # MLflow UI → http://localhost:5000
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri /mlflow/mlruns
+      --default-artifact-root /mlflow/artifacts
     volumes:
-      - clearml_fileserver:/opt/clearml/data/fileserver
-      - ./models:/opt/clearml/data/models
-    command: fileserver
+      - mlflow_data:/mlflow
     networks:
-      clearml_net:
-        aliases:
-          - fileserver
-      mlops_net: {}
-
-  clearml_webserver:
-    image: clearml/server:latest
-    command: webserver
-    container_name: clearml_webserver
-    restart: unless-stopped
-    depends_on:
-      - clearml_apiserver
-    ports:
-      - "8082:80"   # ClearML UI → http://localhost:8082
-    environment:
-      CLEARML_API_HOST: http://clearml_apiserver:8008
-      CLEARML_FILES_HOST: http://clearml_fileserver:8081
-    networks:
-      - clearml_net
       - mlops_net
 
 # ===========================================================================
@@ -538,12 +450,8 @@ services:
       CVAT_HOST: http://cvat-server:8080
       CVAT_USERNAME: ${CVAT_USERNAME:-admin}
       CVAT_PASSWORD: ${CVAT_PASSWORD:-admin}
-      # ClearML接続情報
-      CLEARML_API_HOST: http://clearml_apiserver:8008
-      CLEARML_WEB_HOST: http://localhost:8082
-      CLEARML_FILES_HOST: http://clearml_fileserver:8081
-      CLEARML_API_ACCESS_KEY: ${CLEARML_ACCESS_KEY:-}
-      CLEARML_API_SECRET_KEY: ${CLEARML_SECRET_KEY:-}
+      # MLflow接続情報
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       # パス設定
       DATA_DIR: /workspace/data
       MODELS_DIR: /workspace/models
@@ -567,4 +475,4 @@ services:
       - mlops_net
     depends_on:
       - cvat_server
-      - clearml_apiserver
+      - mlflow

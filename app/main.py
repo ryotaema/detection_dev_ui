@@ -1,6 +1,6 @@
 # =============================================================================
 # MLOps 統合UI - main.py
-# Streamlit + CVAT API + YOLO学習 + ClearML + FiftyOne
+# Streamlit + CVAT API + YOLO学習 + MLflow + FiftyOne
 # =============================================================================
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ PREDICTIONS_DIR= Path(os.getenv("PREDICTIONS_DIR","/workspace/predictions"))
 CVAT_HOST      = os.getenv("CVAT_HOST",  "http://cvat-server:8080")
 CVAT_USER      = os.getenv("CVAT_USERNAME","admin")
 CVAT_PASS      = os.getenv("CVAT_PASSWORD","admin")
-CLEARML_API    = os.getenv("CLEARML_API_HOST","http://clearml_apiserver:8008")
-CLEARML_WEB    = os.getenv("CLEARML_WEB_HOST","http://localhost:8082")  # Fix: 8080→8082
+MLFLOW_URI     = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+MLFLOW_WEB     = os.getenv("MLFLOW_WEB_HOST", "http://localhost:5000")
 FIFTYONE_PORT  = int(os.getenv("FIFTYONE_PORT","5151"))
 
 for d in [DATA_DIR, MODELS_DIR, PREDICTIONS_DIR]:
@@ -460,30 +460,24 @@ def generate_yolo_dataset(
 
 
 # ---------------------------------------------------------------------------
-# ClearML 設定
+# MLflow 設定
 # ---------------------------------------------------------------------------
-def init_clearml(project_name: str, task_name: str):
-    """ClearML Task を初期化して返す。失敗時は None（学習は継続）。
-    バックグラウンドスレッドから呼ばれるため st.* は使用しない。
-    ACCESS_KEY が未設定の場合はスキップ（接続待ちで詰まるのを防ぐ）。
+def init_mlflow(project_name: str, run_name: str) -> bool:
+    """MLflow サーバーへの接続確認と環境変数設定。
+    Ultralytics の MLflow コールバックが自動でメトリクス・モデルを記録する。
     """
-    access_key = os.getenv("CLEARML_API_ACCESS_KEY", "").strip()
-    if not access_key:
-        print("[ClearML] ACCESS_KEY 未設定のためスキップ")
-        return None
     try:
-        from clearml import Task
-        os.environ["CLEARML_API_HOST"] = CLEARML_API
-        os.environ["CLEARML_WEB_HOST"] = CLEARML_WEB
-        task = Task.init(
-            project_name=project_name,
-            task_name=task_name,
-            reuse_last_task_id=False,
-        )
-        return task
+        import mlflow
+        mlflow.set_tracking_uri(MLFLOW_URI)
+        mlflow.tracking.MlflowClient().search_experiments()  # 接続テスト
+        os.environ["MLFLOW_TRACKING_URI"]   = MLFLOW_URI
+        os.environ["MLFLOW_EXPERIMENT_NAME"] = project_name
+        os.environ["MLFLOW_RUN"]             = run_name
+        print(f"[MLflow] 接続OK: {MLFLOW_URI} / {project_name} / {run_name}")
+        return True
     except Exception as e:
-        print(f"[ClearML] 初期化エラー（実験追跡なし）: {e}")
-        return None
+        print(f"[MLflow] 接続エラー（実験追跡なし）: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -549,18 +543,11 @@ def _train_worker(
     sys.stdout   = _StdoutCapture(_orig_stdout, _train_log_lock, _train_state)
 
     try:
-        clearml_task = init_clearml(project_name, run_name)
-        if clearml_task:
-            clearml_task.connect({
-                "model": model_name,
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "data_yaml": data_yaml,
-                **train_kwargs,
-            })
-            _log(f"[ClearML] タスク開始: {clearml_task.id}")
+        mlflow_ok = init_mlflow(project_name, run_name)
+        if mlflow_ok:
+            _log(f"[MLflow] 実験追跡: {project_name} / {run_name}")
         else:
-            _log("[ClearML] スキップ（実験追跡なし）")
+            _log("[MLflow] スキップ（実験追跡なし）")
 
         from ultralytics import YOLO
 
@@ -582,10 +569,6 @@ def _train_worker(
             _train_state["model_path"] = str(best_model)
             _train_state["progress"]   = 100
         _log(f"[完了] best.pt: {best_model}")
-
-        if clearml_task:
-            clearml_task.upload_artifact("best_model", str(best_model))
-            clearml_task.close()
 
     except Exception as e:
         _log(f"[ERROR] {e}")
@@ -809,7 +792,7 @@ st.markdown("""
     🔬 detection_dev_ui
   </h1>
   <p style="color:#4a6080; font-size:.85rem; margin:4px 0 0;">
-    CVAT → YOLO → ClearML → FiftyOne 統合ダッシュボード
+    CVAT → YOLO → MLflow → FiftyOne 統合ダッシュボード
   </p>
 </div>
 """, unsafe_allow_html=True)
@@ -834,8 +817,7 @@ with st.sidebar:
         )
 
     check_service(f"{CVAT_HOST}/api/server/about", "CVAT")
-    check_service(f"{CLEARML_API}/debug.ping", "ClearML API")
-    check_service(f"{CLEARML_WEB}", "ClearML WebUI")
+    check_service(f"{MLFLOW_URI}/health", "MLflow")
 
     st.markdown("---")
     st.markdown("#### 📁 ディレクトリ")
@@ -844,7 +826,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### 🔗 クイックリンク")
     st.markdown(f"[📝 CVAT UI]({CVAT_HOST})", unsafe_allow_html=False)
-    st.markdown(f"[📊 ClearML UI]({CLEARML_WEB})", unsafe_allow_html=False)
+    st.markdown(f"[📊 MLflow UI]({MLFLOW_WEB})", unsafe_allow_html=False)
     if st.session_state.fiftyone_port:
         fo_url = f"http://localhost:{st.session_state.fiftyone_port}"
         st.markdown(f"[🔭 FiftyOne App]({fo_url})", unsafe_allow_html=False)
@@ -1050,7 +1032,7 @@ with tab2:
 
     col_p, col_q = st.columns(2)
     with col_p:
-        clearml_project = st.text_input("ClearML プロジェクト名", value="YOLO-Detection")
+        mlflow_project = st.text_input("MLflow プロジェクト名", value="YOLO-Detection")
     with col_q:
         run_name = st.text_input(
             "ラン名",
@@ -1334,7 +1316,7 @@ with tab2:
             t = threading.Thread(
                 target=_train_worker,
                 args=(data_yaml_path, model_name, epochs, batch_size,
-                      clearml_project, run_name, _train_kwargs),
+                      mlflow_project, run_name, _train_kwargs),
                 daemon=True,
             )
             t.start()
@@ -1567,6 +1549,6 @@ with tab4:
 st.markdown("""
 <div style="border-top:1px solid #1e2330; margin-top:40px; padding-top:12px;
             text-align:center; color:#2a3a50; font-size:.75rem; font-family:'JetBrains Mono',monospace;">
-    detection_dev_ui v1.0 · CVAT · YOLO · ClearML · FiftyOne · Streamlit
+    detection_dev_ui v1.0 · CVAT · YOLO · MLflow · FiftyOne · Streamlit
 </div>
 """, unsafe_allow_html=True)
