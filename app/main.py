@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 @st.cache_resource
@@ -175,15 +176,26 @@ def get_cvat_client():
 
 def fetch_cvat_tasks() -> list[dict]:
     """CVATのタスク一覧を取得する"""
-    client = get_cvat_client()
-    if not client:
-        return []
     try:
+        client = get_cvat_client()
+        if not client:
+            return []
         tasks = client.tasks.list()
-        return [{"id": t.id, "name": t.name, "size": t.size,
-                "status": t.status} for t in tasks]
+        result = []
+        for t in tasks:
+            assignee_name = ""
+            if hasattr(t, "assignee") and t.assignee:
+                assignee_name = getattr(t.assignee, "username", "") or getattr(t.assignee, "email", "")
+            result.append({
+                "id": t.id,
+                "name": t.name,
+                "size": t.size,
+                "status": t.status,
+                "assignee": assignee_name,
+            })
+        return result
     except Exception as e:
-        st.error(f"タスク取得エラー: {e}")
+        st.error(f"CVATタスク取得エラー: {e}")
         return []
 
 
@@ -570,6 +582,26 @@ def _train_worker(
             _train_state["progress"]   = 100
         _log(f"[完了] best.pt: {best_model}")
 
+        if mlflow_ok:
+            try:
+                import mlflow
+                # Ultralytics callback がすでに run を close している場合に備えて、
+                # 最後の run を取得して model を登録する
+                runs = mlflow.search_runs(
+                    experiment_names=[project_name],
+                    filter_string=f"tags.mlflow.runName = '{run_name}'",
+                    max_results=1,
+                )
+                if not runs.empty:
+                    run_id = runs.iloc[0]["run_id"]
+                    mv = mlflow.register_model(
+                        f"runs:/{run_id}/weights",
+                        project_name,
+                    )
+                    _log(f"[MLflow] モデル登録: {project_name} v{mv.version}")
+            except Exception as e:
+                _log(f"[MLflow] モデル登録スキップ: {e}")
+
     except Exception as e:
         _log(f"[ERROR] {e}")
         with _train_log_lock:
@@ -857,30 +889,76 @@ with tab1:
     if not tasks:
         st.info("「タスク一覧を取得」ボタンを押してCVATに接続してください。")
     else:
-        task_options = {f"[{t['id']}] {t['name']} ({t['size']} items)": t["id"] for t in tasks}
-        selected_label = st.selectbox("エクスポートするタスクを選択", list(task_options.keys()))
-        selected_id = task_options[selected_label]
+        # 進捗テーブル
+        if tasks:
+            st.markdown("#### 📊 アノテーション進捗")
+            import pandas as pd
+            df = pd.DataFrame(tasks)[["id","name","status","assignee","size"]]
+            df.columns = ["ID","タスク名","ステータス","担当者","画像数"]
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.markdown("---")
 
+        # 複数タスク選択
+        task_options = {f"[{t['id']}] {t['name']} ({t['size']} items)": t["id"] for t in tasks}
+        selected_labels = st.multiselect(
+            "エクスポートするタスクを選択（複数可）",
+            list(task_options.keys()),
+            default=[list(task_options.keys())[0]] if task_options else [],
+        )
+        selected_ids = [task_options[lbl] for lbl in selected_labels]
+
+        _first_id = selected_ids[0] if selected_ids else "multi"
         export_dir_name = st.text_input(
             "エクスポート先サブディレクトリ名",
-            value=f"dataset_{selected_id}_{datetime.now():%Y%m%d}",
+            value=f"dataset_{_first_id}_{datetime.now():%Y%m%d}",
         )
 
         # ─── Step 1: CVAT for images 1.1 エクスポート ───────────────────────
         st.markdown("#### Step 1: CVATエクスポート")
         if st.button("⬇️ エクスポート実行 (CVAT for images 1.1)", type="primary",
-                     use_container_width=True):
-            out_dir = DATA_DIR / export_dir_name
-            out_dir.mkdir(parents=True, exist_ok=True)
-            with st.spinner("エクスポート中…（最大3分）"):
-                raw_dir = export_cvat_task_raw(selected_id, out_dir)
-            if raw_dir:
-                st.session_state.cvat_raw_dir = str(raw_dir)
-                st.session_state.cvat_xml_info = None
-                st.success(f"✅ エクスポート完了: `{raw_dir}`")
-                xml_info = parse_cvat_xml(raw_dir)
-                if xml_info:
-                    st.session_state.cvat_xml_info = xml_info
+                     use_container_width=True,
+                     disabled=len(selected_ids) == 0):
+            if not selected_ids:
+                st.warning("エクスポートするタスクを選択してください。")
+            else:
+                out_dir = DATA_DIR / export_dir_name
+                out_dir.mkdir(parents=True, exist_ok=True)
+                all_raw_dirs = []
+                with st.spinner("エクスポート中…（最大3分×タスク数）"):
+                    for task_id in selected_ids:
+                        task_out = out_dir / f"task_{task_id}"
+                        task_out.mkdir(parents=True, exist_ok=True)
+                        raw_dir = export_cvat_task_raw(task_id, task_out)
+                        if raw_dir:
+                            all_raw_dirs.append(raw_dir)
+                            st.success(f"✅ タスク {task_id} エクスポート完了: `{raw_dir}`")
+                        else:
+                            st.error(f"タスク {task_id} のエクスポートに失敗しました")
+
+                if all_raw_dirs:
+                    # 複数タスクの場合は最初のrawディレクトリをメインとして設定
+                    # マージ: 全rawディレクトリのXMLを統合して最初のrawを基準にする
+                    if len(all_raw_dirs) == 1:
+                        merged_raw = all_raw_dirs[0]
+                    else:
+                        import shutil as _shutil
+                        merged_raw = out_dir / "merged_raw"
+                        merged_raw.mkdir(parents=True, exist_ok=True)
+                        for src_raw in all_raw_dirs:
+                            for item in src_raw.rglob("*"):
+                                if item.is_file():
+                                    rel = item.relative_to(src_raw)
+                                    dst = merged_raw / rel
+                                    dst.parent.mkdir(parents=True, exist_ok=True)
+                                    if not dst.exists():
+                                        _shutil.copy2(item, dst)
+                        st.success(f"✅ {len(all_raw_dirs)} タスクを統合: `{merged_raw}`")
+
+                    st.session_state.cvat_raw_dir = str(merged_raw)
+                    st.session_state.cvat_xml_info = None
+                    xml_info = parse_cvat_xml(merged_raw)
+                    if xml_info:
+                        st.session_state.cvat_xml_info = xml_info
 
         # ─── Step 2: ラベル・タスク種別の設定 ───────────────────────────────
         if st.session_state.cvat_raw_dir and st.session_state.cvat_xml_info:
@@ -1337,11 +1415,41 @@ with tab2:
         prog = st.session_state.training_progress
         st.progress(prog / 100, text=f"進捗: {prog}%")
 
-        log_html = "<br>".join(st.session_state.training_log[-200:])
-        st.markdown(
-            f'<div class="log-area">{log_html}</div>',
-            unsafe_allow_html=True,
-        )
+        log_lines = st.session_state.training_log[-500:]
+        log_text_escaped = "\n".join(log_lines).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        components.html(f"""
+<style>
+  body{{margin:0;background:#0e1117;}}
+  #log-box{{
+    background:#0e1117;color:#e0e6ed;
+    font-family:'JetBrains Mono',monospace;font-size:12px;
+    height:380px;overflow-y:auto;
+    padding:12px;border:1px solid #1e2330;border-radius:8px;
+    white-space:pre-wrap;word-break:break-all;
+  }}
+</style>
+<div id="log-box">{log_text_escaped}</div>
+<script>
+  var box = document.getElementById('log-box');
+  var dist = 0;
+  try {{ dist = parseInt(window.parent.localStorage.getItem('log_dist_bottom') || '0'); }} catch(e) {{}}
+  setTimeout(function() {{
+    if (dist > 100) {{
+      box.scrollTop = box.scrollHeight - box.clientHeight - dist;
+    }} else {{
+      box.scrollTop = box.scrollHeight;
+    }}
+  }}, 0);
+  var t = null;
+  box.addEventListener('scroll', function() {{
+    clearTimeout(t);
+    t = setTimeout(function() {{
+      var d = Math.max(0, box.scrollHeight - box.scrollTop - box.clientHeight);
+      try {{ window.parent.localStorage.setItem('log_dist_bottom', d); }} catch(e) {{}}
+    }}, 100);
+  }}, {{passive:true}});
+</script>
+""", height=400)
 
         if st.session_state.training_running:
             time.sleep(2)
@@ -1353,6 +1461,20 @@ with tab2:
     # --- 完了後: モデル選択 ---
     if st.session_state.last_model_path:
         st.success(f"✅ 最新モデル: `{st.session_state.last_model_path}`")
+
+    # results.csv の可視化
+    if st.session_state.last_model_path:
+        results_csv = Path(st.session_state.last_model_path).parent.parent / "results.csv"
+        if results_csv.exists():
+            with st.expander("📈 学習メトリクス", expanded=True):
+                import pandas as pd
+                df_r = pd.read_csv(results_csv)
+                df_r.columns = [c.strip() for c in df_r.columns]
+                metric_cols = [c for c in df_r.columns
+                               if any(k in c.lower() for k in ["map","precision","recall","loss"])]
+                if metric_cols:
+                    st.line_chart(df_r[metric_cols])
+                st.dataframe(df_r.tail(5), use_container_width=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1378,7 +1500,20 @@ with tab3:
     # --- モデル確認 ---
     current_model = st.session_state.last_model_path or ""
     model_display = current_model if current_model else "（未設定）"
-    st.info(f"使用モデル: `{model_display}`\n→ タブ②で学習または既存モデルを選択してください。")
+    st.info(f"メインモデル: `{model_display}`")
+
+    # 複数モデル比較
+    _all_models = list(MODELS_DIR.rglob("*.pt"))
+    _model_map = {str(p.relative_to(MODELS_DIR)): str(p) for p in _all_models}
+    compare_mode = st.checkbox("🔀 複数モデル比較モード", value=False)
+    if compare_mode and _model_map:
+        selected_compare_models = st.multiselect(
+            "比較するモデルを選択",
+            list(_model_map.keys()),
+            default=list(_model_map.keys())[:min(2, len(_model_map))],
+        )
+    else:
+        selected_compare_models = []
 
     # --- 推論対象ディレクトリ ---
     _img_dirs = _find_image_dirs(DATA_DIR)
@@ -1407,11 +1542,47 @@ with tab3:
 
     # --- 推論実行ボタン ---
     with col_run:
+        _infer_disabled = not current_model and not (compare_mode and selected_compare_models)
         if st.button("▶ 推論実行", type="primary", use_container_width=True,
-                    disabled=not current_model):
+                    disabled=_infer_disabled):
             img_dir = Path(test_image_dir)
             if not img_dir.exists():
                 st.error(f"画像ディレクトリが存在しません: {img_dir}")
+            elif compare_mode and selected_compare_models:
+                # 複数モデル比較推論
+                compare_results = []
+                for model_rel in selected_compare_models:
+                    model_abs = _model_map[model_rel]
+                    with st.spinner(f"推論中: {model_rel}…"):
+                        saved = run_inference(
+                            model_abs,
+                            img_dir,
+                            PREDICTIONS_DIR,
+                            conf_threshold=inf_conf,
+                        )
+                    total_detections = 0
+                    total_conf = 0.0
+                    conf_count = 0
+                    for jf in saved:
+                        with open(jf) as f:
+                            pred = json.load(f)
+                        boxes = pred.get("boxes", [])
+                        total_detections += len(boxes)
+                        for b in boxes:
+                            total_conf += b.get("confidence", 0.0)
+                            conf_count += 1
+                    avg_conf = total_conf / conf_count if conf_count > 0 else 0.0
+                    compare_results.append({
+                        "モデル": model_rel,
+                        "検出数（合計）": total_detections,
+                        "平均信頼度": round(avg_conf, 4),
+                        "画像数": len(saved),
+                    })
+                if compare_results:
+                    st.success("✅ 比較推論完了")
+                    import pandas as pd
+                    df_cmp = pd.DataFrame(compare_results)
+                    st.dataframe(df_cmp, use_container_width=True, hide_index=True)
             else:
                 with st.spinner("推論中…"):
                     saved = run_inference(
@@ -1539,6 +1710,55 @@ with tab4:
             for jf in pred_files:
                 jf.unlink()
             st.success("predictions/ をクリアしました")
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### 🔀 データセット統合")
+    _ds_dirs = [d for d in sorted(DATA_DIR.iterdir()) if d.is_dir()] if DATA_DIR.exists() else []
+    _ds_names = [d.name for d in _ds_dirs]
+    if len(_ds_names) < 2:
+        st.info("統合するには2つ以上のデータセットが必要です。")
+    else:
+        merge_targets = st.multiselect("統合するデータセットを選択（2つ以上）", _ds_names)
+        merge_out_name = st.text_input("統合先ディレクトリ名", value=f"merged_{datetime.now():%Y%m%d_%H%M}")
+        if st.button("🔀 統合実行", disabled=len(merge_targets) < 2):
+            import yaml as pyyaml
+            out_dir = DATA_DIR / merge_out_name
+            all_labels: list[str] = []
+            # 各データセットからラベル収集
+            for ds_name in merge_targets:
+                src = DATA_DIR / ds_name
+                yaml_f = src / "data.yaml"
+                if yaml_f.exists():
+                    with open(yaml_f) as f:
+                        ydata = pyyaml.safe_load(f)
+                    for lbl in ydata.get("names", []):
+                        if lbl not in all_labels:
+                            all_labels.append(lbl)
+            # 画像・ラベルをコピー
+            for split in ("train", "val"):
+                for ds_name in merge_targets:
+                    src = DATA_DIR / ds_name
+                    for kind in ("images", "labels"):
+                        src_dir = src / split / kind
+                        if not src_dir.exists():
+                            continue
+                        dst_dir = out_dir / split / kind
+                        dst_dir.mkdir(parents=True, exist_ok=True)
+                        for f in src_dir.iterdir():
+                            dst = dst_dir / f"{ds_name}_{f.name}"
+                            shutil.copy2(f, dst)
+            # data.yaml 生成
+            data_yaml_content = {
+                "path": str(out_dir),
+                "train": "train/images",
+                "val": "val/images",
+                "names": all_labels,
+                "nc": len(all_labels),
+            }
+            with open(out_dir / "data.yaml", "w") as f:
+                pyyaml.dump(data_yaml_content, f, allow_unicode=True)
+            st.success(f"✅ 統合完了: `{out_dir}` (ラベル: {all_labels})")
             st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
