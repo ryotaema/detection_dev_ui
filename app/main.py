@@ -200,12 +200,13 @@ defaults = {
     "training_progress": 0,
     "training_error": None,
     "training_metrics_history": [],
+    "training_notified": True,   # True = 通知済み（新規学習開始時に False にリセット）
     "fiftyone_session": None,
     "fiftyone_port": None,
     "last_model_path": None,
     "cvat_tasks": [],
-    "cvat_xml_info": None,   # 解析済みXMLメタ情報（ラベル・アノテーション種別）
-    "cvat_raw_dir": None,    # CVATエクスポートRAWデータのディレクトリ
+    "cvat_xml_info": None,
+    "cvat_raw_dir": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -777,6 +778,7 @@ def launch_fiftyone(dataset_name: str, predictions_dir: Path) -> Optional[int]:
 # ---------------------------------------------------------------------------
 # 推論結果プレビュー描画
 # ---------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
 def _draw_predictions(json_path: Path):
     """JSONを読み込みバウンディングボックスを描画した RGB 画像配列を返す。失敗時は None。"""
     import cv2
@@ -814,6 +816,44 @@ def _draw_predictions(json_path: Path):
         return img, len(boxes), json_path.stem
     except Exception:
         return None
+
+
+def export_prediction_images(
+    out_dir: Path,
+    img_format: str = "PNG",
+    quality: int = 95,
+    target_files: Optional[list[Path]] = None,
+    progress_cb=None,
+) -> tuple[int, int]:
+    """predictions/*.json を描画済み画像として out_dir に書き出す。
+    target_files が None のときは predictions/ の全 JSON を対象とする。
+    progress_cb(current, total, filename) を渡すと処理ごとに呼ばれる。
+    Returns (成功数, スキップ数)
+    """
+    from PIL import Image as PILImage
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = ".jpg" if img_format == "JPEG" else ".png"
+    json_files = target_files if target_files else sorted(PREDICTIONS_DIR.glob("*.json"))
+    total = len(json_files)
+    success = 0
+    skipped = 0
+    for i, jf in enumerate(json_files):
+        if progress_cb:
+            progress_cb(i, total, jf.name)
+        result = _draw_predictions(jf)
+        if result is None:
+            skipped += 1
+            continue
+        img_arr, _, stem = result
+        out_path = out_dir / f"{stem}{ext}"
+        pil_img = PILImage.fromarray(img_arr)
+        if img_format == "JPEG":
+            pil_img.save(out_path, "JPEG", quality=quality)
+        else:
+            pil_img.save(out_path, "PNG")
+        success += 1
+    return success, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -883,7 +923,11 @@ def _sw(label: str, lo: float, hi: float, val: float, step: float,
     """slider + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
     c, h = st.columns([5, 1])
     with c:
-        v = st.slider(label, lo, hi, val, step=step, **kw)
+        # key= がある場合は value= を渡さない（session_state が管理するため）
+        if "key" in kw:
+            v = st.slider(label, lo, hi, step=step, **kw)
+        else:
+            v = st.slider(label, lo, hi, val, step=step, **kw)
     with h:
         st.markdown('<div style="margin-top:28px"></div>', unsafe_allow_html=True)
         _ph(name, desc, url)
@@ -895,7 +939,10 @@ def _nw(label: str, lo: float, hi: float, val: float,
     """number_input + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
     c, h = st.columns([5, 1])
     with c:
-        v = st.number_input(label, lo, hi, val, **kw)
+        if "key" in kw:
+            v = st.number_input(label, lo, hi, **kw)
+        else:
+            v = st.number_input(label, lo, hi, val, **kw)
     with h:
         st.markdown('<div style="margin-top:28px"></div>', unsafe_allow_html=True)
         _ph(name, desc, url)
@@ -907,7 +954,10 @@ def _selw(label: str, options: list, idx: int,
     """selectbox + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
     c, h = st.columns([5, 1])
     with c:
-        v = st.selectbox(label, options, index=idx, **kw)
+        if "key" in kw:
+            v = st.selectbox(label, options, **kw)
+        else:
+            v = st.selectbox(label, options, index=idx, **kw)
     with h:
         st.markdown('<div style="margin-top:28px"></div>', unsafe_allow_html=True)
         _ph(name, desc, url)
@@ -919,10 +969,145 @@ def _ckw(label: str, val: bool,
     """checkbox + ❓ popover を [5,1] カラムで横並び表示して値を返す。"""
     c, h = st.columns([5, 1])
     with c:
-        v = st.checkbox(label, value=val, **kw)
+        if "key" in kw:
+            v = st.checkbox(label, **kw)
+        else:
+            v = st.checkbox(label, value=val, **kw)
     with h:
         _ph(name, desc, url)
     return v
+
+
+# ===========================================================================
+# 学習プリセット
+# ===========================================================================
+_USER_PRESETS_FILE = MODELS_DIR / ".user_presets.json"
+
+_BUILTIN_PRESETS: dict[str, dict] = {
+    "🚫 ノーマル (augなし · yolo11s · 100ep · 640px)": {
+        "model": "yolo11s", "epochs": 100, "batch": 8,
+        "imgsz": 640, "patience": 50, "optimizer": "auto",
+        "lr0": 0.01, "cos_lr": False,
+        "warmup_epochs": 3, "dropout": 0.0, "weight_decay": 0.0005, "workers": 8,
+        "degrees": 0.0, "scale": 0.0, "fliplr": 0.0, "flipud": 0.0,
+        "translate": 0.0, "perspective": 0.0,
+        "hsv_h": 0.0, "hsv_s": 0.0, "hsv_v": 0.0,
+        "mosaic": 0.0, "mixup": 0.0, "erasing": 0.0, "close_mosaic": 0,
+    },
+    "⚡ 速度優先 (yolo11n · 50ep · 640px)": {
+        "model": "yolo11n", "epochs": 50, "batch": 16,
+        "imgsz": 640, "patience": 20, "optimizer": "SGD",
+        "lr0": 0.01, "cos_lr": False,
+        "mosaic": 0.5, "close_mosaic": 5, "scale": 0.5, "fliplr": 0.5,
+    },
+    "⚖️ バランス型 (yolo11s · 100ep · 640px)": {
+        "model": "yolo11s", "epochs": 100, "batch": 16,
+        "imgsz": 640, "patience": 30, "optimizer": "auto",
+        "lr0": 0.01, "cos_lr": False,
+        "mosaic": 1.0, "close_mosaic": 10, "scale": 0.5, "fliplr": 0.5,
+    },
+    "🎯 精度優先 (yolo11l · 200ep · 640px)": {
+        "model": "yolo11l", "epochs": 200, "batch": 8,
+        "imgsz": 640, "patience": 50, "optimizer": "AdamW",
+        "lr0": 0.001, "cos_lr": True,
+        "mosaic": 1.0, "close_mosaic": 15, "scale": 0.5, "fliplr": 0.5,
+    },
+    "🔍 小物体向け (yolo11m · 150ep · 640px)": {
+        "model": "yolo11m", "epochs": 150, "batch": 8,
+        "imgsz": 640, "patience": 30, "optimizer": "AdamW",
+        "lr0": 0.001, "cos_lr": True,
+        "mosaic": 1.0, "close_mosaic": 10, "scale": 0.3, "fliplr": 0.5,
+    },
+    "🤖 ロボット視点 (yolo11x · 2000ep · 640px)": {
+        "model": "yolo11x", "epochs": 2000, "batch": 8,
+        "imgsz": 640, "patience": 50, "optimizer": "auto",
+        "lr0": 0.001, "cos_lr": True,
+        "warmup_epochs": 10, "dropout": 0.1, "weight_decay": 0.0005, "workers": 8,
+        "degrees": 60.0, "scale": 0.5, "fliplr": 0.5, "flipud": 0.1,
+        "translate": 0.2, "perspective": 0.0005,
+        "hsv_h": 0.02, "hsv_s": 0.7, "hsv_v": 0.7,
+        "mosaic": 1.0, "mixup": 0.15, "erasing": 0.2, "close_mosaic": 30,
+    },
+}
+
+_MODEL_OPTS = [
+    "yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x",
+    "yolo11n-seg", "yolo11s-seg", "yolo11m-seg", "yolo11l-seg", "yolo11x-seg",
+    "yolo11n-pose", "yolo11s-pose", "yolo11m-pose", "yolo11l-pose", "yolo11x-pose",
+    "カスタム入力",
+]
+
+
+def _load_user_presets() -> dict:
+    try:
+        if _USER_PRESETS_FILE.exists():
+            return json.loads(_USER_PRESETS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_user_presets(presets: dict) -> None:
+    _USER_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _USER_PRESETS_FILE.write_text(
+        json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+_PRESET_KEYS: dict[str, tuple] = {
+    # (session_state_key, type, default)
+    "model":        ("tp_model",        str,   "yolo11s"),
+    "epochs":       ("tp_epochs",       int,   100),
+    "batch":        ("tp_batch",        int,   8),
+    "imgsz":        ("tp_imgsz",        int,   640),
+    "patience":     ("tp_patience",     int,   50),
+    "optimizer":    ("tp_optimizer",    str,   "auto"),
+    "lr0":          ("tp_lr0",          float, 0.01),
+    "cos_lr":       ("tp_cos_lr",       bool,  False),
+    "warmup_epochs":("tp_warmup_epochs",int,   3),
+    "dropout":      ("tp_dropout",      float, 0.0),
+    "weight_decay": ("tp_weight_decay", float, 0.0005),
+    "workers":      ("tp_workers",      int,   8),
+    "degrees":      ("tp_degrees",      float, 0.0),
+    "scale":        ("tp_scale",        float, 0.5),
+    "fliplr":       ("tp_fliplr",       float, 0.5),
+    "flipud":       ("tp_flipud",       float, 0.0),
+    "translate":    ("tp_translate",    float, 0.1),
+    "perspective":  ("tp_perspective",  float, 0.0),
+    "hsv_h":        ("tp_hsv_h",        float, 0.015),
+    "hsv_s":        ("tp_hsv_s",        float, 0.7),
+    "hsv_v":        ("tp_hsv_v",        float, 0.4),
+    "mosaic":       ("tp_mosaic",       float, 1.0),
+    "mixup":        ("tp_mixup",        float, 0.0),
+    "erasing":      ("tp_erasing",      float, 0.4),
+    "close_mosaic": ("tp_close_mosaic", int,   10),
+}
+
+# _PRESET_KEYS のデフォルト値を session_state に事前登録（ウィジェット初回表示用）
+for _pk, (_pk_ss, _pk_typ, _pk_def) in _PRESET_KEYS.items():
+    if _pk_ss not in st.session_state:
+        st.session_state[_pk_ss] = _pk_def
+
+
+def _apply_preset(params: dict) -> None:
+    """プリセット値をセッションステート（widget key）に書き込む。"""
+    for k, v in params.items():
+        if k not in _PRESET_KEYS:
+            continue
+        ss_key, typ, _ = _PRESET_KEYS[k]
+        if k == "model":
+            if v in _MODEL_OPTS:
+                st.session_state[ss_key] = v
+        else:
+            st.session_state[ss_key] = typ(v)
+
+
+def _collect_current_params() -> dict:
+    """現在のウィジェット値からプリセット保存用 dict を生成する。"""
+    result = {}
+    for k, (ss_key, typ, default) in _PRESET_KEYS.items():
+        result[k] = typ(st.session_state.get(ss_key, default))
+    return result
 
 
 # ===========================================================================
@@ -1219,6 +1404,65 @@ with tab1:
             else:
                 st.error(f"ディレクトリが存在しません: {raw_p}")
 
+    with st.expander("📁 ローカルからデータを直接追加（CVATなし）"):
+        import io as _io_ul
+        st.caption(
+            "CVATを経由せず、手元の画像やYOLOデータセットZIPを直接 data/ に追加します。"
+        )
+        _ul_mode = st.radio(
+            "アップロード形式",
+            ["🗜 ZIPファイル（YOLOデータセット）", "🖼 画像ファイル（複数可）"],
+            horizontal=True,
+            key="ul_mode",
+        )
+        _ul_dir_name = st.text_input(
+            "保存先ディレクトリ名（data/ 以下に作成）",
+            value=f"upload_{datetime.now():%Y%m%d_%H%M}",
+            key="ul_dir_name",
+        )
+
+        if _ul_mode == "🗜 ZIPファイル（YOLOデータセット）":
+            _ul_zip = st.file_uploader(
+                "YOLOデータセット ZIP（images/, labels/, data.yaml を含む）",
+                type=["zip"],
+                key="ul_zip",
+            )
+            if _ul_zip:
+                st.caption(f"選択中: {_ul_zip.name}  ({_ul_zip.size / 1024 / 1024:.1f} MB)")
+                if st.button("📤 展開して data/ に保存", key="ul_zip_btn",
+                             type="primary", use_container_width=True):
+                    _ul_out = DATA_DIR / _ul_dir_name
+                    _ul_out.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(_io_ul.BytesIO(_ul_zip.read()), "r") as _zf:
+                        _zf.extractall(_ul_out)
+                    st.success(f"✅ 展開完了: `{_ul_out}`")
+                    _ul_yamls = list(_ul_out.rglob("data.yaml"))
+                    if _ul_yamls:
+                        st.info(f"🗂 data.yaml: `{_ul_yamls[0]}`")
+                    else:
+                        st.warning("data.yaml が見つかりません。Step2で手動入力が必要です。")
+        else:
+            _ul_imgs = st.file_uploader(
+                "画像ファイル（複数選択可）",
+                type=["jpg", "jpeg", "png", "bmp", "tiff"],
+                accept_multiple_files=True,
+                key="ul_imgs",
+            )
+            _ul_split = st.radio(
+                "保存先スプリット", ["train", "val"], horizontal=True, key="ul_split"
+            )
+            if _ul_imgs:
+                st.caption(f"選択中: {len(_ul_imgs)} ファイル")
+                _ul_dst_preview = f"data/{_ul_dir_name}/images/{_ul_split}/"
+                if st.button(f"📤 {_ul_dst_preview} に保存", key="ul_imgs_btn",
+                             type="primary", use_container_width=True):
+                    _ul_out = DATA_DIR / _ul_dir_name / "images" / _ul_split
+                    _ul_out.mkdir(parents=True, exist_ok=True)
+                    for _f in _ul_imgs:
+                        (_ul_out / _f.name).write_bytes(_f.getbuffer())
+                    st.success(f"✅ {len(_ul_imgs)} ファイルを保存: `{_ul_out}`")
+                    st.info("アノテーションを付与する場合は CVATにアップロード後、Step1からエクスポートしてください。")
+
 
 # ===========================================================================
 # タブ2: YOLO 学習
@@ -1235,25 +1479,169 @@ with tab2:
 </div>""", unsafe_allow_html=True)
     st.markdown('<div class="pipeline-card"><h3>🚀 YOLO 学習設定</h3>', unsafe_allow_html=True)
 
+    # ── プリセット ───────────────────────────────────────────────────────────
+    _user_presets  = _load_user_presets()
+    _all_presets   = {**_BUILTIN_PRESETS,
+                      **{f"👤 {k}": v for k, v in _user_presets.items()}}
+    _PRESET_NONE   = "（選択してください）"
+
+    st.markdown("##### 📋 学習プリセット")
+    _pr1, _pr2, _pr3 = st.columns([4, 1, 2])
+    with _pr1:
+        _preset_sel = st.selectbox(
+            "プリセット",
+            [_PRESET_NONE] + list(_all_presets.keys()),
+            key="preset_sel",
+            label_visibility="collapsed",
+        )
+    with _pr2:
+        if st.button("▶ 適用", key="preset_apply", use_container_width=True,
+                     disabled=(_preset_sel == _PRESET_NONE)):
+            _apply_preset(_all_presets[_preset_sel])
+    with _pr3:
+        if st.button("💾 現在の設定を保存", key="preset_save_btn", use_container_width=True):
+            st.session_state["preset_save_mode"] = True
+
+    if st.session_state.get("preset_save_mode", False):
+        with st.container(border=True):
+            st.caption("保存するプリセット名を入力してください")
+            _sv1, _sv2, _sv3 = st.columns([4, 1, 1])
+            with _sv1:
+                _new_pname = st.text_input(
+                    "プリセット名", key="preset_new_name",
+                    placeholder="例: ペッパー物体検出用", label_visibility="collapsed",
+                )
+            with _sv2:
+                if st.button("✅ 保存", key="preset_save_confirm", use_container_width=True):
+                    if _new_pname.strip():
+                        _ups = _load_user_presets()
+                        _ups[_new_pname.strip()] = _collect_current_params()
+                        _save_user_presets(_ups)
+                        st.session_state["preset_save_mode"] = False
+                        st.toast(f"✅ プリセット「{_new_pname.strip()}」を保存しました", icon="💾")
+                        st.rerun()
+                    else:
+                        st.warning("プリセット名を入力してください")
+            with _sv3:
+                if st.button("✕ キャンセル", key="preset_save_cancel", use_container_width=True):
+                    st.session_state["preset_save_mode"] = False
+                    st.rerun()
+
+    if _user_presets:
+        with st.expander("🗂 ユーザープリセット管理"):
+            _editing = st.session_state.get("preset_editing_name", None)
+
+            for _uname, _uparams in list(_user_presets.items()):
+                st.markdown(f"**{_uname}**")
+                _up1, _up2, _up3, _up4 = st.columns([1, 1, 1, 1])
+                _param_summary = (
+                    f"`{_uparams.get('model','?')} · {_uparams.get('epochs','?')}ep · "
+                    f"{_uparams.get('imgsz','?')}px`"
+                )
+                st.caption(_param_summary)
+                with _up1:
+                    if st.button("▶ 適用", key=f"upr_apply_{_uname}", use_container_width=True):
+                        _apply_preset(_uparams)
+                with _up2:
+                    if st.button("✏️ 編集", key=f"upr_edit_{_uname}", use_container_width=True):
+                        st.session_state["preset_editing_name"] = _uname
+                        st.session_state["preset_editing_vals"] = dict(_uparams)
+                        st.rerun()
+                with _up3:
+                    if st.button("🗑 削除", key=f"upr_del_{_uname}", use_container_width=True):
+                        _ups = _load_user_presets()
+                        _ups.pop(_uname, None)
+                        _save_user_presets(_ups)
+                        if st.session_state.get("preset_editing_name") == _uname:
+                            st.session_state.pop("preset_editing_name", None)
+                            st.session_state.pop("preset_editing_vals", None)
+                        st.rerun()
+                st.markdown("---")
+
+            # ── 編集フォーム ──────────────────────────────────────────────────
+            if _editing and _editing in _user_presets:
+                _ev = st.session_state.get("preset_editing_vals", {})
+                st.markdown(f"#### ✏️ 編集中: **{_editing}**")
+                _OPTS_OPT = ["auto","SGD","Adam","AdamW","NAdam","RAdam"]
+                _ef1, _ef2, _ef3 = st.columns(3)
+                with _ef1:
+                    _ev["model"]   = st.selectbox("モデル", _MODEL_OPTS,
+                        index=_MODEL_OPTS.index(_ev.get("model","yolo11s")) if _ev.get("model","yolo11s") in _MODEL_OPTS else 1,
+                        key="pe_model")
+                    _ev["epochs"]  = st.number_input("エポック数", 1, 5000, int(_ev.get("epochs",100)), step=10, key="pe_epochs")
+                    _ev["batch"]   = st.select_slider("バッチサイズ", [-1,4,8,16,32,64,128],
+                        value=_ev.get("batch",8), key="pe_batch")
+                with _ef2:
+                    _ev["imgsz"]   = st.select_slider("imgsz", [320,416,512,640,768,1024,1280],
+                        value=int(_ev.get("imgsz",640)) if int(_ev.get("imgsz",640)) in [320,416,512,640,768,1024,1280] else 640,
+                        key="pe_imgsz")
+                    _ev["patience"]= st.number_input("patience", 0, 1000, int(_ev.get("patience",50)), step=10, key="pe_patience")
+                    _ev["optimizer"]= st.selectbox("optimizer", _OPTS_OPT,
+                        index=_OPTS_OPT.index(_ev.get("optimizer","auto")) if _ev.get("optimizer","auto") in _OPTS_OPT else 0,
+                        key="pe_optimizer")
+                with _ef3:
+                    _ev["lr0"]     = st.number_input("lr0", 1e-5, 1.0, float(_ev.get("lr0",0.01)), format="%.5f", step=0.001, key="pe_lr0")
+                    _ev["cos_lr"]  = st.checkbox("cos_lr", value=bool(_ev.get("cos_lr",False)), key="pe_cos_lr")
+                    _ev["warmup_epochs"] = st.number_input("warmup_epochs", 0, 50, int(_ev.get("warmup_epochs",3)), key="pe_warmup")
+                    _ev["dropout"] = st.slider("dropout", 0.0, 0.5, float(_ev.get("dropout",0.0)), step=0.05, key="pe_dropout")
+
+                st.markdown("**拡張設定**")
+                _ea1, _ea2, _ea3 = st.columns(3)
+                with _ea1:
+                    _ev["degrees"]  = st.slider("degrees", 0.0, 180.0, float(_ev.get("degrees",0.0)), step=1.0, key="pe_degrees")
+                    _ev["scale"]    = st.slider("scale", 0.0, 0.9, float(_ev.get("scale",0.5)), step=0.05, key="pe_scale")
+                    _ev["mosaic"]   = st.slider("mosaic", 0.0, 1.0, float(_ev.get("mosaic",1.0)), step=0.05, key="pe_mosaic")
+                with _ea2:
+                    _ev["fliplr"]   = st.slider("fliplr", 0.0, 1.0, float(_ev.get("fliplr",0.5)), step=0.05, key="pe_fliplr")
+                    _ev["flipud"]   = st.slider("flipud", 0.0, 1.0, float(_ev.get("flipud",0.0)), step=0.05, key="pe_flipud")
+                    _ev["mixup"]    = st.slider("mixup", 0.0, 1.0, float(_ev.get("mixup",0.0)), step=0.05, key="pe_mixup")
+                with _ea3:
+                    _ev["hsv_h"]    = st.slider("hsv_h", 0.0, 0.1, float(_ev.get("hsv_h",0.015)), step=0.005, key="pe_hsv_h")
+                    _ev["hsv_s"]    = st.slider("hsv_s", 0.0, 1.0, float(_ev.get("hsv_s",0.7)), step=0.05, key="pe_hsv_s")
+                    _ev["hsv_v"]    = st.slider("hsv_v", 0.0, 1.0, float(_ev.get("hsv_v",0.4)), step=0.05, key="pe_hsv_v")
+                _eb1, _eb2, _eb3 = st.columns(3)
+                with _eb1:
+                    _ev["translate"]  = st.slider("translate", 0.0, 0.9, float(_ev.get("translate",0.1)), step=0.05, key="pe_translate")
+                with _eb2:
+                    _ev["erasing"]    = st.slider("erasing", 0.0, 0.9, float(_ev.get("erasing",0.4)), step=0.05, key="pe_erasing")
+                with _eb3:
+                    _ev["close_mosaic"]= st.number_input("close_mosaic", 0, 200, int(_ev.get("close_mosaic",10)), step=5, key="pe_close")
+
+                _ec1, _ec2 = st.columns(2)
+                with _ec1:
+                    if st.button("✅ 変更を保存", key="pe_save", use_container_width=True, type="primary"):
+                        _ups = _load_user_presets()
+                        _ups[_editing] = dict(_ev)
+                        _save_user_presets(_ups)
+                        st.session_state.pop("preset_editing_name", None)
+                        st.session_state.pop("preset_editing_vals", None)
+                        st.toast(f"✅ プリセット「{_editing}」を更新しました", icon="💾")
+                        st.rerun()
+                with _ec2:
+                    if st.button("✕ キャンセル", key="pe_cancel", use_container_width=True):
+                        st.session_state.pop("preset_editing_name", None)
+                        st.session_state.pop("preset_editing_vals", None)
+                        st.rerun()
+
+    st.markdown("---")
+
     # ── 基本設定 ────────────────────────────────────────────────────────────
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         _model_preset = st.selectbox(
             "モデル",
-            ["yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x",
-             "yolo11n-seg", "yolo11s-seg", "yolo11m-seg", "yolo11l-seg", "yolo11x-seg",
-             "yolo11n-pose", "yolo11s-pose", "yolo11m-pose", "yolo11l-pose", "yolo11x-pose",
-             "カスタム入力"],
-            index=1,
+            _MODEL_OPTS,
+            key="tp_model",
         )
     with col_b:
-        epochs = st.number_input("エポック数", min_value=1, max_value=5000, value=100, step=10)
+        epochs = st.number_input("エポック数", min_value=1, max_value=5000, step=10,
+                                 key="tp_epochs")
     with col_c:
         batch_size = st.select_slider(
             "バッチサイズ",
             options=[-1, 4, 8, 16, 32, 64, 128],
-            value=8,
             help="-1 = AutoBatch",
+            key="tp_batch",
         )
 
     if _model_preset == "カスタム入力":
@@ -1300,36 +1688,36 @@ with tab2:
         _oc1, _oc2, _oc3, _oc4 = st.columns(4)
         with _oc1:
             imgsz       = _nw("imgsz", 128, 1280, 640, step=32,
-                               name="imgsz",
+                               name="imgsz", key="tp_imgsz",
                                desc="学習・推論時の画像サイズ（ピクセル）。大きいほど精度が上がるが計算コストが増加する。")
             patience    = _nw("patience（0=無効）", 0, 1000, 50, step=10,
-                               name="patience",
+                               name="patience", key="tp_patience",
                                desc="EarlyStopping の待機エポック数。N エポック間 val metrics が改善しなければ自動終了。0 で無効。")
             save_period = _nw("save_period（0=無効）", 0, 500, 0, step=10,
                                name="save_period",
                                desc="N エポックごとにチェックポイントを保存する間隔。0 で無効。長期学習での途中確認に便利。")
             workers     = _nw("workers", 0, 32, 8, step=1,
-                               name="workers",
+                               name="workers", key="tp_workers",
                                desc="DataLoader の CPU ワーカースレッド数。多すぎるとメモリ不足になることがある。")
         with _oc2:
             optimizer   = _selw("optimizer", ["auto","SGD","Adam","AdamW","NAdam","RAdam"], 0,
-                                 name="optimizer",
+                                 name="optimizer", key="tp_optimizer",
                                  desc="`auto` はモデルに応じて自動選択。細かく制御する場合は SGD または AdamW 推奨。")
             lr0         = _nw("lr0（初期学習率）", 1e-5, 1.0, 0.01, format="%.5f", step=0.001,
-                               name="lr0",
+                               name="lr0", key="tp_lr0",
                                desc="初期学習率。SGD では 0.01、Adam/AdamW では 0.001 が一般的な推奨値。")
             lrf         = _nw("lrf（最終LR係数）", 1e-4, 1.0, 0.01, format="%.4f", step=0.001,
                                name="lrf",
                                desc="学習率スケジューラの終端係数。最終学習率 = `lr0 × lrf`。")
             cos_lr      = _ckw("cos_lr（コサイン学習率）", False,
-                                name="cos_lr",
+                                name="cos_lr", key="tp_cos_lr",
                                 desc="True でコサイン学習率スケジューラを使用。学習後半を滑らかに減衰させる。")
         with _oc3:
             momentum    = _nw("momentum（SGD/Adam β1）", 0.5, 0.999, 0.937, format="%.3f", step=0.01,
                                name="momentum",
                                desc="SGD のモメンタム係数、または Adam 系の β1 パラメータ。")
             warmup_epochs = _nw("warmup_epochs", 0, 50, 3, step=1,
-                                 name="warmup_epochs",
+                                 name="warmup_epochs", key="tp_warmup_epochs",
                                  desc="ウォームアップのエポック数。最初の N エポックで学習率を 0 から lr0 まで徐々に増加させる。")
             warmup_momentum = _nw("warmup_momentum", 0.0, 1.0, 0.8, format="%.2f", step=0.05,
                                    name="warmup_momentum",
@@ -1339,10 +1727,10 @@ with tab2:
                                    desc="ウォームアップ中のバイアス層の学習率。")
         with _oc4:
             weight_decay = _nw("weight_decay", 0.0, 0.01, 0.0005, format="%.5f", step=0.0001,
-                                name="weight_decay",
+                                name="weight_decay", key="tp_weight_decay",
                                 desc="L2 正則化（重み減衰）の強度。過学習の抑制に効果的。")
             dropout      = _sw("dropout", 0.0, 0.5, 0.0, step=0.05,
-                                name="dropout",
+                                name="dropout", key="tp_dropout",
                                 desc="Dropout の確率。0 で無効。学習時にランダムにユニットを無効化して汎化性を高める。",
                                 url=_DOC_TRAIN)
             nbs          = _nw("nbs（損失正規化基準バッチ）", 1, 256, 64, step=8,
@@ -1374,7 +1762,7 @@ with tab2:
         _g1, _g2, _g3, _g4 = st.columns(4)
         with _g1:
             degrees = _sw("degrees（回転 ±°）", 0.0, 180.0, 0.0, step=1.0,
-                           name="degrees",
+                           name="degrees", key="tp_degrees",
                            desc="画像をランダムに回転させる角度範囲（±degrees°）。0 で無効。ロボット視点など姿勢が変化する環境で有効。",
                            disabled=not _has_box)
             shear   = _sw("shear（せん断 ±°）", 0.0, 10.0, 0.0, step=0.5,
@@ -1383,24 +1771,24 @@ with tab2:
                            disabled=not _has_box)
         with _g2:
             scale     = _sw("scale（拡大縮小）", 0.0, 0.9, 0.5, step=0.05,
-                             name="scale",
+                             name="scale", key="tp_scale",
                              desc="ランダムスケーリングの変化幅。0.5 なら画像サイズが ×0.5〜×1.5 の範囲で変化。距離・解像度の変動に対応。",
                              disabled=not _has_box)
             translate = _sw("translate（平行移動）", 0.0, 0.9, 0.1, step=0.05,
-                             name="translate",
+                             name="translate", key="tp_translate",
                              desc="水平・垂直方向の平行移動量（画像サイズ比）。物体が画像端にある場合への対応。",
                              disabled=not _has_box)
         with _g3:
             fliplr = _sw("fliplr（左右反転）", 0.0, 1.0, 0.5, step=0.05,
-                          name="fliplr",
+                          name="fliplr", key="tp_fliplr",
                           desc="水平（左右）反転の確率。文字・数字など向きが意味を持つタスクでは 0.0 を推奨。")
             flipud = _sw("flipud（上下反転）", 0.0, 1.0, 0.0, step=0.05,
-                          name="flipud",
+                          name="flipud", key="tp_flipud",
                           desc="垂直（上下）反転の確率。重力方向が重要なタスクでは 0.0 を推奨。")
         with _g4:
             perspective = _nw("perspective（透視変換）", 0.0, 0.001, 0.0,
                                format="%.4f", step=0.0001,
-                               name="perspective",
+                               name="perspective", key="tp_perspective",
                                desc="透視投影変換の強度（0〜0.001 程度）。平面を斜めから見たような 3D 的歪みを追加。",
                                url=_DOC_AUG, disabled=not _has_box)
             bgr = _sw("bgr（BGR↔RGB 反転確率）", 0.0, 1.0, 0.0, step=0.05,
@@ -1412,15 +1800,15 @@ with tab2:
         _c1, _c2, _c3 = st.columns(3)
         with _c1:
             hsv_h = _sw("hsv_h（色相変動）", 0.0, 0.10, 0.015, step=0.005,
-                         name="hsv_h",
+                         name="hsv_h", key="tp_hsv_h",
                          desc="HSV 色空間の色相（Hue）の変動量。照明条件の変化や異なる色帯域への汎化に効果的。")
         with _c2:
             hsv_s = _sw("hsv_s（彩度変動）", 0.0, 1.0, 0.7, step=0.05,
-                         name="hsv_s",
+                         name="hsv_s", key="tp_hsv_s",
                          desc="HSV 色空間の彩度（Saturation）の変動量。色の鮮やかさをランダムに変化させる。")
         with _c3:
             hsv_v = _sw("hsv_v（明度変動）", 0.0, 1.0, 0.4, step=0.05,
-                         name="hsv_v",
+                         name="hsv_v", key="tp_hsv_v",
                          desc="HSV 色空間の明度（Value）の変動量。屋内外の照明差や露出変化に対応させる。")
 
         # ── 合成拡張 ─────────────────────────────────────────────────────────
@@ -1429,16 +1817,16 @@ with tab2:
         with _m1:
             mosaic = _sw("mosaic（4 画像合成）", 0.0, 1.0,
                           1.0 if _has_box else 0.0, step=0.05,
-                          name="mosaic",
+                          name="mosaic", key="tp_mosaic",
                           desc="4 枚の画像をランダムにモザイク結合する確率。小物体の検出精度向上に非常に効果的。detect/segment/pose 向け。",
                           disabled=not _has_box)
             close_mosaic = _nw("close_mosaic（終盤N エポックOFF）", 0, 200, 10, step=5,
-                                name="close_mosaic",
+                                name="close_mosaic", key="tp_close_mosaic",
                                 desc="最後の N エポックでモザイク拡張を OFF にする。学習終盤に拡張なしの本来の分布で収束させ精度を安定させる。",
                                 url=_DOC_AUG, disabled=not _has_box)
         with _m2:
             mixup  = _sw("mixup", 0.0, 1.0, 0.0, step=0.05,
-                          name="mixup",
+                          name="mixup", key="tp_mixup",
                           desc="2 枚の画像とラベルを α ブレンドで混合する確率。クラス境界付近の汎化性向上に有効。detect/segment 向け。",
                           disabled=not _has_box)
             cutmix = _sw("cutmix", 0.0, 1.0, 0.0, step=0.05,
@@ -1463,7 +1851,7 @@ with tab2:
                     _DOC_AUG)
         with _m4:
             erasing = _sw("erasing（ランダム消去）", 0.0, 0.9, 0.4, step=0.05,
-                           name="erasing",
+                           name="erasing", key="tp_erasing",
                            desc="ランダムな矩形領域を消去する確率（Random Erasing）。オクルージョン（物体が部分的に隠れる）への耐性を向上させる。")
 
         # ── 分類専用 ─────────────────────────────────────────────────────────
@@ -1577,6 +1965,7 @@ with tab2:
                 daemon=True,
             )
             t.start()
+            st.session_state.training_notified = False   # 新規学習開始 → 通知リセット
             st.rerun()
 
     # --- _train_state → st.session_state に同期 ---
@@ -1590,12 +1979,20 @@ with tab2:
         if _train_state["model_path"]:
             st.session_state.last_model_path = _train_state["model_path"]
 
+    # --- 学習完了トースト（1回だけ） ---
+    if (st.session_state.training_progress == 100
+            and not st.session_state.training_running
+            and not st.session_state.training_notified):
+        st.toast("🎉 学習が完了しました！", icon="✅")
+        st.balloons()
+        st.session_state.training_notified = True
+
     # --- 進捗表示 ---
-    if st.session_state.training_running or st.session_state.training_progress > 0:
+    if st.session_state.training_running:
+        # ── 学習中: プログレスバー＋リアルタイムグラフ＋自動スクロールログ ──
         prog = st.session_state.training_progress
         st.progress(prog / 100, text=f"進捗: {prog}%")
 
-        # リアルタイムグラフ
         _mh = st.session_state.training_metrics_history
         if _mh:
             import pandas as pd
@@ -1645,9 +2042,23 @@ with tab2:
 </script>
 """, height=400)
 
-        if st.session_state.training_running:
-            time.sleep(2)
-            st.rerun()
+        time.sleep(2)
+        st.rerun()
+
+    elif st.session_state.training_progress == 100:
+        # ── 学習完了: プログレスバー＋ログ（expander / 静的表示） ──
+        st.progress(1.0, text="進捗: 100% — 完了")
+        if st.session_state.training_log:
+            with st.expander("📋 学習ログ（完了）", expanded=False):
+                st.text("\n".join(st.session_state.training_log[-500:]))
+
+    elif st.session_state.training_progress > 0:
+        # ── 途中停止: 止まった時点のプログレスバー＋ログ ──
+        prog = st.session_state.training_progress
+        st.progress(prog / 100, text=f"進捗: {prog}% — 停止")
+        if st.session_state.training_log:
+            with st.expander("📋 学習ログ（停止時点）", expanded=False):
+                st.text("\n".join(st.session_state.training_log[-500:]))
 
     if st.session_state.training_error:
         st.error(f"学習エラー: {st.session_state.training_error}")
@@ -1726,26 +2137,56 @@ with tab3:
     else:
         selected_compare_models = []
 
-    # --- 推論対象ディレクトリ ---
-    _img_dirs = _find_image_dirs(DATA_DIR)
-    _dir_labels = [str(d.relative_to(DATA_DIR)) for d in _img_dirs]
-    _MANUAL = "（手動入力）"
-    _dir_options = _dir_labels + [_MANUAL]
-
-    _sel = st.selectbox(
-        "テスト画像ディレクトリを選択",
-        _dir_options,
-        index=0 if _dir_labels else len(_dir_options) - 1,
-        help=f"スキャン元: {DATA_DIR}",
+    # --- 推論対象ソース ---
+    _infer_src = st.radio(
+        "推論対象ソース",
+        ["📂 data/ のディレクトリ", "📤 画像をアップロード"],
+        horizontal=True,
+        key="infer_src_mode",
     )
-    if _sel == _MANUAL:
-        test_image_dir = st.text_input(
-            "パスを直接入力 (コンテナ内絶対パス)",
-            value=str(DATA_DIR / "test/images"),
+
+    if _infer_src == "📤 画像をアップロード":
+        import io as _io_infer
+        _infer_files = st.file_uploader(
+            "推論したい画像ファイル（複数選択可）",
+            type=["jpg", "jpeg", "png", "bmp", "tiff"],
+            accept_multiple_files=True,
+            key="infer_upload_files",
         )
+        if _infer_files:
+            st.caption(f"✅ {len(_infer_files)} ファイル選択中")
+            _tmp_infer = PREDICTIONS_DIR / "_tmp_uploads"
+            _tmp_infer.mkdir(exist_ok=True)
+            _cur_names = {f.name for f in _infer_files}
+            _saved_names = {f.name for f in _tmp_infer.iterdir() if f.is_file()}
+            if _cur_names != _saved_names:
+                for _tf in list(_tmp_infer.iterdir()):
+                    _tf.unlink()
+                for _f in _infer_files:
+                    (_tmp_infer / _f.name).write_bytes(_f.getbuffer())
+            test_image_dir = str(_tmp_infer)
+        else:
+            test_image_dir = ""
     else:
-        test_image_dir = str(DATA_DIR / _sel)
-        st.code(test_image_dir, language="text")
+        _img_dirs = _find_image_dirs(DATA_DIR)
+        _dir_labels = [str(d.relative_to(DATA_DIR)) for d in _img_dirs]
+        _MANUAL = "（手動入力）"
+        _dir_options = _dir_labels + [_MANUAL]
+
+        _sel = st.selectbox(
+            "テスト画像ディレクトリを選択",
+            _dir_options,
+            index=0 if _dir_labels else len(_dir_options) - 1,
+            help=f"スキャン元: {DATA_DIR}",
+        )
+        if _sel == _MANUAL:
+            test_image_dir = st.text_input(
+                "パスを直接入力 (コンテナ内絶対パス)",
+                value=str(DATA_DIR / "test/images"),
+            )
+        else:
+            test_image_dir = str(DATA_DIR / _sel)
+            st.code(test_image_dir, language="text")
 
     inf_conf = st.slider("確信度しきい値", 0.05, 0.95, 0.25, step=0.05, key="inf_conf")
 
@@ -1753,7 +2194,10 @@ with tab3:
 
     # --- 推論実行ボタン ---
     with col_run:
-        _infer_disabled = not current_model and not (compare_mode and selected_compare_models)
+        _infer_disabled = (
+            (not current_model and not (compare_mode and selected_compare_models))
+            or not test_image_dir
+        )
         if st.button("▶ 推論実行", type="primary", use_container_width=True,
                     disabled=_infer_disabled):
             img_dir = Path(test_image_dir)
@@ -1857,6 +2301,212 @@ with tab3:
         if len(_pred_jsons) > 9:
             st.caption(f"（他 {len(_pred_jsons) - 9} 件は省略。全件は下の一覧から確認）")
 
+    # --- 推論結果 画像エクスポート ---
+    if _pred_jsons:
+        st.markdown("#### 📥 結果画像エクスポート")
+
+        _exp_mode = st.radio(
+            "エクスポート範囲",
+            ["すべて書き出す", "選択して書き出す"],
+            horizontal=True,
+            key="exp_mode",
+        )
+
+        _exp_target_files: Optional[list[Path]] = None
+        if _exp_mode == "選択して書き出す":
+            _SEL_PAGE_SIZE = 12
+
+            # 選択状態はウィジェットキーではなく set で管理（ページ切替後も保持）
+            if "exp_sel_set" not in st.session_state:
+                st.session_state.exp_sel_set = set()
+            if "exp_sel_page" not in st.session_state:
+                st.session_state.exp_sel_page = 0
+
+            _total_pages = max(1, (len(_pred_jsons) + _SEL_PAGE_SIZE - 1) // _SEL_PAGE_SIZE)
+            _cur_page    = min(st.session_state.exp_sel_page, _total_pages - 1)
+            _page_jsons  = _pred_jsons[_cur_page * _SEL_PAGE_SIZE : (_cur_page + 1) * _SEL_PAGE_SIZE]
+            _sel_count   = len(st.session_state.exp_sel_set)
+
+            # ── ツールバー ──
+            _tb1, _tb2, _tb3, _tb4 = st.columns([2, 2, 2, 4])
+            with _tb1:
+                if st.button("☑ 全件選択", key="exp_sel_all", use_container_width=True):
+                    st.session_state.exp_sel_set = {jf.name for jf in _pred_jsons}
+                    st.rerun()
+            with _tb2:
+                if st.button("☑ このページ", key="exp_sel_page_btn", use_container_width=True):
+                    st.session_state.exp_sel_set.update(jf.name for jf in _page_jsons)
+                    st.rerun()
+            with _tb3:
+                if st.button("☐ すべて解除", key="exp_desel_all", use_container_width=True):
+                    st.session_state.exp_sel_set = set()
+                    st.rerun()
+            with _tb4:
+                st.markdown(
+                    f'<div style="padding-top:8px; color:#7ecff4; font-size:.85rem;">'
+                    f'選択中: <b>{_sel_count}</b> / {len(_pred_jsons)} 件 &nbsp;|&nbsp; '
+                    f'ページ {_cur_page + 1} / {_total_pages}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── 画像グリッド + チェックボックス ──
+            # value= で exp_sel_set から初期状態を復元し、変更を exp_sel_set に同期
+            _GRID_COLS = 3
+            for _row_start in range(0, len(_page_jsons), _GRID_COLS):
+                _row_files = _page_jsons[_row_start : _row_start + _GRID_COLS]
+                _row_cols  = st.columns(_GRID_COLS)
+                for _col, _jf in zip(_row_cols, _row_files):
+                    with _col:
+                        _res = _draw_predictions(_jf)
+                        if _res:
+                            _img, _n_boxes, _stem = _res
+                            st.image(_img, caption=f"{_stem} ({_n_boxes}件)", use_column_width=True)
+                        else:
+                            st.caption(_jf.stem)
+                            st.markdown("_(プレビュー不可)_")
+                        _chk_result = st.checkbox(
+                            "選択",
+                            value=(_jf.name in st.session_state.exp_sel_set),
+                            key=f"exp_chk_{_cur_page}_{_jf.name}",
+                        )
+                        if _chk_result:
+                            st.session_state.exp_sel_set.add(_jf.name)
+                        else:
+                            st.session_state.exp_sel_set.discard(_jf.name)
+
+            # ── ページネーション ──
+            _pn1, _pn2, _pn3 = st.columns([1, 2, 1])
+            with _pn1:
+                if st.button("← 前へ", disabled=(_cur_page == 0),
+                             key="exp_pg_prev", use_container_width=True):
+                    st.session_state.exp_sel_page = _cur_page - 1
+                    st.rerun()
+            with _pn2:
+                st.markdown(
+                    f'<div style="text-align:center; padding-top:8px; color:#4a6080; font-size:.82rem;">'
+                    f'{_cur_page + 1} / {_total_pages}</div>',
+                    unsafe_allow_html=True,
+                )
+            with _pn3:
+                if st.button("次へ →", disabled=(_cur_page == _total_pages - 1),
+                             key="exp_pg_next", use_container_width=True):
+                    st.session_state.exp_sel_page = _cur_page + 1
+                    st.rerun()
+
+            _exp_target_files = [PREDICTIONS_DIR / n for n in st.session_state.exp_sel_set
+                                 if (PREDICTIONS_DIR / n).exists()]
+            _exp_count = len(_exp_target_files)
+        else:
+            # モード切替時に選択をリセット
+            if "exp_sel_set" in st.session_state:
+                st.session_state.exp_sel_set = set()
+            _exp_count = len(_pred_jsons)
+
+        # ── フォーマット・品質 ──────────────────────────────────────────────────
+        _exp_c1, _exp_c2 = st.columns(2)
+        with _exp_c1:
+            _exp_fmt = st.selectbox("フォーマット", ["PNG", "JPEG"], key="exp_fmt")
+        with _exp_c2:
+            _exp_q = st.slider("品質 (JPEGのみ)", 60, 100, 95, step=5,
+                               disabled=(_exp_fmt != "JPEG"), key="exp_quality")
+
+        # ── 保存先フォルダ選択（ブラウザUI） ──────────────────────────────────
+        st.markdown("**📁 保存先フォルダ**")
+        if "exp_dest_dir" not in st.session_state:
+            st.session_state.exp_dest_dir = str(PREDICTIONS_DIR / "exports")
+
+        _exp_dest = Path(st.session_state.exp_dest_dir)
+        _BROWSE_ROOT = Path("/workspace")
+
+        # 現在パス表示 + 「↑ 上へ」ボタン
+        _nav1, _nav2 = st.columns([5, 1])
+        with _nav1:
+            st.code(str(_exp_dest), language="text")
+        with _nav2:
+            _can_up = (
+                _exp_dest != _BROWSE_ROOT
+                and str(_exp_dest).startswith(str(_BROWSE_ROOT))
+            )
+            if st.button("↑ 上へ", key="exp_nav_up", use_container_width=True,
+                         disabled=not _can_up):
+                st.session_state.exp_dest_dir = str(_exp_dest.parent)
+                st.rerun()
+
+        # サブフォルダ一覧（クリックで移動）
+        try:
+            _subdirs = sorted(
+                [d for d in _exp_dest.iterdir() if d.is_dir()]
+            ) if _exp_dest.exists() else []
+        except Exception:
+            _subdirs = []
+
+        if _subdirs:
+            _COLS = 4
+            _sd_cols = st.columns(_COLS)
+            for _ci, _sd in enumerate(_subdirs[:12]):
+                with _sd_cols[_ci % _COLS]:
+                    if st.button(f"📁 {_sd.name}", key=f"exp_sd_{_ci}",
+                                 use_container_width=True):
+                        st.session_state.exp_dest_dir = str(_sd)
+                        st.rerun()
+        else:
+            st.caption("サブフォルダなし")
+
+        # 新規フォルダ作成
+        _nf1, _nf2 = st.columns([4, 1])
+        with _nf1:
+            _exp_new_folder = st.text_input(
+                "新しいフォルダ名", key="exp_new_folder",
+                placeholder="フォルダ名を入力して ＋ 作成",
+                label_visibility="collapsed",
+            )
+        with _nf2:
+            if st.button("＋ 作成", key="exp_mkdir", use_container_width=True):
+                if _exp_new_folder.strip():
+                    _nd = _exp_dest / _exp_new_folder.strip()
+                    _nd.mkdir(parents=True, exist_ok=True)
+                    st.session_state.exp_dest_dir = str(_nd)
+                    st.rerun()
+
+        # ── 書き出しボタン ──────────────────────────────────────────────────────
+        _btn_disabled = (_exp_mode == "選択して書き出す" and _exp_count == 0)
+        if st.button(f"📥 {_exp_count} 件を書き出す", use_container_width=True,
+                     type="primary", disabled=_btn_disabled):
+            _exp_out = _exp_dest
+            _prog_bar  = st.progress(0, text="書き出し準備中…")
+            _prog_text = st.empty()
+
+            def _on_progress(cur, total, fname):
+                _prog_bar.progress(cur / total,
+                                   text=f"{cur} / {total} 件処理中")
+                _prog_text.caption(f"→ {fname}")
+
+            _ok, _ng = export_prediction_images(
+                _exp_out, _exp_fmt, _exp_q, _exp_target_files, _on_progress
+            )
+            _prog_bar.empty()
+            _prog_text.empty()
+            if _ok > 0:
+                st.success(f"✅ {_ok} 件を保存しました → `{_exp_out}`")
+                # ZIPにまとめてブラウザからダウンロード
+                import io as _io_exp
+                _exp_glob = sorted(_exp_out.glob("*.*"))
+                if _exp_glob:
+                    _zip_buf = _io_exp.BytesIO()
+                    with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
+                        for _ef in _exp_glob:
+                            _zf.write(_ef, _ef.name)
+                    _zip_buf.seek(0)
+                    st.download_button(
+                        f"⬇️ ZIPでダウンロード ({_ok}件)",
+                        _zip_buf.getvalue(),
+                        file_name=f"exports_{datetime.now():%Y%m%d_%H%M}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
+            if _ng > 0:
+                st.warning(f"⚠ {_ng} 件スキップ（元画像が見つからないため）")
+
     # --- 推論結果 JSON ブラウザ ---
     with st.expander("📋 predictions/ の結果ファイル一覧"):
         json_files = sorted(PREDICTIONS_DIR.glob("*.json"))
@@ -1902,6 +2552,31 @@ with tab4:
                     shutil.rmtree(ds)
                     st.success(f"{ds.name} を削除しました")
                     st.rerun()
+            with st.expander(f"➕ {ds.name} に画像を追加"):
+                _add_imgs = st.file_uploader(
+                    "追加する画像ファイル（複数選択可）",
+                    type=["jpg", "jpeg", "png", "bmp", "tiff"],
+                    accept_multiple_files=True,
+                    key=f"add_imgs_{ds.name}",
+                )
+                _add_split = st.radio(
+                    "追加先スプリット", ["train", "val"], horizontal=True,
+                    key=f"add_split_{ds.name}",
+                )
+                if _add_imgs:
+                    st.caption(f"選択中: {len(_add_imgs)} ファイル")
+                    _add_dst = ds / "images" / _add_split
+                    if st.button(
+                        f"📤 images/{_add_split}/ に追加",
+                        key=f"add_btn_{ds.name}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        _add_dst.mkdir(parents=True, exist_ok=True)
+                        for _f in _add_imgs:
+                            (_add_dst / _f.name).write_bytes(_f.getbuffer())
+                        st.success(f"✅ {len(_add_imgs)} ファイルを追加しました → `{_add_dst}`")
+                        st.rerun()
 
     st.markdown("---")
 

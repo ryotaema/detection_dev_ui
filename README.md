@@ -1,7 +1,7 @@
 # detection_dev_ui — 完全ローカル完結型 画像検出パイプライン
 
 CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、  
-**ターミナル操作不要・GUI完結**の物体検出MLOpsシステムです。
+**ターミナル操作不要・GUI完結**の物体検出 MLOps システムです。
 
 ---
 
@@ -25,7 +25,7 @@ CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、
 ## システム構成
 
 ```
-mlops_workspace/
+detection_dev_ui/
 ├── docker-compose.yml       # 全コンテナ統括
 ├── .env                     # 認証情報（要作成・gitignore済み）
 ├── .gitignore
@@ -35,9 +35,9 @@ mlops_workspace/
 │   ├── Dockerfile           # Streamlit統合UIコンテナ
 │   ├── requirements.txt
 │   └── main.py              # Streamlit アプリ本体
-├── data/                    # CVATエクスポート先 / YOLO入力元
-├── models/                  # YOLO学習済み重み
-└── predictions/             # 推論結果JSON
+├── data/                    # CVATエクスポート先 / YOLO入力元（gitignore済み）
+├── models/                  # YOLO学習済み重み（gitignore済み）
+└── predictions/             # 推論結果JSON / エクスポート画像（gitignore済み）
 ```
 
 ### サービス一覧とポート
@@ -56,7 +56,6 @@ mlops_workspace/
 ### Step 1 — nvidia-container-toolkit のインストール
 
 ```bash
-# GPGキーとリポジトリ追加
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
   | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
@@ -66,8 +65,6 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 
 sudo apt-get update
 sudo apt-get install -y nvidia-container-toolkit
-
-# Dockerデーモンに設定を反映
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
@@ -78,14 +75,14 @@ sudo systemctl restart docker
 sudo usermod -aG docker $USER
 newgrp docker
 
-# 動作確認（コンテナ内からGPUが見えればOK）
-docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu22.04 nvidia-smi
+# 動作確認
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ```
 
 ### Step 3 — リポジトリのクローン
 
 ```bash
-git clone git@github.com:ryotaema/detection_dev_ui.git
+git clone git@github.com:ryotaemi/detection_dev_ui.git
 cd detection_dev_ui
 ```
 
@@ -93,6 +90,7 @@ cd detection_dev_ui
 
 ```bash
 cat > .env << 'EOF'
+COMPOSE_PROJECT_NAME=mlops_workspace
 CVAT_USERNAME=admin
 CVAT_PASSWORD=your_password_here
 CVAT_DB_PASSWORD=your_db_password_here
@@ -116,29 +114,21 @@ docker compose run --rm cvat_server bash -c "python manage.py migrate"
 # スーパーユーザー作成（初回のみ）
 docker compose run --rm cvat_server bash -c \
   "python manage.py createsuperuser --username admin --email admin@local.com"
-# パスワード入力を求められるので .env に設定したパスワードを入力
 ```
 
 ### Step 6 — 全サービス起動
 
 ```bash
 docker compose up -d
-
-# 状態確認（全コンテナが Up になればOK）
 sleep 30 && docker compose ps
 ```
 
 ### Step 7 — 疎通確認
 
 ```bash
-# CVAT
-curl -s http://localhost:8080/api/server/about | python3 -m json.tool | head -3
-
-# MLflow
-curl -s http://localhost:5000/health
-
-# Streamlit
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8501
+curl -s http://localhost:8080/api/server/about | python3 -m json.tool | head -3  # CVAT
+curl -s http://localhost:5000/health                                               # MLflow
+curl -s -o /dev/null -w "%{http_code}" http://localhost:8501                       # Streamlit
 ```
 
 ---
@@ -146,8 +136,6 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:8501
 ## 日常的な起動・停止
 
 ```bash
-cd mlops_workspace
-
 # 起動
 docker compose up -d
 
@@ -156,7 +144,6 @@ docker compose down
 
 # ログ確認
 docker compose logs -f streamlit_app
-docker compose logs -f cvat_server
 ```
 
 ---
@@ -166,27 +153,34 @@ docker compose logs -f cvat_server
 ```
 ① CVATでアノテーション
    http://localhost:8080 → admin / 設定したパスワード でログイン
-   プロジェクト作成 → 画像アップロード → バウンディングボックスを付ける
+   プロジェクト作成 → 画像アップロード → バウンディングボックス / ポリゴンを付ける
 
-② Streamlit タブ① でエクスポート
+② Streamlit「📤 Step1: データ取込」タブ
    http://localhost:8501 を開く
-   「タスク一覧を取得」→ 対象タスクを選択 →「YOLOフォーマットでエクスポート」
-   → data/ ディレクトリに自動展開される
+   「タスク一覧を取得」→ 対象タスクを選択（複数可）
+   →「エクスポート実行」→ ラベル・タスク種別（detect/segment）を設定
+   →「データセット生成」→ data/ に YOLO 形式で展開される
 
-③ Streamlit タブ② でYOLO学習
-   モデルサイズ（n/s/m/l/x）・エポック数・バッチサイズを設定
+③ Streamlit「🚀 Step2: モデル学習」タブ
+   学習プリセットを選んで「▶ 適用」（または手動でパラメータ設定）
+     - 組み込みプリセット: ノーマル / 速度優先 / バランス型 / 精度優先 / 小物体向け / ロボット視点
+     - カスタムプリセット: 現在の設定に名前を付けて保存・編集・削除が可能
    「学習開始」→ バックグラウンドで実行
-   → エポックごとに mAP 等のメトリクスがログに表示される
-   → MLflowに自動でメトリクスが記録される（http://localhost:5000）
+   → エポックごとに mAP50 / Loss のリアルタイムグラフとログが表示される
+   → MLflow にメトリクスが自動記録される（http://localhost:5000）
+   → 学習完了時にトースト通知＋バルーンアニメーション
 
-④ Streamlit タブ③ で推論・可視化
+④ Streamlit「🔭 Step3: 推論・評価」タブ
    学習済みモデルを選択 →「推論実行」
-   → predictions/ にJSONで結果保存
+   → バウンディングボックス付き画像プレビューをグリッドで確認
+   「📥 結果画像エクスポート」
+   → 「すべて書き出す」または「選択して書き出す」（プレビューを見ながらページ単位で複数選択）
+   → PNG / JPEG 形式で predictions/exports/ に保存
    「FiftyOneで可視化」→ http://localhost:5151 でブラウザ確認
 
-⑤ Streamlit タブ④ でデータ管理（任意）
-   data/ のデータセット一覧・削除
-   models/ の学習済みモデル一覧・削除
+⑤ Streamlit「📁 データ管理」タブ（任意）
+   data/ のデータセット一覧・削除・統合
+   models/ の学習済みモデルをカード形式で表示（mAP50・サイズ・学習日時付き）・削除・使用切替
    predictions/ の推論結果一括クリア
 ```
 
@@ -198,15 +192,12 @@ docker compose logs -f cvat_server
 **お使いの CUDA バージョンに合わせて変更**してください。
 
 ```dockerfile
-# ベースイメージの例（CUDA 12.6）
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+# 現在の設定（CUDA 12.8 / RTX 50系対応）
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
-# PyTorch インストール（CUDA 12.6 対応ビルド）
 RUN pip install --no-cache-dir torch torchvision torchaudio \
-      --index-url https://download.pytorch.org/whl/cu126
+      --index-url https://download.pytorch.org/whl/cu128
 ```
-
-お使いの CUDA バージョンに対応する設定値：
 
 | CUDA | `--index-url` の末尾 | ベースイメージタグ例 |
 |---|---|---|
@@ -214,6 +205,9 @@ RUN pip install --no-cache-dir torch torchvision torchaudio \
 | 12.1 | `cu121` | `cuda:12.1.1-cudnn8-runtime-ubuntu22.04` |
 | 12.4 | `cu124` | `cuda:12.4.1-cudnn-runtime-ubuntu22.04` |
 | 12.6 | `cu126` | `cuda:12.6.3-cudnn-runtime-ubuntu22.04` |
+| 12.8 | `cu128` | `cuda:12.8.1-cudnn-runtime-ubuntu22.04` |
+
+> RTX 50系（Blackwell / sm_120）は CUDA 12.8 以上が必要です。cu126 では `no kernel image` エラーが発生します。
 
 利用可能なイメージ一覧: https://hub.docker.com/r/nvidia/cuda/tags  
 PyTorch 対応ビルド一覧: https://pytorch.org/get-started/locally/
@@ -226,18 +220,13 @@ PyTorch 対応ビルド一覧: https://pytorch.org/get-started/locally/
 
 ```bash
 sudo usermod -aG docker $USER
-newgrp docker   # ログアウト不要でグループを即時反映
+newgrp docker
 ```
 
 ### コンテナ名が競合してエラーになる
 
-他の Docker プロジェクトが同じポートやコンテナ名を使っている場合、先に停止してください。
-
 ```bash
-# 競合しているコンテナを確認
 docker ps --format "table {{.Names}}\t{{.Ports}}" | grep 8080
-
-# 該当プロジェクトを停止してから再起動
 docker compose down && docker compose up -d
 ```
 
@@ -246,7 +235,6 @@ docker compose down && docker compose up -d
 `docker-compose.yml` の `streamlit_app` から以下のブロックを削除してください：
 
 ```yaml
-# 以下を削除
 deploy:
   resources:
     reservations:
@@ -264,3 +252,4 @@ deploy:
 - 本システムは完全ローカル動作のため、外部ネットワークへのデータ転送は発生しません。
 - `data/`・`models/`・`predictions/` はホスト側の bind mount のため、コンテナを削除してもデータは保持されます。
 - CVAT: `v2.64.0` / cvat-sdk: `2.64.0`（サーバーと SDK を同一バージョンに固定）
+- ユーザー定義プリセットは `models/.user_presets.json` に保存されます。
