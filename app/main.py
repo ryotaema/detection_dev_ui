@@ -24,7 +24,7 @@ def _get_train_shared() -> tuple[dict, threading.Lock]:
     st.cache_resource でキャッシュして常に同一インスタンスを返す。
     """
     return (
-        {"log": [], "progress": 0, "running": False, "error": None, "model_path": None},
+        {"log": [], "progress": 0, "running": False, "error": None, "model_path": None, "metrics_history": []},
         threading.Lock(),
     )
 
@@ -131,6 +131,63 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
     border-color: #7ecff4;
     color: #fff;
 }
+
+/* パイプラインフロー */
+.pipeline-flow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 0 8px;
+    flex-wrap: wrap;
+}
+.pf-step {
+    background: #161b26;
+    border: 1px solid #1e2330;
+    border-radius: 8px;
+    padding: 8px 14px;
+    text-align: center;
+    min-width: 110px;
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: .82rem;
+}
+.pf-step .pf-label { color: #4a6080; font-size:.72rem; margin-bottom:2px; }
+.pf-step .pf-name  { color: #c8d8e8; font-weight:600; }
+.pf-step .pf-icon  { font-size: .9rem; }
+.pf-step.complete  { border-color: #2d6b47; background: #111f17; }
+.pf-step.complete .pf-name { color: #4caf7d; }
+.pf-step.active    { border-color: #7ecff4; background: #0e1e2e; animation: pulse-border 2s infinite; }
+.pf-step.active .pf-name { color: #7ecff4; }
+.pf-step.pending   { opacity: .45; }
+.pf-arrow          { color: #2a3a50; font-size: 1.1rem; }
+@keyframes pulse-border {
+    0%,100% { border-color: #7ecff4; }
+    50%      { border-color: #2d7dd2; }
+}
+
+/* ステップバナー（各タブ先頭） */
+.step-banner {
+    background: #0e1520;
+    border-left: 3px solid #7ecff4;
+    border-radius: 0 6px 6px 0;
+    padding: 10px 16px;
+    margin-bottom: 16px;
+}
+.step-banner .sb-title { color: #7ecff4; font-size: .95rem; font-weight:600;
+                          font-family:'JetBrains Mono',monospace; }
+.step-banner .sb-prev  { color: #4caf7d; font-size: .78rem; margin-top:4px; }
+.step-banner .sb-desc  { color: #6a8aaa; font-size: .78rem; margin-top:2px; }
+
+/* サイドバー サマリー */
+.sidebar-stat {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    font-size: .82rem;
+}
+.sidebar-stat .ss-label { color: #4a6080; }
+.sidebar-stat .ss-value { color: #7ecff4; font-family:'JetBrains Mono',monospace;
+                           font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -142,6 +199,7 @@ defaults = {
     "training_running": False,
     "training_progress": 0,
     "training_error": None,
+    "training_metrics_history": [],
     "fiftyone_session": None,
     "fiftyone_port": None,
     "last_model_path": None,
@@ -551,6 +609,17 @@ def _train_worker(
         with _train_log_lock:
             _train_state["progress"] = int(cur / total * 95)
 
+    def _on_fit_epoch_end(trainer) -> None:
+        row: dict = {"epoch": trainer.epoch + 1}
+        if hasattr(trainer, "metrics") and trainer.metrics:
+            for k, v in trainer.metrics.items():
+                try:
+                    row[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        with _train_log_lock:
+            _train_state["metrics_history"].append(row)
+
     _orig_stdout = sys.stdout
     sys.stdout   = _StdoutCapture(_orig_stdout, _train_log_lock, _train_state)
 
@@ -565,6 +634,7 @@ def _train_worker(
 
         model = YOLO(model_name)
         model.add_callback("on_train_epoch_end", _on_epoch_end)
+        model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
 
         results = model.train(
             data=data_yaml,
@@ -705,6 +775,48 @@ def launch_fiftyone(dataset_name: str, predictions_dir: Path) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+# 推論結果プレビュー描画
+# ---------------------------------------------------------------------------
+def _draw_predictions(json_path: Path):
+    """JSONを読み込みバウンディングボックスを描画した RGB 画像配列を返す。失敗時は None。"""
+    import cv2
+
+    _COLORS = [
+        (78, 207, 244), (244, 168, 78), (126, 207, 78),
+        (207, 78, 126), (168, 78, 244), (78, 168, 207),
+    ]
+    try:
+        with open(json_path) as f:
+            pred = json.load(f)
+        img_path = pred.get("image_path", "")
+        if not img_path or not Path(img_path).exists():
+            return None
+        img = cv2.imread(img_path)
+        if img is None:
+            return None
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        boxes = pred.get("boxes", [])
+        label_set = list(dict.fromkeys(b["label"] for b in boxes))
+        for box in boxes:
+            xyxy = box.get("bbox_xyxy", [])
+            if len(xyxy) != 4:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in xyxy]
+            label = box["label"]
+            conf  = box.get("confidence", 0.0)
+            color = _COLORS[label_set.index(label) % len(_COLORS)]
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            text = f"{label} {conf:.2f}"
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(img, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(img, text, (x1 + 2, y1 - 3),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        return img, len(boxes), json_path.stem
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # YOLO 推論
 # ---------------------------------------------------------------------------
 def run_inference(
@@ -817,20 +929,71 @@ def _ckw(label: str, val: bool,
 # UI レイアウト
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# パイプライン状態ヘルパー
+# ---------------------------------------------------------------------------
+def _get_pipeline_status() -> dict:
+    yaml_exists  = len(list(DATA_DIR.rglob("data.yaml"))) > 0
+    model_exists = len(list(MODELS_DIR.rglob("*.pt"))) > 0
+    pred_exists  = len(list(PREDICTIONS_DIR.glob("*.json"))) > 0
+    training_now = _train_state.get("running", False)
+    return {
+        "step1": "complete",
+        "step2": "complete" if yaml_exists  else "pending",
+        "step3": "active"   if training_now else ("complete" if model_exists else "pending"),
+        "step4": "complete" if pred_exists  else "pending",
+    }
+
+
+def _pf_html(ps: dict) -> str:
+    steps = [
+        ("step1", "📝", "STEP 1", "アノテーション"),
+        ("step2", "📁", "STEP 2", "データ取込"),
+        ("step3", "🚀", "STEP 3", "モデル学習"),
+        ("step4", "🔭", "STEP 4", "推論・評価"),
+    ]
+    parts = []
+    for i, (key, icon, label, name) in enumerate(steps):
+        cls = ps[key]
+        icon_str = "✅" if cls == "complete" else ("⏳" if cls == "active" else "○")
+        parts.append(
+            f'<div class="pf-step {cls}">'
+            f'<div class="pf-label">{label}</div>'
+            f'<div class="pf-name">{icon} {name}</div>'
+            f'<div class="pf-icon">{icon_str}</div>'
+            f'</div>'
+        )
+        if i < len(steps) - 1:
+            parts.append('<div class="pf-arrow">→</div>')
+    return '<div class="pipeline-flow">' + "".join(parts) + '</div>'
+
+
 # --- ヘッダー ---
-st.markdown("""
-<div style="border-bottom:1px solid #1e2330; padding-bottom:16px; margin-bottom:24px;">
-  <h1 style="color:#7ecff4; font-family:'JetBrains Mono',monospace; font-size:1.6rem; margin:0;">
+_ps = _get_pipeline_status()
+st.markdown(f"""
+<div style="border-bottom:1px solid #1e2330; padding-bottom:12px; margin-bottom:20px;">
+  <h1 style="color:#7ecff4; font-family:'JetBrains Mono',monospace; font-size:1.6rem; margin:0 0 4px;">
     🔬 detection_dev_ui
   </h1>
-  <p style="color:#4a6080; font-size:.85rem; margin:4px 0 0;">
+  <p style="color:#4a6080; font-size:.82rem; margin:0 0 12px;">
     CVAT → YOLO → MLflow → FiftyOne 統合ダッシュボード
   </p>
+  {_pf_html(_ps)}
 </div>
 """, unsafe_allow_html=True)
 
 # --- サイドバー: サービス接続状態 ---
 with st.sidebar:
+    st.markdown("### 📊 現在の状態")
+    _ds_count  = len([d for d in DATA_DIR.iterdir() if d.is_dir()]) if DATA_DIR.exists() else 0
+    _mdl_count = len(list(MODELS_DIR.rglob("*.pt"))) if MODELS_DIR.exists() else 0
+    _prd_count = len(list(PREDICTIONS_DIR.glob("*.json"))) if PREDICTIONS_DIR.exists() else 0
+    st.markdown(f"""
+<div class="sidebar-stat"><span class="ss-label">📂 データセット</span><span class="ss-value">{_ds_count}</span></div>
+<div class="sidebar-stat"><span class="ss-label">🤖 学習済みモデル</span><span class="ss-value">{_mdl_count}</span></div>
+<div class="sidebar-stat"><span class="ss-label">📋 推論結果</span><span class="ss-value">{_prd_count}</span></div>
+""", unsafe_allow_html=True)
+    st.markdown("---")
     st.markdown("### 🖥 サービス状態")
 
     def check_service(url: str, name: str):
@@ -867,16 +1030,22 @@ with st.sidebar:
 # タブ構成
 # ---------------------------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs([
-    "① CVAT エクスポート",
-    "② YOLO 学習",
-    "③ 推論 & 可視化",
-    "④ データ管理",
+    "📤 Step1: データ取込",
+    "🚀 Step2: モデル学習",
+    "🔭 Step3: 推論・評価",
+    "📁 データ管理",
 ])
 
 # ===========================================================================
 # タブ1: CVAT エクスポート
 # ===========================================================================
 with tab1:
+    st.markdown("""
+<div class="step-banner">
+  <div class="sb-title">📤 STEP 1: データ取込</div>
+  <div class="sb-prev">← 事前準備: CVATでアノテーションを完了させてください (http://localhost:8080)</div>
+  <div class="sb-desc">→ ここでやること: CVATタスクをエクスポート → YOLOデータセット形式に変換</div>
+</div>""", unsafe_allow_html=True)
     st.markdown('<div class="pipeline-card"><h3>📤 CVATタスクエクスポート</h3>', unsafe_allow_html=True)
 
     col1, col2 = st.columns([3, 1])
@@ -1055,6 +1224,15 @@ with tab1:
 # タブ2: YOLO 学習
 # ===========================================================================
 with tab2:
+    _yaml_count = len(list(DATA_DIR.rglob("data.yaml")))
+    _prev_info2 = (f"← 前のステップ: ✅ data.yaml が {_yaml_count} 件あります"
+                   if _yaml_count > 0 else "← 前のステップ: ⚠ Step1でデータセットを先に生成してください")
+    st.markdown(f"""
+<div class="step-banner">
+  <div class="sb-title">🚀 STEP 2: モデル学習</div>
+  <div class="sb-prev">{_prev_info2}</div>
+  <div class="sb-desc">→ ここでやること: モデルサイズ・学習パラメータを設定して学習開始</div>
+</div>""", unsafe_allow_html=True)
     st.markdown('<div class="pipeline-card"><h3>🚀 YOLO 学習設定</h3>', unsafe_allow_html=True)
 
     # ── 基本設定 ────────────────────────────────────────────────────────────
@@ -1390,6 +1568,7 @@ with tab2:
                 _train_state["running"] = True
                 _train_state["error"] = None
                 _train_state["model_path"] = None
+                _train_state["metrics_history"] = []
 
             t = threading.Thread(
                 target=_train_worker,
@@ -1405,6 +1584,7 @@ with tab2:
         st.session_state.training_log = list(_train_state["log"])
         st.session_state.training_progress = _train_state["progress"]
         st.session_state.training_running = _train_state["running"]
+        st.session_state.training_metrics_history = list(_train_state["metrics_history"])
         if _train_state["error"]:
             st.session_state.training_error = _train_state["error"]
         if _train_state["model_path"]:
@@ -1414,6 +1594,20 @@ with tab2:
     if st.session_state.training_running or st.session_state.training_progress > 0:
         prog = st.session_state.training_progress
         st.progress(prog / 100, text=f"進捗: {prog}%")
+
+        # リアルタイムグラフ
+        _mh = st.session_state.training_metrics_history
+        if _mh:
+            import pandas as pd
+            df_live = pd.DataFrame(_mh)
+            if "epoch" in df_live.columns:
+                df_live = df_live.set_index("epoch")
+                _live_cols = [c for c in df_live.columns
+                              if any(k in c.lower() for k in ["map50", "loss"])
+                              and "95" not in c.lower()]
+                if _live_cols:
+                    st.markdown("**📊 学習進捗グラフ（リアルタイム）**")
+                    st.line_chart(df_live[_live_cols])
 
         log_lines = st.session_state.training_log[-500:]
         log_text_escaped = "\n".join(log_lines).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -1466,14 +1660,22 @@ with tab2:
     if st.session_state.last_model_path:
         results_csv = Path(st.session_state.last_model_path).parent.parent / "results.csv"
         if results_csv.exists():
-            with st.expander("📈 学習メトリクス", expanded=True):
-                import pandas as pd
-                df_r = pd.read_csv(results_csv)
-                df_r.columns = [c.strip() for c in df_r.columns]
-                metric_cols = [c for c in df_r.columns
-                               if any(k in c.lower() for k in ["map","precision","recall","loss"])]
-                if metric_cols:
-                    st.line_chart(df_r[metric_cols])
+            import pandas as pd
+            st.markdown("#### 📈 学習メトリクス")
+            df_r = pd.read_csv(results_csv)
+            df_r.columns = [c.strip() for c in df_r.columns]
+            metric_cols = [c for c in df_r.columns
+                           if any(k in c.lower() for k in ["map","precision","recall","loss"])]
+            _last = df_r.iloc[-1]
+            _map_col  = next((c for c in df_r.columns if "map50" in c.lower() and "95" not in c.lower()), None)
+            _loss_col = next((c for c in df_r.columns if "val" in c.lower() and "loss" in c.lower()), None)
+            _mc = st.columns(3)
+            if _map_col:  _mc[0].metric("mAP50 (最終)", f"{_last[_map_col]:.4f}")
+            if _loss_col: _mc[1].metric("Val Loss (最終)", f"{_last[_loss_col]:.4f}")
+            _mc[2].metric("エポック数", len(df_r))
+            if metric_cols:
+                st.line_chart(df_r[metric_cols])
+            with st.expander("📄 生データ（末尾5行）"):
                 st.dataframe(df_r.tail(5), use_container_width=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1495,6 +1697,15 @@ with tab2:
 # タブ3: 推論 & 可視化
 # ===========================================================================
 with tab3:
+    _mdl_count3 = len(list(MODELS_DIR.rglob("*.pt")))
+    _prev_info3 = (f"← 前のステップ: ✅ 学習済みモデルが {_mdl_count3} 件あります"
+                   if _mdl_count3 > 0 else "← 前のステップ: ⚠ Step2でモデルを先に学習してください")
+    st.markdown(f"""
+<div class="step-banner">
+  <div class="sb-title">🔭 STEP 3: 推論・評価</div>
+  <div class="sb-prev">{_prev_info3}</div>
+  <div class="sb-desc">→ ここでやること: 推論実行 → FiftyOneで結果を可視化・確認</div>
+</div>""", unsafe_allow_html=True)
     st.markdown('<div class="pipeline-card"><h3>🔭 推論 & FiftyOne 可視化</h3>', unsafe_allow_html=True)
 
     # --- モデル確認 ---
@@ -1628,6 +1839,24 @@ with tab3:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # --- 推論結果 画像プレビュー ---
+    _pred_jsons = sorted(PREDICTIONS_DIR.glob("*.json"))
+    if _pred_jsons:
+        st.markdown("#### 🖼 推論結果プレビュー")
+        _preview_jsons = _pred_jsons[:9]
+        for _row_start in range(0, len(_preview_jsons), 3):
+            _row_files = _preview_jsons[_row_start:_row_start + 3]
+            _row_cols = st.columns(3)
+            for _col, _jf in zip(_row_cols, _row_files):
+                _res = _draw_predictions(_jf)
+                if _res:
+                    _img, _n_boxes, _stem = _res
+                    with _col:
+                        st.image(_img, caption=f"{_stem} ({_n_boxes}件検出)",
+                                 use_column_width=True)
+        if len(_pred_jsons) > 9:
+            st.caption(f"（他 {len(_pred_jsons) - 9} 件は省略。全件は下の一覧から確認）")
+
     # --- 推論結果 JSON ブラウザ ---
     with st.expander("📋 predictions/ の結果ファイル一覧"):
         json_files = sorted(PREDICTIONS_DIR.glob("*.json"))
@@ -1676,26 +1905,61 @@ with tab4:
 
     st.markdown("---")
 
-    # --- models/ モデル一覧 ---
-    st.markdown("#### 学習済みモデル (`models/`)")
-    model_files = sorted(MODELS_DIR.rglob("*.pt")) if MODELS_DIR.exists() else []
+    # --- models/ モデル一覧（カード表示） ---
+    st.markdown("#### 🤖 学習済みモデル (`models/`)")
+    model_files = sorted(
+        MODELS_DIR.rglob("*.pt"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ) if MODELS_DIR.exists() else []
     if not model_files:
         st.info("models/ に .pt ファイルがありません。")
     else:
+        import pandas as pd
         for mp in model_files:
-            size_mb = mp.stat().st_size / (1024 * 1024)
-            col1, col2, col3 = st.columns([4, 2, 1])
-            with col1:
-                st.text(str(mp.relative_to(MODELS_DIR)))
-            with col2:
-                st.text(f"{size_mb:.1f} MB")
-            with col3:
-                if st.button("🗑", key=f"del_model_{mp}", help=f"{mp.name} を削除"):
-                    mp.unlink()
-                    if st.session_state.last_model_path == str(mp):
-                        st.session_state.last_model_path = None
-                    st.success(f"{mp.name} を削除しました")
-                    st.rerun()
+            size_mb  = mp.stat().st_size / (1024 * 1024)
+            mod_time = datetime.fromtimestamp(mp.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            is_current = (str(mp) == st.session_state.last_model_path)
+
+            # results.csv からmAP50を取得
+            _results_csv = mp.parent.parent / "results.csv"
+            _map50_val = None
+            if _results_csv.exists():
+                try:
+                    _df_r = pd.read_csv(_results_csv)
+                    _df_r.columns = [c.strip() for c in _df_r.columns]
+                    _mc = next((c for c in _df_r.columns
+                                if "map50" in c.lower() and "95" not in c.lower()), None)
+                    if _mc:
+                        _map50_val = float(_df_r.iloc[-1][_mc])
+                except Exception:
+                    pass
+
+            with st.container(border=True):
+                _label_col, _size_col, _map_col, _use_col, _del_col = st.columns([4, 2, 2, 2, 1])
+                with _label_col:
+                    if is_current:
+                        st.markdown("⭐ **現在使用中**")
+                    st.markdown(f"`{mp.relative_to(MODELS_DIR)}`")
+                    st.caption(mod_time)
+                with _size_col:
+                    st.metric("サイズ", f"{size_mb:.1f} MB")
+                with _map_col:
+                    if _map50_val is not None:
+                        st.metric("mAP50", f"{_map50_val:.4f}")
+                    else:
+                        st.caption("mAP50: -")
+                with _use_col:
+                    if st.button("✅ 使用", key=f"use_model_{mp}", use_container_width=True,
+                                 type="primary" if not is_current else "secondary"):
+                        st.session_state.last_model_path = str(mp)
+                        st.rerun()
+                with _del_col:
+                    if st.button("🗑", key=f"del_model_{mp}", help=f"{mp.name} を削除"):
+                        mp.unlink()
+                        if st.session_state.last_model_path == str(mp):
+                            st.session_state.last_model_path = None
+                        st.rerun()
 
     st.markdown("---")
 
