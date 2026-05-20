@@ -188,6 +188,43 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
 .sidebar-stat .ss-label { color: #4a6080; }
 .sidebar-stat .ss-value { color: #7ecff4; font-family:'JetBrains Mono',monospace;
                            font-weight:700; }
+
+/* トピックスタブ */
+.topic-card {
+    background: #161b26;
+    border: 1px solid #1e2330;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin: 8px 0;
+}
+.topic-card .tc-icon  { font-size: 1.6rem; margin-bottom: 6px; }
+.topic-card .tc-title { color: #7ecff4; font-size: .95rem; font-weight:700;
+                         font-family:'JetBrains Mono',monospace; margin-bottom:6px; }
+.topic-card .tc-body  { color: #6a8aaa; font-size: .82rem; line-height:1.6; }
+.topic-card .tc-sub   { color: #4a6080; font-size:.72rem; text-transform:uppercase;
+                         letter-spacing:.05em; margin: 10px 0 4px; }
+.tc-chip {
+    display: inline-block;
+    background: #0e1520;
+    border: 1px solid #1e2d42;
+    color: #4a90c4;
+    font-size: .72rem;
+    padding: 2px 8px;
+    border-radius: 12px;
+    margin: 2px;
+    font-family: 'JetBrains Mono', monospace;
+}
+.link-card {
+    background: #0e1520;
+    border: 1px solid #1a2840;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 6px 0;
+}
+.link-card .lc-title { color: #c8d8e8; font-size:.85rem; font-weight:600; }
+.link-card .lc-desc  { color: #4a6080; font-size:.75rem; margin-top:2px; }
+.link-card a { color: #7ecff4; text-decoration:none; }
+.link-card a:hover { text-decoration:underline; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1214,11 +1251,12 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # タブ構成
 # ---------------------------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📤 Step1: データ取込",
     "🚀 Step2: モデル学習",
     "🔭 Step3: 推論・評価",
     "📁 データ管理",
+    "📚 トピックス",
 ])
 
 # ===========================================================================
@@ -2699,6 +2737,187 @@ with tab4:
                 pyyaml.dump(data_yaml_content, f, allow_unicode=True)
             st.success(f"✅ 統合完了: `{out_dir}` (ラベル: {all_labels})")
             st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ===========================================================================
+# タブ5: トピックス
+# ===========================================================================
+with tab5:
+    st.markdown('<div class="pipeline-card"><h3>📚 トピックス</h3>', unsafe_allow_html=True)
+    st.markdown(
+        "<p style='color:#6a8aaa;font-size:.85rem;'>このシステムで体験できること・各ツールの役割・各ツール公式ドキュメントへの案内です。</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── セクション1: このシステムの流れ ──────────────────────────
+    st.markdown("#### このシステムでやっていること")
+    st.markdown("""
+<div style="background:#0e1520;border:1px solid #1a2840;border-radius:8px;padding:16px 20px;margin-bottom:8px;">
+  <p style="color:#6a8aaa;font-size:.84rem;line-height:1.8;margin:0;">
+    このシステムは <strong style="color:#c8d8e8;">物体検出モデルを自分で作る</strong> ための一連の流れを、ブラウザだけで体験できるように構成しています。<br>
+    <span style="color:#4caf7d;">① 画像にラベルを付ける（アノテーション）</span>　→
+    <span style="color:#7ecff4;">② データセットを整形する</span>　→
+    <span style="color:#f0a830;">③ AIモデルを学習させる</span>　→
+    <span style="color:#c87ecf;">④ 学習結果を確認する（推論・評価）</span><br>
+    この4ステップが <strong style="color:#c8d8e8;">機械学習プロジェクトの基本サイクル</strong> です。何度もデータを追加・修正しながら精度を高めていきます。
+  </p>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── セクション2: 各コンポーネントで学べること ─────────────────
+    st.markdown("#### 各コンポーネントで学べること")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("""
+<div class="topic-card">
+  <div class="tc-icon">📝</div>
+  <div class="tc-title">CVAT — アノテーションツール</div>
+  <div class="tc-body">
+    画像に「ここにこのものがある」という情報を付けるツールです。<br>
+    バウンディングボックス（四角形）やポリゴン（多角形）でラベルを付けます。
+  </div>
+  <div class="tc-sub">ここで学べること</div>
+  <span class="tc-chip">アノテーション手法</span>
+  <span class="tc-chip">ラベル設計</span>
+  <span class="tc-chip">データ品質</span>
+  <span class="tc-chip">クラス定義</span>
+</div>
+""", unsafe_allow_html=True)
+
+        st.markdown("""
+<div class="topic-card">
+  <div class="tc-icon">📊</div>
+  <div class="tc-title">MLflow — 実験管理</div>
+  <div class="tc-body">
+    学習のたびにパラメータ・精度・グラフを自動記録するツールです。<br>
+    「どの設定が一番良かったか」を後から比較・再現できます。
+  </div>
+  <div class="tc-sub">ここで学べること</div>
+  <span class="tc-chip">実験の記録</span>
+  <span class="tc-chip">パラメータ比較</span>
+  <span class="tc-chip">モデルレジストリ</span>
+  <span class="tc-chip">再現性</span>
+</div>
+""", unsafe_allow_html=True)
+
+    with col_b:
+        st.markdown("""
+<div class="topic-card">
+  <div class="tc-icon">🚀</div>
+  <div class="tc-title">YOLO (Ultralytics) — 物体検出モデル</div>
+  <div class="tc-body">
+    画像の中から物体を高速に検出するディープラーニングモデルです。<br>
+    エポック数・バッチサイズ・モデルサイズなど、主要なパラメータを試せます。
+  </div>
+  <div class="tc-sub">ここで学べること</div>
+  <span class="tc-chip">転移学習</span>
+  <span class="tc-chip">ハイパーパラメータ</span>
+  <span class="tc-chip">過学習と汎化</span>
+  <span class="tc-chip">mAP / Loss</span>
+</div>
+""", unsafe_allow_html=True)
+
+        st.markdown("""
+<div class="topic-card">
+  <div class="tc-icon">🔭</div>
+  <div class="tc-title">FiftyOne — 評価・可視化</div>
+  <div class="tc-body">
+    推論結果を画像単位でブラウザから確認できるツールです。<br>
+    どの画像で間違えたか・どのクラスが苦手かを視覚的に把握できます。
+  </div>
+  <div class="tc-sub">ここで学べること</div>
+  <span class="tc-chip">推論結果の分析</span>
+  <span class="tc-chip">エラー分析</span>
+  <span class="tc-chip">confidence の見方</span>
+  <span class="tc-chip">データセット探索</span>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── セクション3: 基本概念の説明 ───────────────────────────────
+    st.markdown("#### 基本概念ミニガイド")
+
+    with st.expander("📐 mAP / Precision / Recall とは？"):
+        st.markdown("""
+| 指標 | 意味 | 目安 |
+|---|---|---|
+| **Precision（適合率）** | 「検出した」中で本当に正しかった割合 | 誤検出を減らしたいときに重視 |
+| **Recall（再現率）** | 「本当にある物体」を何割見つけられたか | 見逃しを減らしたいときに重視 |
+| **mAP50** | IoU 0.5 での平均適合率。物体検出の総合スコア | 0.5 以上が実用的な目安 |
+| **mAP50-95** | IoU 0.5〜0.95 の平均。より厳密な評価 | COCOデータセットの標準指標 |
+
+> Precision と Recall はトレードオフの関係です。confidence の閾値を上げると Precision↑・Recall↓、下げると逆になります。
+""")
+
+    with st.expander("📦 IoU（Intersection over Union）とは？"):
+        st.markdown("""
+検出した領域と正解の領域が「どれだけ重なっているか」を 0〜1 で表す指標です。
+
+```
+IoU = 重なり面積 ÷ 合計面積（和集合）
+```
+
+- IoU = 1.0 → 完全に一致
+- IoU = 0.5 → 半分重なっている
+- 一般的に IoU ≥ 0.5 で「正解」とみなす
+
+> バウンディングボックスが少しずれただけで IoU が大きく下がります。アノテーションの丁寧さが精度に直結します。
+""")
+
+    with st.expander("📈 学習グラフの読み方（過学習を見抜く）"):
+        st.markdown("""
+学習中に表示されるグラフで確認すべきポイント：
+
+| 状態 | train loss | val loss | 対処 |
+|---|---|---|---|
+| **正常** | 下がる | 下がる | そのまま継続 |
+| **過学習** | 下がる | 上がる（または横ばい） | データ追加・augmentation・early stopping |
+| **学習不足** | 高いまま | 高いまま | エポック数増加・学習率調整 |
+
+> mAP50 は val loss と一緒に確認しましょう。val loss が上昇し始めたエポックが「学習のピーク」です。
+""")
+
+    with st.expander("🔄 転移学習とは？"):
+        st.markdown("""
+このシステムでは YOLO の **事前学習済み重み（pretrained weights）** を使って学習を始めます。
+
+- YOLOはあらかじめ大量の画像（COCOデータセット等）で学習済み
+- そこから自分のデータで「追加学習（ファインチューニング）」する
+- **ゼロから学習するよりも少ないデータ・短い時間で精度が出やすい**
+
+> モデルサイズ（nano/small/medium/large）は精度と速度のトレードオフです。
+> まず `yolo11n.pt`（nano）で動作確認し、精度が足りなければ大きいモデルを試すのが定石です。
+""")
+
+    # ── セクション4: 公式ドキュメント ────────────────────────────────
+    st.markdown("#### 公式ドキュメント")
+    link_col1, link_col2 = st.columns(2)
+    with link_col1:
+        st.markdown("""
+<div class="link-card">
+  <div class="lc-title">📝 <a href="https://docs.cvat.ai/" target="_blank">CVAT 公式ドキュメント</a></div>
+  <div class="lc-desc">アノテーション操作・プロジェクト管理・エクスポート形式の詳細</div>
+</div>
+<div class="link-card">
+  <div class="lc-title">🚀 <a href="https://docs.ultralytics.com/" target="_blank">Ultralytics YOLO 公式ドキュメント</a></div>
+  <div class="lc-desc">モデルの使い方・各学習パラメータの意味・モデルサイズ一覧</div>
+</div>
+<div class="link-card">
+  <div class="lc-title">📊 <a href="https://mlflow.org/docs/latest/index.html" target="_blank">MLflow 公式ドキュメント</a></div>
+  <div class="lc-desc">実験管理・モデルレジストリ・比較ビューの使い方</div>
+</div>
+""", unsafe_allow_html=True)
+    with link_col2:
+        st.markdown("""
+<div class="link-card">
+  <div class="lc-title">🔭 <a href="https://docs.voxel51.com/" target="_blank">FiftyOne 公式ドキュメント</a></div>
+  <div class="lc-desc">データセット探索・推論結果可視化・フィルタリングの使い方</div>
+</div>
+<div class="link-card">
+  <div class="lc-title">📺 <a href="https://docs.streamlit.io/" target="_blank">Streamlit 公式ドキュメント</a></div>
+  <div class="lc-desc">このUIで使用しているフレームワーク。ウィジェット・レイアウトの仕様</div>
+</div>
+""", unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
