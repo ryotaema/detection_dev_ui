@@ -460,6 +460,26 @@ def fetch_cvat_tasks() -> list[dict]:
         return []
 
 
+def fetch_cvat_task_labels(task_ids: list[int]) -> dict[str, list[str]]:
+    """複数タスクIDからラベル名リストを返す {タスク名(ID:xx): [label, ...]}"""
+    try:
+        client = get_cvat_client()
+        if not client:
+            return {}
+        result = {}
+        for tid in task_ids:
+            try:
+                task = client.tasks.retrieve(tid)
+                labels = task.get_labels()
+                result[f"{task.name}  (ID: {tid})"] = [lb.name for lb in labels]
+            except Exception as e:
+                st.warning(f"タスクID {tid} のラベル取得失敗: {e}")
+        return result
+    except Exception as e:
+        st.error(f"ラベル取得エラー: {e}")
+        return {}
+
+
 def export_cvat_task_raw(task_id: int, out_dir: Path) -> Optional[Path]:
     """指定タスクを「CVAT for images 1.1」(XML形式) でエクスポートし、
     out_dir/raw/ に解凍したパスを返す。
@@ -1760,6 +1780,106 @@ with tab1:
                     st.success(f"✅ {len(_ul_imgs)} ファイルを保存: `{_ul_out}`")
                     st.info("アノテーションを付与する場合は CVATにアップロード後、Step1からエクスポートしてください。")
 
+
+    # ── +α: チーム共通ラベルエクスポート ──────────────────────────────────────
+    st.markdown("---")
+    with st.expander("🏷️ チーム共通ラベルのエクスポート（+α）", expanded=False):
+        st.caption("複数のCVATタスクからラベルを収集し、チーム内で共有できる形式でダウンロードできます。")
+
+        _le_tasks = st.session_state.cvat_tasks
+        if not _le_tasks:
+            st.info("先に「タスク一覧を取得」を実行してください。")
+        else:
+            _le_opts = {f"{t['name']}  (ID: {t['id']})": t["id"] for t in _le_tasks}
+            _le_selected = st.multiselect(
+                "ラベルを収集するタスクを選択（複数可）",
+                options=list(_le_opts.keys()),
+                key="le_task_select",
+            )
+
+            if _le_selected:
+                if st.button("🔍 ラベルを取得", key="le_fetch_btn", use_container_width=True):
+                    _le_ids = [_le_opts[k] for k in _le_selected]
+                    with st.spinner("ラベル取得中..."):
+                        st.session_state["le_labels_by_task"] = fetch_cvat_task_labels(_le_ids)
+
+        if st.session_state.get("le_labels_by_task"):
+            _le_by_task: dict = st.session_state["le_labels_by_task"]
+
+            # 全ラベルを重複排除して収集
+            _le_all: list[str] = []
+            for _lbls in _le_by_task.values():
+                for _l in _lbls:
+                    if _l not in _le_all:
+                        _le_all.append(_l)
+
+            st.markdown("**含めるラベルを選択してください：**")
+            # タスク別ラベルは参考表示のみ（チェックボックスは重複排除済みリストで一度だけ描画）
+            for _tn, _lbls in _le_by_task.items():
+                st.caption(f"📋 {_tn}：{', '.join(_lbls)}")
+            st.markdown("---")
+            _le_cols = st.columns(3)
+            for _ci, _l in enumerate(_le_all):
+                with _le_cols[_ci % 3]:
+                    if f"le_chk_{_l}" not in st.session_state:
+                        st.session_state[f"le_chk_{_l}"] = True
+                    st.checkbox(_l, key=f"le_chk_{_l}")
+
+            _le_chosen = [_l for _l in _le_all if st.session_state.get(f"le_chk_{_l}", True)]
+
+            if _le_chosen:
+                st.markdown(f"**選択中: {len(_le_chosen)} ラベル** — `{', '.join(_le_chosen)}`")
+                _le_c1, _le_c2, _le_c3 = st.columns(3)
+                with _le_c1:
+                    _le_yaml = "names:\n" + "".join(f"  - {l}\n" for l in _le_chosen)
+                    st.download_button(
+                        "📥 YAML形式",
+                        data=_le_yaml,
+                        file_name="labels.yaml",
+                        mime="text/yaml",
+                        key="le_dl_yaml",
+                        use_container_width=True,
+                    )
+                with _le_c2:
+                    st.download_button(
+                        "📥 TXT形式",
+                        data="\n".join(_le_chosen),
+                        file_name="labels.txt",
+                        mime="text/plain",
+                        key="le_dl_txt",
+                        use_container_width=True,
+                    )
+                with _le_c3:
+                    _le_cvat_json = json.dumps(
+                        [{"name": l, "attributes": [], "type": "any", "sublabels": []} for l in _le_chosen],
+                        ensure_ascii=False, indent=2
+                    )
+                    st.download_button(
+                        "📥 CVAT JSON形式",
+                        data=_le_cvat_json,
+                        file_name="labels_cvat.json",
+                        mime="application/json",
+                        key="le_dl_cvat",
+                        use_container_width=True,
+                    )
+
+                st.markdown("---")
+                st.markdown("##### CVATで新規タスクを作成するときの手順")
+                st.markdown(f"""
+<div class="step-banner">
+  <div class="sb-title">📋 ラベルの共有方法</div>
+  <div class="sb-desc">ダウンロードした <code>labels_cvat.json</code> を使うと、CVATのラベル設定を一括で読み込めます。</div>
+</div>""", unsafe_allow_html=True)
+                st.markdown("""
+1. `http://localhost:8080` にアクセスしてログイン
+2. **Tasks** → **+** ボタンで新規タスク作成画面を開く
+3. タスク名・画像等を設定後、**Labels** セクションを開く
+4. **Raw** タブをクリックし、ダウンロードした `labels_cvat.json` の内容を貼り付ける
+5. **Done** をクリックしてラベルを確定する
+""")
+                st.info("💡 チームメンバー全員が同じ `labels_cvat.json` を使うことで、ラベル名の表記ゆれを防げます。")
+            else:
+                st.warning("1つ以上のラベルを選択してください。")
 
 # ===========================================================================
 # タブ2: YOLO 学習
