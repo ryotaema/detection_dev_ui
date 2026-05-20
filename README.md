@@ -124,6 +124,8 @@ EOF
 
 ### Step 5 — CVATデータベースの初期化
 
+> **必須・初回のみ**: このステップを省略すると CVAT が「Cannot connect to the server」エラーになります。
+
 ```bash
 # DB系コンテナを先に起動（初回のみ）
 docker compose up -d cvat_db cvat_redis cvat_iam_db
@@ -136,6 +138,15 @@ docker compose run --rm cvat_server bash -c "python manage.py migrate"
 docker compose run --rm cvat_server bash -c \
   "python manage.py createsuperuser --username admin --email admin@local.com"
 ```
+
+**ユーザー名は必ず `admin` にしてください。**  
+Streamlit が CVAT API にアクセスする際、`.env` の `CVAT_USERNAME` と一致するアカウントを使用します。  
+現在の設定では `CVAT_USERNAME=admin` のため、別のユーザー名にすると Streamlit からの接続が失敗します。  
+（将来的に複数ユーザーで運用する場合も、Streamlit 連携用の `admin` アカウントは残しておく必要があります。）
+
+**パスワードは英大文字・数字・記号を含む 8 文字以上にしてください。**  
+設定したパスワードは `.env` の `CVAT_PASSWORD` にも同じ値を記載してください。  
+コマンド実行中に `Bypass password validation and create user anyway? [y/N]:` と表示された場合は、パスワードが弱すぎるため `N` で中断し、より強いパスワードで再実行してください。
 
 ### Step 6 — 全サービス起動
 
