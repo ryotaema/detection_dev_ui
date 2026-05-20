@@ -70,6 +70,12 @@ detection_dev_ui/
 | MLflow UI | `mlflow` | http://localhost:5000 | 実験管理 |
 | FiftyOne | `streamlit_app` | http://localhost:5151 | 推論結果可視化 |
 
+### 起動後の画面
+
+セットアップ完了後、`http://localhost:8501` を開くと以下の画面が表示されます。
+
+![Streamlit 起動画面](docs/images/画面例1.png)
+
 ---
 
 ## セットアップ手順
