@@ -34,7 +34,8 @@ def _get_train_shared() -> tuple[dict, threading.Lock]:
 DATA_DIR       = Path(os.getenv("DATA_DIR",       "/workspace/data"))
 MODELS_DIR     = Path(os.getenv("MODELS_DIR",     "/workspace/models"))
 PREDICTIONS_DIR= Path(os.getenv("PREDICTIONS_DIR","/workspace/predictions"))
-CVAT_HOST      = os.getenv("CVAT_HOST",  "http://cvat-server:8080")
+CVAT_HOST      = os.getenv("CVAT_HOST",     "http://cvat-server:8080")  # コンテナ内通信用
+CVAT_WEB       = os.getenv("CVAT_WEB_HOST", "http://localhost:8080")    # ブラウザ表示用
 CVAT_USER      = os.getenv("CVAT_USERNAME","admin")
 CVAT_PASS      = os.getenv("CVAT_PASSWORD","admin")
 MLFLOW_URI     = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
@@ -1406,7 +1407,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### 🔗 クイックリンク")
-    st.markdown(f"[📝 CVAT UI]({CVAT_HOST})", unsafe_allow_html=False)
+    st.markdown(f"[📝 CVAT UI]({CVAT_WEB})", unsafe_allow_html=False)
     st.markdown(f"[📊 MLflow UI]({MLFLOW_WEB})", unsafe_allow_html=False)
     if st.session_state.fiftyone_port:
         fo_url = f"http://localhost:{st.session_state.fiftyone_port}"
