@@ -1,9 +1,13 @@
-# detection_dev_ui — 完全ローカル完結型 画像検出パイプライン
+# detection_dev_ui — ローカル完結型 画像検出パイプライン
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
 CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、  
 **ターミナル操作不要・GUI完結**の物体検出 MLOps システムです。
+
+> **初心者の方へ**: 機械学習・物体検出の経験が浅い方でも扱えるように設計しています。  
+> セットアップ後はブラウザ操作のみで、アノテーション → 学習 → 推論・評価まで一連のワークフローを完結させることができます。  
+> ターミナルを使うのはセットアップ時（Step 1〜7）だけです。
 
 ---
 
@@ -22,6 +26,17 @@ CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、
 > GPU非搭載環境でも動作しますが、YOLO学習はCPUのみとなり速度が大幅に低下します。  
 > CPU動作時は `docker-compose.yml` の `streamlit_app` から `deploy.resources.reservations` ブロックを削除してください。
 
+### ディスク容量の目安
+
+| 対象 | 目安 |
+|---|---|
+| Docker イメージ（初回ダウンロード） | 30〜50 GB |
+| アノテーション画像・データセット | 用途による |
+| 学習済みモデル（1モデルあたり） | 10〜200 MB |
+
+> 初回セットアップ時に大量の Docker イメージをダウンロードするため、  
+> **余裕を持って 60 GB 以上の空き容量**を確保しておくことを推奨します。
+
 ---
 
 ## システム構成
@@ -31,6 +46,7 @@ detection_dev_ui/
 ├── docker-compose.yml       # 全コンテナ統括
 ├── .env                     # 認証情報（要作成・gitignore済み）
 ├── .gitignore
+├── LICENSE                  # AGPL-3.0
 ├── nginx/
 │   └── cvat.conf            # CVATリバースプロキシ
 ├── app/
@@ -40,6 +56,7 @@ detection_dev_ui/
 ├── data/                    # CVATエクスポート先 / YOLO入力元（gitignore済み）
 ├── models/                  # YOLO学習済み重み（gitignore済み）
 └── predictions/             # 推論結果JSON / エクスポート画像（gitignore済み）
+    └── exports/             # 結果画像の書き出し先（PNG / JPEG）
 ```
 
 ### サービス一覧とポート
@@ -125,6 +142,9 @@ docker compose up -d
 sleep 30 && docker compose ps
 ```
 
+> **初回起動時間の目安**: Docker イメージのダウンロードとビルドに **10〜30 分程度** かかります（回線速度・マシンスペックによって異なります）。  
+> 2 回目以降はキャッシュが効くため数分で起動します。
+
 ### Step 7 — 疎通確認
 
 ```bash
@@ -146,6 +166,12 @@ docker compose down
 
 # ログ確認
 docker compose logs -f streamlit_app
+
+# アップデート（リポジトリに更新があった場合）
+git pull
+docker compose build streamlit_app && docker compose up -d streamlit_app
+# ※ docker-compose.yml や requirements.txt に変更があった場合は全サービス再起動
+# docker compose down && docker compose up -d
 ```
 
 ---
@@ -184,6 +210,22 @@ docker compose logs -f streamlit_app
    data/ のデータセット一覧・削除・統合
    models/ の学習済みモデルをカード形式で表示（mAP50・サイズ・学習日時付き）・削除・使用切替
    predictions/ の推論結果一括クリア
+```
+
+### データセット生成後の `data/` ディレクトリ構造
+
+「データセット生成」を実行すると `data/` 以下に以下の構造でファイルが展開されます。
+
+```
+data/
+└── {タスク名}_{日時}/
+    ├── images/
+    │   ├── train/      # 学習用画像
+    │   └── val/        # 検証用画像
+    ├── labels/
+    │   ├── train/      # 学習用アノテーション（YOLO形式 .txt）
+    │   └── val/        # 検証用アノテーション（YOLO形式 .txt）
+    └── data.yaml       # クラス名・パス設定（学習時に自動参照）
 ```
 
 ---
@@ -231,6 +273,11 @@ newgrp docker
 docker ps --format "table {{.Names}}\t{{.Ports}}" | grep 8080
 docker compose down && docker compose up -d
 ```
+
+### FiftyOne が Streamlit 内に表示されない
+
+ブラウザのセキュリティポリシー（iframe 制限）により、Streamlit 画面内に埋め込み表示されない場合があります。  
+その場合は直接 http://localhost:5151 をブラウザで開いてください。
 
 ### GPU 非搭載環境で動かしたい（CPU のみ）
 
