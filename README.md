@@ -65,9 +65,9 @@ detection_dev_ui/
 
 | サービス | コンテナ名 | URL | 役割 |
 |---|---|---|---|
+| Streamlit | `streamlit_app` | http://localhost:8501 | 統合UI（メイン・起点） |
 | CVAT UI | `cvat_proxy` | http://localhost:8080 | アノテーション |
 | MLflow UI | `mlflow` | http://localhost:5000 | 実験管理 |
-| Streamlit | `streamlit_app` | http://localhost:8501 | 統合UI（メイン） |
 | FiftyOne | `streamlit_app` | http://localhost:5151 | 推論結果可視化 |
 
 ---
@@ -103,7 +103,12 @@ docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ### Step 3 — リポジトリのクローン
 
 ```bash
+# SSH（GitHubにSSHキーを登録済みの場合）
 git clone git@github.com:ryotaemi/detection_dev_ui.git
+
+# HTTPS（SSHキーが設定されていない場合はこちら）
+git clone https://github.com/ryotaemi/detection_dev_ui.git
+
 cd detection_dev_ui
 ```
 
@@ -289,6 +294,24 @@ docker ps --format "table {{.Names}}\t{{.Ports}}" | grep 8080
 docker compose down && docker compose up -d
 ```
 
+### CVAT が「Cannot connect to the server」になる
+
+Step 5 の初期化が不完全な場合に発生します。以下を順に確認してください。
+
+**① コンテナ起動直後の場合**  
+`cvat_server` の起動完了に 1〜2 分かかります。しばらく待ってからブラウザを再読み込みしてください。
+
+**② Step 5 の `init` を実行していない場合**  
+`migrate` のみ実行して `migrateredis` が未実行だと、`cvat_server` が内部で無限待機します。  
+すでに `docker compose up -d` 済みの場合は以下で解消できます：
+
+```bash
+docker compose exec cvat_server bash -c "~/manage.py migrateredis"
+docker compose exec cvat_server bash -c "~/manage.py syncperiodicjobs"
+```
+
+完了後、ブラウザを再読み込みするとサインイン画面が表示されます。
+
 ### FiftyOne が Streamlit 内に表示されない
 
 ブラウザのセキュリティポリシー（iframe 制限）により、Streamlit 画面内に埋め込み表示されない場合があります。  
@@ -317,6 +340,7 @@ deploy:
 - `data/`・`models/`・`predictions/` はホスト側の bind mount のため、コンテナを削除してもデータは保持されます。
 - CVAT: `v2.64.0` / cvat-sdk: `2.64.0`（サーバーと SDK を同一バージョンに固定）
 - ユーザー定義プリセットは `models/.user_presets.json` に保存されます。
+- ユーザー定義テーマは `models/.user_themes.json` に保存されます。
 
 ---
 
