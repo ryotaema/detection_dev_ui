@@ -1,4 +1,4 @@
-# detection_dev_ui — ローカル完結型 画像検出パイプライン
+# detection_dev_ui — 初心者向け 画像検出パイプライン
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
