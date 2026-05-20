@@ -1,5 +1,7 @@
 # detection_dev_ui — 完全ローカル完結型 画像検出パイプライン
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+
 CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、  
 **ターミナル操作不要・GUI完結**の物体検出 MLOps システムです。
 
@@ -253,3 +255,19 @@ deploy:
 - `data/`・`models/`・`predictions/` はホスト側の bind mount のため、コンテナを削除してもデータは保持されます。
 - CVAT: `v2.64.0` / cvat-sdk: `2.64.0`（サーバーと SDK を同一バージョンに固定）
 - ユーザー定義プリセットは `models/.user_presets.json` に保存されます。
+
+---
+
+## ライセンス
+
+このプロジェクトは [GNU Affero General Public License v3.0](LICENSE) の下で公開されています。
+
+使用しているライブラリのライセンス:
+
+| ライブラリ | ライセンス |
+|---|---|
+| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) | AGPL-3.0 |
+| [CVAT](https://github.com/opencv/cvat) | MIT |
+| [MLflow](https://github.com/mlflow/mlflow) | Apache 2.0 |
+| [FiftyOne](https://github.com/voxel51/fiftyone) | Apache 2.0 |
+| [Streamlit](https://github.com/streamlit/streamlit) | Apache 2.0 |
