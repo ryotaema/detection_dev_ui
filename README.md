@@ -93,7 +93,12 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 sudo apt-get update
 sudo apt-get install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
+
+# Linux の場合
 sudo systemctl restart docker
+
+# macOS（Docker Desktop）の場合は systemctl は不要
+# → Docker Desktop アプリをメニューバーから「Restart」するか、一度終了して再起動してください
 ```
 
 ### Step 2 — docker グループへの追加
@@ -110,10 +115,10 @@ docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 
 ```bash
 # SSH（GitHubにSSHキーを登録済みの場合）
-git clone git@github.com:ryotaemi/detection_dev_ui.git
+git clone git@github.com:ryotaema/detection_dev_ui.git
 
 # HTTPS（SSHキーが設定されていない場合はこちら）
-git clone https://github.com/ryotaemi/detection_dev_ui.git
+git clone https://github.com/ryotaema/detection_dev_ui.git
 
 cd detection_dev_ui
 ```
@@ -295,10 +300,34 @@ newgrp docker
 
 ### コンテナ名が競合してエラーになる
 
+```
+Error response from daemon: Conflict. The container name "/cvat_redis_ondisk" is already in use ...
+```
+
+別の CVAT 環境など、同名のコンテナがすでに存在している場合に発生します。
+
+**① 同じリポジトリ内の起動済みコンテナが原因の場合**
+
 ```bash
-docker ps --format "table {{.Names}}\t{{.Ports}}" | grep 8080
 docker compose down && docker compose up -d
 ```
+
+**② 別プロジェクトの CVAT など、外部の同名コンテナが原因の場合**
+
+競合しているコンテナを停止・削除してから起動してください。
+
+```bash
+# 競合コンテナの確認
+docker ps -a --format "table {{.Names}}\t{{.Status}}" | grep cvat
+
+# 停止・削除（すべての停止済みコンテナをまとめて削除する場合）
+docker container prune
+
+# または名前を指定して個別削除
+docker rm -f cvat_redis_ondisk
+```
+
+> `data/`・`models/`・`predictions/` はホスト側の bind mount のため、コンテナを削除してもデータは保持されます。
 
 ### CVAT が「Cannot connect to the server」になる
 
