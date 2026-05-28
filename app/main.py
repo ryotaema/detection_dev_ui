@@ -1256,7 +1256,8 @@ _MODEL_OPTS = [
     "yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x",
     "yolo11n-seg", "yolo11s-seg", "yolo11m-seg", "yolo11l-seg", "yolo11x-seg",
     "yolo11n-pose", "yolo11s-pose", "yolo11m-pose", "yolo11l-pose", "yolo11x-pose",
-    "カスタム入力",
+    "yolo26n", "yolo26s", "yolo26m", "yolo26l", "yolo26x",
+    "その他",
 ]
 
 
@@ -1983,7 +1984,7 @@ with tab2:
                 _ef1, _ef2, _ef3 = st.columns(3)
                 with _ef1:
                     _ev["model"]   = st.selectbox("モデル", _MODEL_OPTS,
-                        index=_MODEL_OPTS.index(_ev.get("model","yolo11s")) if _ev.get("model","yolo11s") in _MODEL_OPTS else 1,
+                        index=_MODEL_OPTS.index(_ev.get("model","yolo11s")) if _ev.get("model","yolo11s") in _MODEL_OPTS else _MODEL_OPTS.index("その他"),
                         key="pe_model")
                     _ev["epochs"]  = st.number_input("エポック数", 1, 5000, int(_ev.get("epochs",100)), step=10, key="pe_epochs")
                     _ev["batch"]   = st.select_slider("バッチサイズ", [-1,4,8,16,32,64,128],
@@ -2061,9 +2062,23 @@ with tab2:
             key="tp_batch",
         )
 
-    if _model_preset == "カスタム入力":
-        model_name = st.text_input("モデルファイル名 (.pt)", value="yolo11x.pt",
-                                   help="例: yolo11x.pt, rtdetr-x.pt")
+    if _model_preset == "その他":
+        model_name = st.text_input(
+            "モデルファイル名 (.pt)",
+            value="yolo26n.pt",
+            help="例: yolo26n.pt, yolo11x.pt, rtdetr-x.pt",
+            key="tp_model_custom",
+        )
+        if model_name and not model_name.endswith(".pt"):
+            model_name = model_name + ".pt"
+        if model_name:
+            _local_candidates = list(MODELS_DIR.rglob(model_name)) + [Path(model_name)]
+            if any(p.exists() for p in _local_candidates):
+                st.success(f"✅ ローカルに `{model_name}` が見つかりました — ローカルファイルを使用します")
+            else:
+                st.info(f"⬇️ 学習開始時に Ultralytics が `{model_name}` を自動ダウンロードします（初回のみ）")
+        else:
+            model_name = "yolo26n.pt"
     else:
         model_name = f"{_model_preset}.pt"
         st.code(f"モデル: {model_name}", language="text")
@@ -2077,11 +2092,19 @@ with tab2:
     _yaml_labels = [str(p.relative_to(DATA_DIR)) for p in _yaml_candidates]
     _YAML_MANUAL = "（手動入力）"
     _yaml_options = _yaml_labels + [_YAML_MANUAL]
-    _yaml_sel = st.selectbox(
-        "data.yaml",
-        _yaml_options,
-        index=0 if _yaml_labels else len(_yaml_options) - 1,
-    )
+
+    _yc1, _yc2 = st.columns([10, 1])
+    with _yc1:
+        _yaml_sel = st.selectbox(
+            "data.yaml",
+            _yaml_options,
+            index=0 if _yaml_labels else len(_yaml_options) - 1,
+        )
+    with _yc2:
+        st.markdown('<div style="margin-top:24px"></div>', unsafe_allow_html=True)
+        if st.button("📂", key="btn_ds_dir", help="ディレクトリ内容を表示 / 非表示"):
+            st.session_state["_ds_dir_open"] = not st.session_state.get("_ds_dir_open", False)
+
     if _yaml_sel == _YAML_MANUAL:
         data_yaml_path = st.text_input(
             "data.yaml パスを直接入力 (コンテナ内絶対パス)",
@@ -2089,7 +2112,65 @@ with tab2:
         )
     else:
         data_yaml_path = str(DATA_DIR / _yaml_sel)
-        st.code(data_yaml_path, language="text")
+        _ds_dir_path = Path(data_yaml_path).parent
+        # ── データセット詳細パネル ──
+        try:
+            import yaml as _yaml_mod
+            _yaml_content = _yaml_mod.safe_load(Path(data_yaml_path).read_text())
+            _nc     = _yaml_content.get("nc", "?")
+            _names  = _yaml_content.get("names", [])
+            _tr_dir = _ds_dir_path / "images" / "train"
+            _vl_dir = _ds_dir_path / "images" / "val"
+            _n_tr   = len(list(_tr_dir.glob("*.*"))) if _tr_dir.exists() else "—"
+            _n_vl   = len(list(_vl_dir.glob("*.*"))) if _vl_dir.exists() else "—"
+            _nm_str = ", ".join(str(n) for n in _names[:10]) + ("…" if len(_names) > 10 else "")
+            st.markdown(f"""
+<div style="background:#0e1520;border:1px solid #2d6b47;border-left:4px solid #4caf7d;
+     border-radius:6px;padding:10px 16px;margin:6px 0 10px;">
+  <div style="color:#4caf7d;font-size:.87rem;font-weight:700;margin-bottom:6px;">
+    📁 {_ds_dir_path.name}
+  </div>
+  <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:4px;">
+    <span style="color:#6a8aaa;font-size:.82rem;">クラス数: <b style="color:#c8d8e8">{_nc}</b></span>
+    <span style="color:#6a8aaa;font-size:.82rem;">Train 画像: <b style="color:#c8d8e8">{_n_tr}</b></span>
+    <span style="color:#6a8aaa;font-size:.82rem;">Val 画像: <b style="color:#c8d8e8">{_n_vl}</b></span>
+  </div>
+  <div style="color:#6a8aaa;font-size:.8rem;">
+    ラベル: <span style="color:#c8d8e8">{_nm_str if _nm_str else "—"}</span>
+  </div>
+  <div style="color:#4a6080;font-size:.75rem;margin-top:4px;">{data_yaml_path}</div>
+</div>""", unsafe_allow_html=True)
+        except Exception:
+            st.code(data_yaml_path, language="text")
+
+        # ── ディレクトリビューア（📂 ボタンでトグル）──
+        if st.session_state.get("_ds_dir_open", False):
+            with st.container(border=True):
+                st.caption(f"📂 {_ds_dir_path}")
+                try:
+                    _entries = sorted(
+                        _ds_dir_path.iterdir(),
+                        key=lambda p: (p.is_file(), p.name),
+                    )
+                    for _e in _entries:
+                        if _e.is_dir():
+                            _sub_cnt = len(list(_e.iterdir()))
+                            st.markdown(
+                                f"📁 **{_e.name}/**"
+                                f"<span style='color:#4a6080;font-size:.78rem'> ({_sub_cnt} 件)</span>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            _sz = _e.stat().st_size
+                            _sz_s = (f"{_sz/1024:.1f} KB" if _sz < 1_048_576
+                                     else f"{_sz/1048576:.1f} MB")
+                            st.markdown(
+                                f"📄 {_e.name}"
+                                f"<span style='color:#4a6080;font-size:.78rem'> {_sz_s}</span>",
+                                unsafe_allow_html=True,
+                            )
+                except Exception as _dir_err:
+                    st.warning(str(_dir_err))
 
     col_p, col_q = st.columns(2)
     with col_p:
@@ -2097,7 +2178,7 @@ with tab2:
     with col_q:
         run_name = st.text_input(
             "ラン名",
-            value=f"{_model_preset.replace('カスタム入力','custom')}_ep{epochs}_{datetime.now():%H%M}",
+            value=f"{_model_preset.replace('その他','custom')}_ep{epochs}_{datetime.now():%H%M}",
         )
 
     # ── 学習設定（最適化・正則化）────────────────────────────────────────────
@@ -2291,6 +2372,29 @@ with tab2:
         else:
             crop_fraction = 1.0
             auto_augment  = "randaugment"
+
+    # ── 学習設定サマリー ──────────────────────────────────────────────────────
+    _ds_disp = Path(data_yaml_path).parent.name if data_yaml_path else "—"
+    st.markdown("#### 📋 学習設定サマリー")
+    _sma, _smb, _smc, _smd, _sme = st.columns(5)
+    _sma.metric("モデル", model_name)
+    _smb.metric("エポック数", str(epochs))
+    _smc.metric("バッチ", str(batch_size) if batch_size != -1 else "Auto")
+    _smd.metric("imgsz", str(imgsz))
+    _sme.metric("patience", str(patience) if patience > 0 else "OFF")
+    _smf, _smg, _smh, _smi, _smj = st.columns(5)
+    _smf.metric("optimizer", optimizer)
+    _smg.metric("lr0", str(lr0))
+    _smh.metric("warmup", str(warmup_epochs))
+    _smi.metric("dropout", str(dropout))
+    _smj.metric("AMP", "ON" if amp else "OFF")
+    st.markdown(
+        f'<div style="background:#0d1520;border:1px solid #1e2d40;border-radius:6px;'
+        f'padding:8px 14px;margin:8px 0 16px;font-size:.82rem;color:#6a8aaa;">'
+        f'📁 データセット: <b style="color:#c8d8e8">{_ds_disp}</b>'
+        f'<span style="color:#4a6080;font-size:.75rem"> &nbsp;—&nbsp; {data_yaml_path}</span></div>',
+        unsafe_allow_html=True,
+    )
 
     st.markdown("---")
 
