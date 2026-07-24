@@ -2,41 +2,40 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
-CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、  
-**ターミナル操作不要・GUI完結**の物体検出 MLOps システムです。
+CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、**ターミナル操作不要・GUI完結**の物体検出 MLOps システムです。
 
-> **初心者の方へ**: 機械学習・物体検出の経験が浅い方でも扱えるように設計しています。  
-> セットアップ後はブラウザ操作のみで、アノテーション → 学習 → 推論・評価まで一連のワークフローを完結させることができます。  
-> ターミナルを使うのはセットアップ時（Step 1〜7）だけです。  
-> CVATの形式関連で詰まることが多かったので作成しました。  
+> **初心者の方へ**: 機械学習・物体検出の経験が浅い方でも扱えるように設計しています。
+> セットアップ後はブラウザ操作のみで、アノテーション → 学習 → 推論・評価まで一連のワークフローを完結させることができます。
+> ターミナルを使うのはセットアップ時（Step 1〜7）だけです。
+> CVATの形式関連で詰まることが多かったので作成しました。
 > ぜひ、なれたらそれぞれの要素を自分で一通りできるように頑張ってみてください^^
 
 ---
 
 ## 動作確認済み環境
 
-| 項目 | 要件 |
-|---|---|
-| OS | Ubuntu 22.04 LTS |
-| Docker | 24.x 以上 |
-| Docker Compose | v2.x 以上 |
-| GPU | NVIDIA GPU（VRAM 8GB 以上推奨） |
-| NVIDIAドライバ | 520 以上 |
-| CUDA | 12.x 系 |
-| nvidia-container-toolkit | 1.14 以上 |
+| 項目                     | 要件                            |
+| ------------------------ | ------------------------------- |
+| OS                       | Ubuntu 22.04 LTS                |
+| Docker                   | 24.x 以上                       |
+| Docker Compose           | v2.x 以上                       |
+| GPU                      | NVIDIA GPU（VRAM 8GB 以上推奨） |
+| NVIDIAドライバ           | 520 以上                        |
+| CUDA                     | 12.x 系                         |
+| nvidia-container-toolkit | 1.14 以上                       |
 
-> GPU非搭載環境でも動作しますが、YOLO学習はCPUのみとなり速度が大幅に低下します。  
+> GPU非搭載環境でも動作しますが、YOLO学習はCPUのみとなり速度が大幅に低下します。
 > CPU動作時は `docker-compose.yml` の `streamlit_app` から `deploy.resources.reservations` ブロックを削除してください。
 
 ### ディスク容量の目安
 
-| 対象 | 目安 |
-|---|---|
-| Docker イメージ（初回ダウンロード） | 30〜50 GB |
-| アノテーション画像・データセット | 用途による |
-| 学習済みモデル（1モデルあたり） | 10〜200 MB |
+| 対象                                | 目安       |
+| ----------------------------------- | ---------- |
+| Docker イメージ（初回ダウンロード） | 30〜50 GB  |
+| アノテーション画像・データセット    | 用途による |
+| 学習済みモデル（1モデルあたり）     | 10〜200 MB |
 
-> 初回セットアップ時に大量の Docker イメージをダウンロードするため、  
+> 初回セットアップ時に大量の Docker イメージをダウンロードするため、
 > **余裕を持って 60 GB 以上の空き容量**を確保しておくことを推奨します。
 
 ---
@@ -49,26 +48,40 @@ detection_dev_ui/
 ├── .env                     # 認証情報（要作成・gitignore済み）
 ├── .gitignore
 ├── LICENSE                  # AGPL-3.0
+├── docker-compose.serverless.yml  # CVAT自動アノテーション(Nuclio)オーバーライド
 ├── nginx/
 │   └── cvat.conf            # CVATリバースプロキシ
 ├── app/
 │   ├── Dockerfile           # Streamlit統合UIコンテナ
 │   ├── requirements.txt
-│   └── main.py              # Streamlit アプリ本体
+│   ├── main.py              # Streamlit アプリ本体
+│   ├── bytetrack.yaml       # ByteTracker 設定（track_buffer 等を編集可）
+│   └── botsort.yaml         # BoT-SORT 設定（track_buffer 等を編集可）
+├── serverless/              # CVAT自動アノテーション用の自作YOLO関数一式
+│   ├── deploy.sh            # 関数のビルド&デプロイ（nuctl自動導入）
+│   ├── remove.sh            # 関数の削除
+│   ├── _common/            # 全関数共通の推論ハンドラ（main.py / model_handler.py）
+│   ├── custom/             # モデルごとの関数定義（function.yaml / model.env）
+│   └── README.md           # 自動アノテーションのセットアップ手順
+├── docs/
+│   ├── guide.md
+│   └── cvat_shortcuts.md    # CVAT よく使うショートカット集
 ├── data/                    # CVATエクスポート先 / YOLO入力元（gitignore済み）
 ├── models/                  # YOLO学習済み重み（gitignore済み）
 └── predictions/             # 推論結果JSON / エクスポート画像（gitignore済み）
-    └── exports/             # 結果画像の書き出し先（PNG / JPEG）
+    ├── exports/             # 結果画像の書き出し先（PNG / JPEG）
+    └── videos/              # 動画推論の出力先（アノテーション済み MP4 + サマリー JSON）
 ```
 
 ### サービス一覧とポート
 
-| サービス | コンテナ名 | URL | 役割 |
-|---|---|---|---|
+| サービス  | コンテナ名        | URL                   | 役割                   |
+| --------- | ----------------- | --------------------- | ---------------------- |
 | Streamlit | `streamlit_app` | http://localhost:8501 | 統合UI（メイン・起点） |
-| CVAT UI | `cvat_proxy` | http://localhost:8080 | アノテーション |
-| MLflow UI | `mlflow` | http://localhost:5000 | 実験管理 |
-| FiftyOne | `streamlit_app` | http://localhost:5151 | 推論結果可視化 |
+| CVAT UI   | `cvat_proxy`    | http://localhost:8080 | アノテーション         |
+| MLflow UI | `mlflow`        | http://localhost:5000 | 実験管理               |
+| FiftyOne  | `streamlit_app` | http://localhost:5151 | 推論結果可視化         |
+| Nuclio    | `nuclio`        | http://localhost:8070 | 自動アノテーション基盤（任意・serverless有効時） |
 
 ### 起動後の画面
 
@@ -155,14 +168,12 @@ docker compose run --rm cvat_server bash -c \
   "~/manage.py createsuperuser --username admin --email admin@local.com"
 ```
 
-**ユーザー名は必ず `admin` にしてください。**  
-Streamlit が CVAT API にアクセスする際、`.env` の `CVAT_USERNAME` と一致するアカウントを使用します。  
-現在の設定では `CVAT_USERNAME=admin` のため、別のユーザー名にすると Streamlit からの接続が失敗します。  
+**ユーザー名は必ず `admin` にしてください。**
+Streamlit が CVAT API にアクセスする際、`.env` の `CVAT_USERNAME` と一致するアカウントを使用します。
+現在の設定では `CVAT_USERNAME=admin` のため、別のユーザー名にすると Streamlit からの接続が失敗します。
 （将来的に複数ユーザーで運用する場合も、Streamlit 連携用の `admin` アカウントは残しておく必要があります。）
 
-**パスワードは英大文字・数字・記号を含む 8 文字以上にしてください。**  
-設定したパスワードは `.env` の `CVAT_PASSWORD` にも同じ値を記載してください。  
-コマンド実行中に `Bypass password validation and create user anyway? [y/N]:` と表示された場合は、パスワードが弱すぎるため `N` で中断し、より強いパスワードで再実行してください。
+**パスワードは英大文字・数字・記号を含む 8 文字以上にしてください。**設定したパスワードは `.env` の `CVAT_PASSWORD` にも同じ値を記載してください。コマンド実行中に `Bypass password validation and create user anyway? [y/N]:` と表示された場合は、パスワードが弱すぎるため `N` で中断し、より強いパスワードで再実行してください。
 
 > **CVATへのログイン情報**: セットアップ完了後、`http://localhost:8080` を開いた際のサインイン画面には、ここで作成した **ユーザー名 `admin`・設定したパスワード** を入力してください。
 
@@ -173,7 +184,7 @@ docker compose up -d
 sleep 30 && docker compose ps
 ```
 
-> **初回起動時間の目安**: Docker イメージのダウンロードとビルドに **10〜30 分程度** かかります（回線速度・マシンスペックによって異なります）。  
+> **初回起動時間の目安**: Docker イメージのダウンロードとビルドに **10〜30 分程度** かかります（回線速度・マシンスペックによって異なります）。
 > 2 回目以降はキャッシュが効くため数分で起動します。
 
 ### Step 7 — 疎通確認
@@ -213,6 +224,8 @@ docker compose build streamlit_app && docker compose up -d streamlit_app
 ① CVATでアノテーション
    http://localhost:8080 → admin / 設定したパスワード でログイン
    プロジェクト作成 → 画像アップロード → バウンディングボックス / ポリゴンを付ける
+   ・自作モデルによる自動アノテーションで下書きを作れる（後述「CVAT 自動アノテーション」）
+   ・よく使うショートカットは docs/cvat_shortcuts.md（アプリ内は F1 で一覧）
 
 ② Streamlit「📤 Step1: データ取込」タブ
    http://localhost:8501 を開く
@@ -230,12 +243,43 @@ docker compose build streamlit_app && docker compose up -d streamlit_app
    → 学習完了時にトースト通知＋バルーンアニメーション
 
 ④ Streamlit「🔭 Step3: 推論・評価」タブ
-   学習済みモデルを選択 →「推論実行」
-   → バウンディングボックス付き画像プレビューをグリッドで確認
-   「📥 結果画像エクスポート」
-   → 「すべて書き出す」または「選択して書き出す」（プレビューを見ながらページ単位で複数選択）
-   → PNG / JPEG 形式で predictions/exports/ に保存
-   「FiftyOneで可視化」→ http://localhost:5151 でブラウザ確認
+
+   【推論対象の選択】
+   - 📂 data/ のディレクトリ  — 学習時に生成したテスト画像フォルダを指定
+   - 📤 画像をアップロード    — JPG / PNG 等を複数選択してアップロード
+   - 🎬 動画をアップロード    — MP4 / AVI / MOV / MKV / WebM に対応
+
+   【動画推論オプション】（動画モード選択時に表示）
+   - 🔄 オブジェクトトラッキング ON/OFF
+     - ByteTrack: 高速・位置ベースのトラッキング
+     - BoT-SORT: 外観特徴も使用し遮蔽に強いトラッキング
+     - 設定は `app/bytetrack.yaml` / `app/botsort.yaml` を編集して調整可（再起動不要）
+   - 🕐 テンポラル平滑化（ちらつき抑制）ON/OFF
+     - 補完フレーム数をスライダーで調整（1〜30フレーム）
+     - 消えた検出をグレーのボックスで一時的に補完描画
+
+   【推論実行後】
+   - 画像: バウンディングボックス付きプレビューをグリッドで確認
+   - 動画: アノテーション済み MP4 をその場で再生 / ダウンロード
+          フレームごとの検出数グラフ・ユニークトラック数を表示（トラッキング時）
+
+   【📥 結果画像エクスポート】
+   → 「すべて書き出す」または「選択して書き出す」
+   → PNG / JPEG 形式で predictions/exports/ に保存 → ZIP ダウンロード
+
+   【🚩 再アノテーション用エクスポート】
+   → プレビューまたは選択グリッドの 🚩 ボタンで問題のある画像にフラグを立てる
+     （誤検出・検出漏れなど）
+   → 「再アノテーション用 ZIP を生成」で以下をまとめてダウンロード:
+     - `images/`        元画像（BBOX なし）
+     - `labels/`        YOLO 形式 txt（class_id cx cy w h）
+     - `classes.txt`    クラス名一覧
+     - `annotations.xml` CVAT for images 1.1 形式（推論結果を事前アノテーションとして含む）
+   → CVAT でタスクを作成 → 画像をアップロード → Actions > Upload annotations
+     → 形式「CVAT for images 1.1」で `annotations.xml` を選択
+     → 推論結果が事前アノテーション済みの状態で修正作業を開始できる
+
+   【FiftyOne で可視化】→ http://localhost:5151 でブラウザ確認
 
 ⑤ Streamlit「📁 データ管理」タブ（任意）
    data/ のデータセット一覧・削除・統合
@@ -261,9 +305,51 @@ data/
 
 ---
 
+## CVAT 自動アノテーション（Nuclio serverless・任意）
+
+自作の学習済み YOLO モデル（`models/<run>/weights/best.pt`）を、CVAT の
+**Actions → Automatic annotation** から呼び出して自動でバウンディングボックスを
+付けられる機能。CVAT は [Nuclio](https://nuclio.io/) というサーバレス基盤経由で
+モデルを実行する。詳細な手順・新モデル追加方法・トラブルシューティングは
+**[`serverless/README.md`](serverless/README.md)** を参照。
+
+```
+CVAT UI（Actions → Automatic annotation）
+   │  画像 + しきい値
+   ▼
+nuclio ダッシュボード(:8070) ── cvat_net ── 関数コンテナ（best.pt 内蔵）→ 検出結果
+```
+
+### 使い方（3ステップ）
+
+```bash
+# 1) Nuclio 基盤 + CVAT serverless 連携を起動
+docker compose -f docker-compose.yml -f docker-compose.serverless.yml \
+  up -d nuclio cvat_server cvat_worker_annotation
+
+# 2) 自作モデルを関数としてデプロイ（既定 GPU / --cpu で CPU）
+#    初回は nuctl を serverless/bin/ に自動ダウンロードし、イメージをビルドする
+./serverless/deploy.sh
+
+# 3) CVAT (http://localhost:8080) でタスクを開き
+#    Actions → Automatic annotation → 自作モデルを選択 → ラベル対応付け → Annotate
+```
+
+### 補足
+
+- **既定は GPU 版**（`function-gpu.yaml`・CUDA 12.8 / cu128）。GPU を関数に割り当てるには
+  Docker daemon の `default-runtime` を `nvidia` にする必要がある（下記）。
+  daemon を変えたくない場合は `./serverless/deploy.sh --cpu` で CPU 版を使う。
+- GPU 有効化: `/etc/docker/daemon.json` に `"default-runtime": "nvidia"` を追加して
+  `sudo systemctl restart docker`（**稼働中の全コンテナが再起動する**点に注意）。
+- 関数の状態は Nuclio ダッシュボード http://localhost:8070 でも確認できる。
+- 手修正の効率化には [`docs/cvat_shortcuts.md`](docs/cvat_shortcuts.md)（CVAT ショートカット集）も参照。
+
+---
+
 ## Dockerfile の CUDA バージョン設定
 
-`app/Dockerfile` のベースイメージと PyTorch インストール URL は、  
+`app/Dockerfile` のベースイメージと PyTorch インストール URL は、
 **お使いの CUDA バージョンに合わせて変更**してください。
 
 ```dockerfile
@@ -274,17 +360,17 @@ RUN pip install --no-cache-dir torch torchvision torchaudio \
       --index-url https://download.pytorch.org/whl/cu128
 ```
 
-| CUDA | `--index-url` の末尾 | ベースイメージタグ例 |
-|---|---|---|
-| 11.8 | `cu118` | `cuda:11.8.0-cudnn8-runtime-ubuntu22.04` |
-| 12.1 | `cu121` | `cuda:12.1.1-cudnn8-runtime-ubuntu22.04` |
-| 12.4 | `cu124` | `cuda:12.4.1-cudnn-runtime-ubuntu22.04` |
-| 12.6 | `cu126` | `cuda:12.6.3-cudnn-runtime-ubuntu22.04` |
-| 12.8 | `cu128` | `cuda:12.8.1-cudnn-runtime-ubuntu22.04` |
+| CUDA | `--index-url` の末尾 | ベースイメージタグ例                       |
+| ---- | ---------------------- | ------------------------------------------ |
+| 11.8 | `cu118`              | `cuda:11.8.0-cudnn8-runtime-ubuntu22.04` |
+| 12.1 | `cu121`              | `cuda:12.1.1-cudnn8-runtime-ubuntu22.04` |
+| 12.4 | `cu124`              | `cuda:12.4.1-cudnn-runtime-ubuntu22.04`  |
+| 12.6 | `cu126`              | `cuda:12.6.3-cudnn-runtime-ubuntu22.04`  |
+| 12.8 | `cu128`              | `cuda:12.8.1-cudnn-runtime-ubuntu22.04`  |
 
 > RTX 50系（Blackwell / sm_120）は CUDA 12.8 以上が必要です。cu126 では `no kernel image` エラーが発生します。
 
-利用可能なイメージ一覧: https://hub.docker.com/r/nvidia/cuda/tags  
+利用可能なイメージ一覧: https://hub.docker.com/r/nvidia/cuda/tags
 PyTorch 対応ビルド一覧: https://pytorch.org/get-started/locally/
 
 ---
@@ -333,11 +419,11 @@ docker rm -f cvat_redis_ondisk
 
 Step 5 の初期化が不完全な場合に発生します。以下を順に確認してください。
 
-**① コンテナ起動直後の場合**  
+**① コンテナ起動直後の場合**
 `cvat_server` の起動完了に 1〜2 分かかります。しばらく待ってからブラウザを再読み込みしてください。
 
-**② Step 5 の `init` を実行していない場合**  
-`migrate` のみ実行して `migrateredis` が未実行だと、`cvat_server` が内部で無限待機します。  
+**② Step 5 の `init` を実行していない場合**
+`migrate` のみ実行して `migrateredis` が未実行だと、`cvat_server` が内部で無限待機します。
 すでに `docker compose up -d` 済みの場合は以下で解消できます：
 
 ```bash
@@ -349,7 +435,7 @@ docker compose exec cvat_server bash -c "~/manage.py syncperiodicjobs"
 
 ### FiftyOne が Streamlit 内に表示されない
 
-ブラウザのセキュリティポリシー（iframe 制限）により、Streamlit 画面内に埋め込み表示されない場合があります。  
+ブラウザのセキュリティポリシー（iframe 制限）により、Streamlit 画面内に埋め込み表示されない場合があります。
 その場合は直接 http://localhost:5151 をブラウザで開いてください。
 
 ### GPU 非搭載環境で動かしたい（CPU のみ）
@@ -376,6 +462,9 @@ deploy:
 - CVAT: `v2.64.0` / cvat-sdk: `2.64.0`（サーバーと SDK を同一バージョンに固定）
 - ユーザー定義プリセットは `models/.user_presets.json` に保存されます。
 - ユーザー定義テーマは `models/.user_themes.json` に保存されます。
+- トラッカー設定（`app/bytetrack.yaml` / `app/botsort.yaml`）はホストとコンテナがバインドマウントで共有されるため、ファイルを保存するだけで次回推論から反映されます（再起動不要）。
+- 動画推論の出力は `predictions/videos/` に保存され、画像推論の `predictions/*.json` とは分離されています。
+- 🚩 再アノテーション用フラグはブラウザセッション中のみ保持されます（リロードするとリセット）。
 
 ---
 
@@ -385,10 +474,10 @@ deploy:
 
 使用しているライブラリのライセンス:
 
-| ライブラリ | ライセンス |
-|---|---|
-| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) | AGPL-3.0 |
-| [CVAT](https://github.com/opencv/cvat) | MIT |
-| [MLflow](https://github.com/mlflow/mlflow) | Apache 2.0 |
-| [FiftyOne](https://github.com/voxel51/fiftyone) | Apache 2.0 |
-| [Streamlit](https://github.com/streamlit/streamlit) | Apache 2.0 |
+| ライブラリ                                                  | ライセンス |
+| ----------------------------------------------------------- | ---------- |
+| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) | AGPL-3.0   |
+| [CVAT](https://github.com/opencv/cvat)                         | MIT        |
+| [MLflow](https://github.com/mlflow/mlflow)                     | Apache 2.0 |
+| [FiftyOne](https://github.com/voxel51/fiftyone)                | Apache 2.0 |
+| [Streamlit](https://github.com/streamlit/streamlit)            | Apache 2.0 |

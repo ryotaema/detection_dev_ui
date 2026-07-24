@@ -20,3 +20,8 @@ __pycache__/
 *.zip
 *.bak
 docker-compose.yml.bak
+
+# serverless (Nuclio) のビルド生成物・ダウンロード物
+serverless/bin/
+serverless/.build/
+

@@ -1,0 +1,133 @@
+# CVAT 自動アノテーション (Nuclio serverless) — 自作 YOLO モデル
+
+学習済みの自作 YOLO モデル (`models/<run>/weights/best.pt`) を CVAT の
+**Automatic annotation** から使えるようにするための一式。
+
+CVAT は [Nuclio](https://nuclio.io/) というサーバレス基盤経由でモデルを呼び出す。
+各モデルを「Nuclio 関数」としてデプロイすると、CVAT のタスク/ジョブ画面の
+**Actions → Automatic annotation** に選択肢として現れる。
+
+```
+CVAT UI (Actions → Automatic annotation)
+   │  base64 画像 + threshold
+   ▼
+nuclio ダッシュボード (:8070)  ── cvat_net ──  関数コンテナ (best.pt 内蔵)
+                                                   main.py:handler → 検出結果 JSON
+```
+
+## ディレクトリ構成
+
+```
+serverless/
+├── deploy.sh              # 関数のビルド & デプロイ (nuctl 自動導入)
+├── remove.sh              # 関数の削除
+├── _common/              # 全関数で共有するハンドラ
+│   ├── main.py           #   Nuclio エントリポイント
+│   └── model_handler.py  #   Ultralytics 推論ラッパ
+└── custom/
+    ├── yolo11s-bellpepper/
+    │   ├── function.yaml       # CPU 用定義 (ラベル spec を含む)
+    │   ├── function-gpu.yaml   # GPU 用定義 (cu128 / Blackwell 対応)
+    │   └── model.env           # MODEL_RUN=<models/ 配下の run 名>
+    └── yolo26m-bellpepper/
+        └── ...
+```
+
+`best.pt` はリポジトリに含めない。`deploy.sh` が `model.env` の `MODEL_RUN` を読み、
+`models/<MODEL_RUN>/weights/best.pt` をビルド時にコピーする。
+
+## 使い方
+
+### 1. Nuclio 基盤 + CVAT serverless 連携を起動
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.serverless.yml \
+  up -d nuclio cvat_server cvat_worker_annotation
+```
+
+`docker-compose.serverless.yml` が行うこと:
+- `nuclio` ダッシュボード (`quay.io/nuclio/dashboard:1.15.9`) を `cvat_net` に追加
+- `cvat_server` / `cvat_worker_annotation` に `CVAT_SERVERLESS=1` を付与
+
+### 2. 関数をデプロイ
+
+```bash
+# GPU (既定・下記「GPU で動かす」の前提を満たしていること)
+./serverless/deploy.sh
+
+# 特定モデルだけ
+./serverless/deploy.sh yolo11s-bellpepper
+
+# CPU (daemon 変更不要で確実に動く)
+./serverless/deploy.sh --cpu
+```
+
+- 初回は `nuctl` (v1.15.9) を `serverless/bin/` に自動ダウンロードする
+- 関数コンテナは `${COMPOSE_PROJECT_NAME}_cvat_net` に接続される
+  （既定は `.env` の `COMPOSE_PROJECT_NAME` から解決。`CVAT_NETWORK` で上書き可）
+
+### 3. CVAT で使う
+
+1. CVAT (http://localhost:8080) でタスク/ジョブを開く
+2. **Actions → Automatic annotation**
+3. Model に自作モデル（例: *YOLO11s BellPepper (custom / CPU)*）を選択
+4. モデルのラベルと CVAT タスクのラベルを対応付け → **Annotate**
+
+Nuclio 側の状態は http://localhost:8070 でも確認できる。
+
+### 4. 削除
+
+```bash
+./serverless/remove.sh                        # 全関数削除
+./serverless/remove.sh custom-yolo11s-bellpepper
+```
+
+## GPU で動かす（既定）
+
+`deploy.sh` の既定は GPU。CVAT の GPU serverless は、Docker daemon の
+**default-runtime を `nvidia`** にしていないと関数コンテナに GPU が渡らない。
+
+`/etc/docker/daemon.json` を編集:
+
+```json
+{
+    "default-runtime": "nvidia",
+    "runtimes": {
+        "nvidia": { "path": "nvidia-container-runtime", "args": [] }
+    }
+}
+```
+
+反映には Docker デーモンの再起動が必要（**稼働中の全コンテナが再起動する**点に注意）:
+
+```bash
+sudo systemctl restart docker
+docker compose -f docker-compose.yml -f docker-compose.serverless.yml \
+  up -d nuclio cvat_server cvat_worker_annotation
+./serverless/deploy.sh --gpu
+```
+
+> RTX 50 系 (Blackwell / sm_120) は CUDA 12.8 + cu128 が必須。
+> `function-gpu.yaml` は `nvidia/cuda:12.8.1` ベース + cu128 で構成済み。
+
+## 新しいモデルを追加する
+
+1. `serverless/custom/<name>/` を作成
+2. `function.yaml` / `function-gpu.yaml` を用意
+   - `metadata.name` は一意・小文字ハイフン
+   - `annotations.spec` のラベル名は **モデルのクラス名 = CVAT タスクのラベル名** に合わせる
+   - マルチクラスなら `spec` に全クラスを列挙（`id` は学習時のクラス index）
+3. `model.env` に `MODEL_RUN=<models/ 配下の run 名>` を記載
+4. `./serverless/deploy.sh <name>`
+
+## トラブルシューティング
+
+| 症状 | 対処 |
+|---|---|
+| CVAT に関数が出ない | `curl -s localhost:8070/api/functions` で関数を確認。`cvat_server` を再起動 |
+| 関数が `error` 状態 | `docker logs nuclio-custom-...` でハンドラのログ確認 |
+| GPU が使われない | daemon の `default-runtime=nvidia` になっているか確認 |
+| ネットワーク不一致 | `CVAT_NETWORK=<実ネットワーク名> ./serverless/deploy.sh` で明示 |
+| ラベルが投入されない | `function.yaml` の spec ラベル名と CVAT タスクのラベル名が一致しているか |

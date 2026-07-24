@@ -1,0 +1,52 @@
+metadata:
+  name: custom-yolo11s-bellpepper
+  namespace: cvat
+  annotations:
+    name: YOLO11s BellPepper (custom / CPU)
+    type: detector
+    # spec のラベル名は CVAT タスク側のラベル名と一致させること
+    spec: |
+      [
+        { "id": 0, "name": "bell_pepper", "type": "rectangle" }
+      ]
+
+spec:
+  description: 自作 YOLO11s bell_pepper 検出器 (Ultralytics / CPU)
+  runtime: "python:3.10"
+  handler: main:handler
+  eventTimeout: 60s
+
+  env:
+    - name: YOLO_CONFIG_DIR
+      value: /tmp/Ultralytics
+    - name: MPLCONFIGDIR
+      value: /tmp/matplotlib
+
+  build:
+    image: cvat.custom.yolo11s.bellpepper
+    baseImage: ubuntu:22.04
+    directives:
+      preCopy:
+        - kind: RUN
+          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        - kind: RUN
+          value: pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml
+        - kind: WORKDIR
+          value: /opt/nuclio
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: "http"
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume

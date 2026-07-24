@@ -1,0 +1,59 @@
+metadata:
+  name: custom-yolo11s-bellpepper
+  namespace: cvat
+  annotations:
+    name: YOLO11s BellPepper (custom / GPU)
+    type: detector
+    spec: |
+      [
+        { "id": 0, "name": "bell_pepper", "type": "rectangle" }
+      ]
+
+spec:
+  description: 自作 YOLO11s bell_pepper 検出器 (Ultralytics / GPU cu128 / Blackwell 対応)
+  runtime: "python:3.10"
+  handler: main:handler
+  eventTimeout: 60s
+
+  env:
+    - name: YOLO_CONFIG_DIR
+      value: /tmp/Ultralytics
+    - name: MPLCONFIGDIR
+      value: /tmp/matplotlib
+
+  build:
+    image: cvat.custom.yolo11s.bellpepper:latest-gpu
+    # RTX 50 系 (Blackwell / sm_120) は CUDA 12.8 + cu128 が必須。
+    # cu126 以下では "no kernel image is available" になる。
+    baseImage: nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+    directives:
+      preCopy:
+        - kind: RUN
+          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu128
+        - kind: RUN
+          value: pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml
+        - kind: WORKDIR
+          value: /opt/nuclio
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: "http"
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  # GPU を割り当てる。有効化には Docker daemon の default-runtime=nvidia が必要
+  # (serverless/README.md 参照)。
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume

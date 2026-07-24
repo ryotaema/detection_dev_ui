@@ -33,7 +33,8 @@ def _get_train_shared() -> tuple[dict, threading.Lock]:
 # ---------------------------------------------------------------------------
 DATA_DIR       = Path(os.getenv("DATA_DIR",       "/workspace/data"))
 MODELS_DIR     = Path(os.getenv("MODELS_DIR",     "/workspace/models"))
-PREDICTIONS_DIR= Path(os.getenv("PREDICTIONS_DIR","/workspace/predictions"))
+PREDICTIONS_DIR      = Path(os.getenv("PREDICTIONS_DIR","/workspace/predictions"))
+PREDICTIONS_VIDEOS_DIR = PREDICTIONS_DIR / "videos"
 CVAT_HOST      = os.getenv("CVAT_HOST",     "http://cvat-server:8080")  # コンテナ内通信用
 CVAT_WEB       = os.getenv("CVAT_WEB_HOST", "http://localhost:8080")    # ブラウザ表示用
 CVAT_USER      = os.getenv("CVAT_USERNAME","admin")
@@ -344,6 +345,7 @@ defaults = {
     "cvat_xml_info": None,
     "cvat_raw_dir": None,
     "theme_name": "ライト シンプル",
+    "reanno_set": set(),   # 再アノテーション要フラグを立てた JSON ファイル名の集合
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -1079,6 +1081,133 @@ def export_prediction_images(
 
 
 # ---------------------------------------------------------------------------
+# 再アノテーション用 ZIP 生成
+# ---------------------------------------------------------------------------
+def build_reannotation_zip(json_paths: list[Path]) -> tuple[bytes, int, int]:
+    """フラグ済み predictions JSON から CVAT for images 1.1 XML + YOLO txt + 元画像を
+    まとめた ZIP バイト列を返す。
+    Returns: (zip_bytes, 成功数, スキップ数)
+    """
+    import io as _io
+    import xml.etree.ElementTree as ET
+    import cv2
+
+    success, skipped = 0, 0
+
+    # ── 全JSONからクラス名を収集してインデックスを確定 ──────────────────────
+    all_labels: list[str] = []
+    pred_cache: dict[str, dict] = {}
+    for jf in json_paths:
+        try:
+            with open(jf) as f:
+                pred = json.load(f)
+            pred_cache[str(jf)] = pred
+            for b in pred.get("boxes", []):
+                lbl = b.get("label", "")
+                if lbl and lbl not in all_labels:
+                    all_labels.append(lbl)
+        except Exception:
+            pass
+    label2id = {lbl: i for i, lbl in enumerate(all_labels)}
+
+    # ── CVAT for images 1.1 XML ルート構築 ──────────────────────────────────
+    root_el = ET.Element("annotations")
+    ET.SubElement(root_el, "version").text = "1.1"
+    meta_el = ET.SubElement(root_el, "meta")
+    task_el = ET.SubElement(meta_el, "task")
+    labels_el = ET.SubElement(task_el, "labels")
+    for lbl in all_labels:
+        lbl_el = ET.SubElement(labels_el, "label")
+        ET.SubElement(lbl_el, "name").text = lbl
+        ET.SubElement(lbl_el, "attributes")
+
+    zip_buf = _io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+
+        for img_id, jf in enumerate(json_paths):
+            pred = pred_cache.get(str(jf))
+            if pred is None:
+                skipped += 1
+                continue
+
+            orig_path = Path(pred.get("image_path", ""))
+            if not orig_path.exists():
+                skipped += 1
+                continue
+
+            # 画像サイズ取得
+            img_cv = cv2.imread(str(orig_path))
+            if img_cv is None:
+                skipped += 1
+                continue
+            img_h, img_w = img_cv.shape[:2]
+
+            fname = orig_path.name
+            boxes = pred.get("boxes", [])
+
+            # ── 元画像をそのまま images/ に追加 ─────────────────────────────
+            zf.write(orig_path, f"images/{fname}")
+
+            # ── YOLO txt ラベルファイル ──────────────────────────────────────
+            txt_lines: list[str] = []
+            for b in boxes:
+                lbl = b.get("label", "")
+                if lbl not in label2id:
+                    continue
+                cls_id = label2id[lbl]
+                xywhn = b.get("bbox_xywhn")
+                if xywhn and len(xywhn) == 4:
+                    cx, cy, bw, bh = xywhn
+                else:
+                    # bbox_xywhn がない場合（動画推論など）は xyxy から計算
+                    xyxy = b.get("bbox_xyxy", [])
+                    if len(xyxy) != 4:
+                        continue
+                    x1, y1, x2, y2 = xyxy
+                    cx = (x1 + x2) / 2 / img_w
+                    cy = (y1 + y2) / 2 / img_h
+                    bw = (x2 - x1) / img_w
+                    bh = (y2 - y1) / img_h
+                txt_lines.append(f"{cls_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+            stem = Path(fname).stem
+            zf.writestr(f"labels/{stem}.txt", "\n".join(txt_lines))
+
+            # ── CVAT XML の <image> 要素 ──────────────────────────────────────
+            img_el = ET.SubElement(root_el, "image",
+                                   id=str(img_id), name=fname,
+                                   width=str(img_w), height=str(img_h))
+            for b in boxes:
+                lbl = b.get("label", "")
+                xyxy = b.get("bbox_xyxy", [])
+                if len(xyxy) != 4 or lbl not in label2id:
+                    continue
+                x1, y1, x2, y2 = xyxy
+                box_el = ET.SubElement(img_el, "box",
+                                       label=lbl,
+                                       xtl=f"{x1:.2f}", ytl=f"{y1:.2f}",
+                                       xbr=f"{x2:.2f}", ybr=f"{y2:.2f}",
+                                       occluded="0")
+                conf = b.get("confidence")
+                if conf is not None:
+                    attr_el = ET.SubElement(box_el, "attribute", name="confidence")
+                    attr_el.text = f"{conf:.4f}"
+
+            success += 1
+
+        # ── classes.txt ─────────────────────────────────────────────────────
+        zf.writestr("classes.txt", "\n".join(all_labels))
+
+        # ── annotations.xml ─────────────────────────────────────────────────
+        ET.indent(root_el)
+        xml_str = ET.tostring(root_el, encoding="unicode", xml_declaration=False)
+        xml_str = '<?xml version="1.0" encoding="utf-8"?>\n' + xml_str
+        zf.writestr("annotations.xml", xml_str)
+
+    zip_buf.seek(0)
+    return zip_buf.getvalue(), success, skipped
+
+
+# ---------------------------------------------------------------------------
 # YOLO 推論
 # ---------------------------------------------------------------------------
 def run_inference(
@@ -1124,6 +1253,214 @@ def run_inference(
     except Exception as e:
         st.error(f"推論エラー: {e}")
         return []
+
+
+# ---------------------------------------------------------------------------
+# 動画推論
+# ---------------------------------------------------------------------------
+def _box_iou(a: list, b: list) -> float:
+    """2つのxyxy形式ボックスのIoUを計算する。"""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def run_video_inference(
+    model_path: str,
+    video_path: Path,
+    out_dir: Path,
+    conf_threshold: float = 0.25,
+    enable_tracking: bool = False,
+    tracker: str = "bytetrack.yaml",
+    temporal_smoothing: bool = False,
+    smooth_frames: int = 5,
+    progress_cb=None,
+) -> Optional[dict]:
+    """動画ファイルをフレームごとに推論し、アノテーション済み動画とサマリーJSONを保存する。
+    enable_tracking=True のとき model.track() でオブジェクトトラッキングを行う。
+    temporal_smoothing=True のとき直近 smooth_frames フレームの検出を補完描画する。
+    progress_cb(frame_idx, total_frames) を渡すと進捗通知に使われる。
+    Returns: {"video_path": Path, "json_path": Path, "total_frames": int, "frame_stats": list} or None
+    """
+    import cv2
+    import subprocess
+    from ultralytics import YOLO
+
+    # ゴーストボックス描画色（グレー）
+    _GHOST_COLOR = (160, 160, 160)
+
+    def _draw_ghost(frame, xyxy, label, conf, tid):
+        x1, y1, x2, y2 = [int(v) for v in xyxy]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), _GHOST_COLOR, 1)
+        text = f"{label} {conf:.2f}"
+        if tid is not None:
+            text += f" #{tid}"
+        cv2.putText(frame, text, (x1 + 2, max(y1 - 4, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _GHOST_COLOR, 1)
+
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        model = YOLO(model_path)
+
+        cap = cv2.VideoCapture(str(video_path))
+        fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        # OpenCV で一時ファイルに書き出し → ffmpeg で H.264 に再エンコード
+        tmp_path       = out_dir / f"{video_path.stem}_tmp.mp4"
+        out_video_path = out_dir / f"{video_path.stem}_annotated.mp4"
+        out_json_path  = out_dir / f"{video_path.stem}_summary.json"
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(tmp_path), fourcc, fps, (width, height))
+
+        frame_stats: list[dict] = []
+
+        # テンポラル平滑化用メモリ
+        # track ON  → {track_id: {xyxy, label, conf, tid, last_frame}}
+        # track OFF → [{xyxy, label, conf, tid, last_frame}, ...]
+        _track_mem: dict[int, dict] = {}
+        _spatial_mem: list[dict] = []
+
+        common_kwargs = dict(
+            source=str(video_path),
+            conf=conf_threshold,
+            save=False,
+            stream=True,
+            verbose=False,
+        )
+        if enable_tracking:
+            results = model.track(persist=True, tracker=tracker, **common_kwargs)
+        else:
+            results = model.predict(**common_kwargs)
+
+        for frame_idx, res in enumerate(results):
+            ids = res.boxes.id if (res.boxes is not None) else None
+
+            # ── 現フレームの検出結果を収集 ──────────────────────────
+            current_boxes = []
+            if res.boxes is not None:
+                for i, box in enumerate(res.boxes):
+                    tid = int(ids[i]) if ids is not None else None
+                    current_boxes.append({
+                        "xyxy":  box.xyxy[0].tolist(),
+                        "label": res.names[int(box.cls[0])],
+                        "conf":  float(box.conf[0]),
+                        "tid":   tid,
+                    })
+
+            # ── テンポラル平滑化: メモリ更新 ─────────────────────────
+            if temporal_smoothing:
+                if enable_tracking:
+                    for b in current_boxes:
+                        if b["tid"] is not None:
+                            _track_mem[b["tid"]] = {**b, "last_frame": frame_idx}
+                else:
+                    used = set()
+                    for b in current_boxes:
+                        best_i, best_iou = -1, 0.3
+                        for mi, m in enumerate(_spatial_mem):
+                            if mi in used or m["label"] != b["label"]:
+                                continue
+                            iou = _box_iou(b["xyxy"], m["xyxy"])
+                            if iou > best_iou:
+                                best_iou, best_i = iou, mi
+                        if best_i >= 0:
+                            _spatial_mem[best_i] = {**b, "last_frame": frame_idx}
+                            used.add(best_i)
+                        else:
+                            _spatial_mem.append({**b, "last_frame": frame_idx})
+                    # 古いエントリを削除
+                    _spatial_mem[:] = [
+                        m for m in _spatial_mem
+                        if frame_idx - m["last_frame"] <= smooth_frames
+                    ]
+
+            # ── ゴーストボックスを決定 ───────────────────────────────
+            ghost_boxes: list[dict] = []
+            if temporal_smoothing and smooth_frames > 0:
+                if enable_tracking:
+                    cur_tids = {b["tid"] for b in current_boxes if b["tid"] is not None}
+                    for tid, mem in _track_mem.items():
+                        age = frame_idx - mem["last_frame"]
+                        if 0 < age <= smooth_frames and tid not in cur_tids:
+                            ghost_boxes.append(mem)
+                else:
+                    for m in _spatial_mem:
+                        age = frame_idx - m["last_frame"]
+                        if 0 < age <= smooth_frames:
+                            ghost_boxes.append(m)
+
+            # ── 描画 ─────────────────────────────────────────────────
+            annotated = res.plot()  # 現フレームの検出 + トラックID を自動描画
+            for g in ghost_boxes:
+                _draw_ghost(annotated, g["xyxy"], g["label"], g["conf"], g["tid"])
+            writer.write(annotated)
+
+            # ── JSON 用データ収集 ────────────────────────────────────
+            boxes = []
+            for b in current_boxes:
+                entry = {
+                    "label":      b["label"],
+                    "confidence": round(b["conf"], 4),
+                    "bbox_xyxy":  [round(v, 2) for v in b["xyxy"]],
+                }
+                if b["tid"] is not None:
+                    entry["track_id"] = b["tid"]
+                boxes.append(entry)
+            frame_stats.append({"frame": frame_idx, "detections": len(boxes), "boxes": boxes})
+
+            if progress_cb:
+                progress_cb(frame_idx, total_frames)
+
+        writer.release()
+
+        # ffmpeg で H.264 / AAC に再エンコードしてブラウザ互換 MP4 を生成
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(tmp_path),
+                "-vcodec", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",   # Streamlit / ブラウザ互換
+                "-movflags", "+faststart",
+                "-an",                   # 入力動画に音声がない場合のエラー回避
+                str(out_video_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        tmp_path.unlink(missing_ok=True)
+
+        summary = {
+            "video_path": str(video_path),
+            "output_video": str(out_video_path),
+            "fps": fps,
+            "total_frames": total_frames,
+            "frame_stats": frame_stats,
+        }
+        with open(out_json_path, "w") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+
+        return {
+            "video_path": out_video_path,
+            "json_path": out_json_path,
+            "total_frames": total_frames,
+            "frame_stats": frame_stats,
+        }
+    except Exception as e:
+        st.error(f"動画推論エラー: {e}")
+        return None
 
 
 # ===========================================================================
@@ -2661,10 +2998,13 @@ with tab3:
     # --- 推論対象ソース ---
     _infer_src = st.radio(
         "推論対象ソース",
-        ["📂 data/ のディレクトリ", "📤 画像をアップロード"],
+        ["📂 data/ のディレクトリ", "📤 画像をアップロード", "🎬 動画をアップロード"],
         horizontal=True,
         key="infer_src_mode",
     )
+
+    test_image_dir = ""
+    test_video_path = ""
 
     if _infer_src == "📤 画像をアップロード":
         import io as _io_infer
@@ -2686,8 +3026,55 @@ with tab3:
                 for _f in _infer_files:
                     (_tmp_infer / _f.name).write_bytes(_f.getbuffer())
             test_image_dir = str(_tmp_infer)
+
+    elif _infer_src == "🎬 動画をアップロード":
+        _infer_video = st.file_uploader(
+            "推論したい動画ファイル（MP4 / AVI / MOV / MKV）",
+            type=["mp4", "avi", "mov", "webm", "mkv"],
+            accept_multiple_files=False,
+            key="infer_upload_video",
+        )
+        if _infer_video:
+            st.caption(f"✅ {_infer_video.name} 選択中")
+            PREDICTIONS_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+            _saved_video = PREDICTIONS_VIDEOS_DIR / _infer_video.name
+            _saved_video.write_bytes(_infer_video.getbuffer())
+            test_video_path = str(_saved_video)
+
+        # トラッキング設定
+        _track_enabled = st.checkbox("🔄 オブジェクトトラッキングを有効にする", value=False, key="video_track_enabled")
+        if _track_enabled:
+            _tracker_choice = st.radio(
+                "トラッカー",
+                ["ByteTrack", "BoT-SORT"],
+                horizontal=True,
+                key="video_tracker_choice",
+                help="ByteTrack: 高速・位置ベース。BoT-SORT: 高精度・外観特徴も使用（遮蔽に強い）",
+            )
+            _tracker_yaml = "/app/bytetrack.yaml" if _tracker_choice == "ByteTrack" else "/app/botsort.yaml"
         else:
-            test_image_dir = ""
+            _tracker_yaml = "/app/bytetrack.yaml"
+
+        # テンポラル平滑化設定
+        _smooth_enabled = st.checkbox(
+            "🕐 テンポラル平滑化（ちらつき抑制）",
+            value=False,
+            key="video_smooth_enabled",
+            help="直近Nフレームの検出を記憶し、一時的に消えた検出をグレーで補完描画します",
+        )
+        if _smooth_enabled:
+            _smooth_frames = st.slider(
+                "補完フレーム数",
+                min_value=1, max_value=30, value=5, step=1,
+                key="video_smooth_frames",
+                help="検出が消えてから何フレームまで補完するか。大きいほどちらつきが減るが残像が増える",
+            )
+        else:
+            _smooth_frames = 0
+
+        if compare_mode:
+            st.info("ℹ 動画モードでは複数モデル比較は使用できません。メインモデルで推論します。")
+
     else:
         _img_dirs = _find_image_dirs(DATA_DIR)
         _dir_labels = [str(d.relative_to(DATA_DIR)) for d in _img_dirs]
@@ -2717,61 +3104,94 @@ with tab3:
     with col_run:
         _infer_disabled = (
             (not current_model and not (compare_mode and selected_compare_models))
-            or not test_image_dir
+            or (not test_image_dir and not test_video_path)
         )
         if st.button("▶ 推論実行", type="primary", use_container_width=True,
                     disabled=_infer_disabled):
-            img_dir = Path(test_image_dir)
-            if not img_dir.exists():
-                st.error(f"画像ディレクトリが存在しません: {img_dir}")
-            elif compare_mode and selected_compare_models:
-                # 複数モデル比較推論
-                compare_results = []
-                for model_rel in selected_compare_models:
-                    model_abs = _model_map[model_rel]
-                    with st.spinner(f"推論中: {model_rel}…"):
+
+            # ── 動画推論 ──────────────────────────────────────────────
+            if _infer_src == "🎬 動画をアップロード":
+                if not test_video_path:
+                    st.error("動画ファイルを選択してください")
+                elif not current_model:
+                    st.error("モデルが未設定です。Step2 で学習するか、データ管理タブで選択してください")
+                else:
+                    _prog_bar = st.progress(0.0, text="動画推論中…")
+                    def _video_prog(fi, tot):
+                        if tot > 0:
+                            _prog_bar.progress(min(fi / tot, 1.0),
+                                               text=f"フレーム {fi}/{tot} 処理中…")
+                    video_result = run_video_inference(
+                        current_model,
+                        Path(test_video_path),
+                        PREDICTIONS_VIDEOS_DIR,
+                        conf_threshold=inf_conf,
+                        enable_tracking=_track_enabled,
+                        tracker=_tracker_yaml,
+                        temporal_smoothing=_smooth_enabled,
+                        smooth_frames=_smooth_frames,
+                        progress_cb=_video_prog,
+                    )
+                    _prog_bar.empty()
+                    if video_result:
+                        st.success(
+                            f"✅ 動画推論完了: {video_result['total_frames']} フレーム処理"
+                        )
+                        st.session_state.last_video_result = video_result
+
+            # ── 画像推論 ──────────────────────────────────────────────
+            else:
+                img_dir = Path(test_image_dir)
+                if not img_dir.exists():
+                    st.error(f"画像ディレクトリが存在しません: {img_dir}")
+                elif compare_mode and selected_compare_models:
+                    # 複数モデル比較推論
+                    compare_results = []
+                    for model_rel in selected_compare_models:
+                        model_abs = _model_map[model_rel]
+                        with st.spinner(f"推論中: {model_rel}…"):
+                            saved = run_inference(
+                                model_abs,
+                                img_dir,
+                                PREDICTIONS_DIR,
+                                conf_threshold=inf_conf,
+                            )
+                        total_detections = 0
+                        total_conf = 0.0
+                        conf_count = 0
+                        for jf in saved:
+                            with open(jf) as f:
+                                pred = json.load(f)
+                            boxes = pred.get("boxes", [])
+                            total_detections += len(boxes)
+                            for b in boxes:
+                                total_conf += b.get("confidence", 0.0)
+                                conf_count += 1
+                        avg_conf = total_conf / conf_count if conf_count > 0 else 0.0
+                        compare_results.append({
+                            "モデル": model_rel,
+                            "検出数（合計）": total_detections,
+                            "平均信頼度": round(avg_conf, 4),
+                            "画像数": len(saved),
+                        })
+                    if compare_results:
+                        st.success("✅ 比較推論完了")
+                        import pandas as pd
+                        df_cmp = pd.DataFrame(compare_results)
+                        st.dataframe(df_cmp, use_container_width=True, hide_index=True)
+                else:
+                    with st.spinner("推論中…"):
                         saved = run_inference(
-                            model_abs,
+                            current_model,
                             img_dir,
                             PREDICTIONS_DIR,
                             conf_threshold=inf_conf,
                         )
-                    total_detections = 0
-                    total_conf = 0.0
-                    conf_count = 0
-                    for jf in saved:
-                        with open(jf) as f:
-                            pred = json.load(f)
-                        boxes = pred.get("boxes", [])
-                        total_detections += len(boxes)
-                        for b in boxes:
-                            total_conf += b.get("confidence", 0.0)
-                            conf_count += 1
-                    avg_conf = total_conf / conf_count if conf_count > 0 else 0.0
-                    compare_results.append({
-                        "モデル": model_rel,
-                        "検出数（合計）": total_detections,
-                        "平均信頼度": round(avg_conf, 4),
-                        "画像数": len(saved),
-                    })
-                if compare_results:
-                    st.success("✅ 比較推論完了")
-                    import pandas as pd
-                    df_cmp = pd.DataFrame(compare_results)
-                    st.dataframe(df_cmp, use_container_width=True, hide_index=True)
-            else:
-                with st.spinner("推論中…"):
-                    saved = run_inference(
-                        current_model,
-                        img_dir,
-                        PREDICTIONS_DIR,
-                        conf_threshold=inf_conf,
-                    )
-                if saved:
-                    st.success(f"✅ 推論完了: {len(saved)} 件のJSONを保存")
-                    with st.expander("保存されたJSON (先頭1件)"):
-                        with open(saved[0]) as f:
-                            st.json(json.load(f))
+                    if saved:
+                        st.success(f"✅ 推論完了: {len(saved)} 件のJSONを保存")
+                        with st.expander("保存されたJSON (先頭1件)"):
+                            with open(saved[0]) as f:
+                                st.json(json.load(f))
 
     # --- FiftyOne 起動ボタン ---
     with col_vis:
@@ -2804,23 +3224,101 @@ with tab3:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # --- 動画推論結果 ---
+    _vr = st.session_state.get("last_video_result")
+    if _vr:
+        st.markdown("#### 🎬 動画推論結果")
+        _out_video = _vr.get("video_path")
+        _frame_stats = _vr.get("frame_stats", [])
+        _total_frames = _vr.get("total_frames", 0)
+
+        _vc1, _vc2 = st.columns([3, 2])
+        with _vc1:
+            if _out_video and Path(_out_video).exists():
+                with open(_out_video, "rb") as _vf:
+                    _video_bytes = _vf.read()
+                st.video(_video_bytes)
+                st.download_button(
+                    "⬇ アノテーション済み動画をダウンロード",
+                    _video_bytes,
+                    file_name=Path(_out_video).name,
+                    mime="video/mp4",
+                    use_container_width=True,
+                )
+            else:
+                st.warning("出力動画ファイルが見つかりません")
+
+        with _vc2:
+            if _frame_stats:
+                import pandas as pd
+                _df_frames = pd.DataFrame([
+                    {"フレーム": s["frame"], "検出数": s["detections"]}
+                    for s in _frame_stats
+                ])
+                _total_det = sum(s["detections"] for s in _frame_stats)
+                _det_frames = sum(1 for s in _frame_stats if s["detections"] > 0)
+
+                # トラッキング時: ユニーク ID 数を集計
+                _all_track_ids = {
+                    b["track_id"]
+                    for s in _frame_stats
+                    for b in s["boxes"]
+                    if "track_id" in b
+                }
+                _is_tracked = len(_all_track_ids) > 0
+
+                st.metric("総フレーム数", _total_frames)
+                st.metric("検出フレーム数", _det_frames)
+                st.metric("総検出数", _total_det)
+                if _is_tracked:
+                    st.metric("ユニークトラック数", len(_all_track_ids))
+
+                st.markdown("**フレームごとの検出数**")
+                st.line_chart(_df_frames.set_index("フレーム"))
+
+        if st.button("🗑 この動画結果をクリア", key="clear_video_result"):
+            st.session_state.last_video_result = None
+            st.rerun()
+
     # --- 推論結果 画像プレビュー ---
     _pred_jsons = sorted(PREDICTIONS_DIR.glob("*.json"))
     if _pred_jsons:
-        st.markdown("#### 🖼 推論結果プレビュー")
+        _reanno_count = len(st.session_state.reanno_set)
+        _prev_header_c1, _prev_header_c2 = st.columns([4, 2])
+        with _prev_header_c1:
+            st.markdown("#### 🖼 推論結果プレビュー")
+        with _prev_header_c2:
+            if _reanno_count > 0:
+                st.markdown(
+                    f'<div style="padding-top:10px; color:#f4a84e; font-size:.85rem;">'
+                    f'🚩 再アノテーション: <b>{_reanno_count}</b> 件</div>',
+                    unsafe_allow_html=True,
+                )
         _preview_jsons = _pred_jsons[:9]
         for _row_start in range(0, len(_preview_jsons), 3):
             _row_files = _preview_jsons[_row_start:_row_start + 3]
             _row_cols = st.columns(3)
             for _col, _jf in zip(_row_cols, _row_files):
                 _res = _draw_predictions(_jf)
-                if _res:
-                    _img, _n_boxes, _stem = _res
-                    with _col:
+                with _col:
+                    if _res:
+                        _img, _n_boxes, _stem = _res
                         st.image(_img, caption=f"{_stem} ({_n_boxes}件検出)",
                                  use_column_width=True)
+                    else:
+                        st.caption(_jf.stem)
+                    _is_flagged = _jf.name in st.session_state.reanno_set
+                    _flag_label = "🚩 フラグ解除" if _is_flagged else "🚩 再アノテーション要"
+                    if st.button(_flag_label, key=f"prev_flag_{_jf.name}",
+                                 use_container_width=True,
+                                 type="secondary"):
+                        if _is_flagged:
+                            st.session_state.reanno_set.discard(_jf.name)
+                        else:
+                            st.session_state.reanno_set.add(_jf.name)
+                        st.rerun()
         if len(_pred_jsons) > 9:
-            st.caption(f"（他 {len(_pred_jsons) - 9} 件は省略。全件は下の一覧から確認）")
+            st.caption(f"（他 {len(_pred_jsons) - 9} 件は省略。全件エクスポートの選択グリッドからフラグ付け可能）")
 
     # --- 推論結果 画像エクスポート ---
     if _pred_jsons:
@@ -2870,8 +3368,7 @@ with tab3:
                     unsafe_allow_html=True,
                 )
 
-            # ── 画像グリッド + チェックボックス ──
-            # value= で exp_sel_set から初期状態を復元し、変更を exp_sel_set に同期
+            # ── 画像グリッド + チェックボックス + フラグ ──
             _GRID_COLS = 3
             for _row_start in range(0, len(_page_jsons), _GRID_COLS):
                 _row_files = _page_jsons[_row_start : _row_start + _GRID_COLS]
@@ -2894,6 +3391,15 @@ with tab3:
                             st.session_state.exp_sel_set.add(_jf.name)
                         else:
                             st.session_state.exp_sel_set.discard(_jf.name)
+                        _is_flagged_sel = _jf.name in st.session_state.reanno_set
+                        _flag_lbl_sel = "🚩 解除" if _is_flagged_sel else "🚩 要再アノテ"
+                        if st.button(_flag_lbl_sel, key=f"sel_flag_{_cur_page}_{_jf.name}",
+                                     use_container_width=True, type="secondary"):
+                            if _is_flagged_sel:
+                                st.session_state.reanno_set.discard(_jf.name)
+                            else:
+                                st.session_state.reanno_set.add(_jf.name)
+                            st.rerun()
 
             # ── ページネーション ──
             _pn1, _pn2, _pn3 = st.columns([1, 2, 1])
@@ -3027,6 +3533,60 @@ with tab3:
                     )
             if _ng > 0:
                 st.warning(f"⚠ {_ng} 件スキップ（元画像が見つからないため）")
+
+    # --- 再アノテーション用エクスポート ---
+    if _pred_jsons:
+        st.markdown("#### 🚩 再アノテーション用エクスポート")
+        _ra_set  = st.session_state.reanno_set
+        _ra_jsons = [PREDICTIONS_DIR / n for n in sorted(_ra_set)
+                     if (PREDICTIONS_DIR / n).exists()]
+
+        if not _ra_jsons:
+            st.info("プレビューまたは選択グリッドの 🚩 ボタンで画像にフラグを立てると、ここに表示されます。")
+        else:
+            st.markdown(
+                f'<div style="color:#f4a84e; font-size:.9rem; margin-bottom:8px;">'
+                f'🚩 フラグ済み: <b>{len(_ra_jsons)}</b> 件</div>',
+                unsafe_allow_html=True,
+            )
+
+            # フラグ済み画像のサムネイル一覧
+            with st.expander(f"フラグ済み画像を確認する（{len(_ra_jsons)} 件）", expanded=False):
+                for _ra_row in range(0, len(_ra_jsons), 3):
+                    _ra_cols = st.columns(3)
+                    for _rc, _rj in zip(_ra_cols, _ra_jsons[_ra_row:_ra_row + 3]):
+                        with _rc:
+                            _rr = _draw_predictions(_rj)
+                            if _rr:
+                                _ri, _rn, _rs = _rr
+                                st.image(_ri, caption=f"{_rs} ({_rn}件)", use_column_width=True)
+                            else:
+                                st.caption(_rj.stem)
+
+            st.caption(
+                "出力形式: 元画像 (`images/`) + YOLO txt ラベル (`labels/`) "
+                "+ `classes.txt` + CVAT for images 1.1 XML (`annotations.xml`)"
+            )
+            _ra_c1, _ra_c2 = st.columns(2)
+            with _ra_c1:
+                if st.button("⬇ 再アノテーション用 ZIP を生成",
+                             type="primary", use_container_width=True):
+                    with st.spinner("ZIP を生成中…"):
+                        _zip_bytes, _ok, _ng = build_reannotation_zip(_ra_jsons)
+                    if _ok > 0:
+                        st.download_button(
+                            f"⬇ ダウンロード（{_ok} 件）",
+                            _zip_bytes,
+                            file_name=f"reannotation_{datetime.now():%Y%m%d_%H%M}.zip",
+                            mime="application/zip",
+                            use_container_width=True,
+                        )
+                    if _ng > 0:
+                        st.warning(f"⚠ {_ng} 件は元画像が見つからずスキップしました")
+            with _ra_c2:
+                if st.button("🗑 フラグをすべてクリア", use_container_width=True):
+                    st.session_state.reanno_set = set()
+                    st.rerun()
 
     # --- 推論結果 JSON ブラウザ ---
     with st.expander("📋 predictions/ の結果ファイル一覧"):

@@ -1,0 +1,57 @@
+# =============================================================================
+# detection_dev_ui - CVAT 自動アノテーション (Nuclio serverless) オーバーライド
+# -----------------------------------------------------------------------------
+# 使い方:
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.serverless.yml \
+#     up -d nuclio cvat_server cvat_worker_annotation
+#
+# その後 serverless/deploy.sh で自作YOLOモデルを Nuclio 関数としてデプロイすると、
+# CVAT の「Actions → Automatic annotation」に自作モデルが選択肢として現れる。
+#
+# Nuclio ダッシュボードのバージョンは CVAT v2.64.0 が採用する 1.15.9 に固定
+# (nuctl も同一バージョンを使うこと。serverless/deploy.sh が自動導入する)。
+# =============================================================================
+
+services:
+  # --- Nuclio ダッシュボード (関数の管理・CVAT からの呼び出し受け口) ---
+  nuclio:
+    container_name: nuclio
+    image: quay.io/nuclio/dashboard:1.15.9-amd64
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      http_proxy:
+      https_proxy:
+      no_proxy: ${no_proxy:-}
+      NUCLIO_CHECK_FUNCTION_CONTAINERS_HEALTHINESS: "true"
+      NUCLIO_DASHBOARD_DEFAULT_FUNCTION_MOUNT_MODE: "volume"
+    ports:
+      - "8070:8070"   # Nuclio ダッシュボード → http://localhost:8070
+    networks:
+      # cvat_server / cvat_worker_annotation と同じネットワークに載せ、
+      # コンテナ名 "nuclio" で相互解決できるようにする
+      cvat_net:
+        aliases:
+          - nuclio
+    logging:
+      driver: "json-file"
+      options:
+        max-size: 100m
+        max-file: "3"
+
+  # --- CVAT 本体に serverless 連携を有効化 ---
+  cvat_server:
+    environment:
+      CVAT_SERVERLESS: 1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- 自動アノテーション(バルク実行)を担うワーカーにも連携を有効化 ---
+  cvat_worker_annotation:
+    environment:
+      CVAT_SERVERLESS: 1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
