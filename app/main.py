@@ -1208,6 +1208,76 @@ def build_reannotation_zip(json_paths: list[Path]) -> tuple[bytes, int, int]:
 
 
 # ---------------------------------------------------------------------------
+# モデルファイル (.pt) のメタ情報
+# ---------------------------------------------------------------------------
+def model_meta_path(model_path: Path) -> Path:
+    """`weights/best.pt` に対する `weights/.best.pt.meta.json` を返す（rglob('*.pt') に載らない名前）"""
+    return model_path.parent / f".{model_path.name}.meta.json"
+
+
+def read_model_meta(model_path: Path) -> Optional[dict]:
+    """保存済みメタ情報を読む。存在しない/壊れている場合は None"""
+    mp = model_meta_path(model_path)
+    if not mp.exists():
+        return None
+    try:
+        with open(mp) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def inspect_model_file(model_path: Path, save: bool = True) -> dict:
+    """.pt を実際に読み込んでクラス名などを取得する。
+    この環境の ultralytics で読めるか（バージョン互換）の検証も兼ねる。
+    """
+    info: dict = {
+        "ok": False, "error": None, "names": [], "task": None,
+        "ultralytics_version": None, "trained_at": None,
+        "imgsz": None, "epochs": None, "base_model": None,
+        "inspected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    # ckpt 側のメタ（学習時の情報）。読めなくても致命的ではない
+    try:
+        import torch
+        ckpt = torch.load(str(model_path), map_location="cpu", weights_only=False)
+        if isinstance(ckpt, dict):
+            info["ultralytics_version"] = ckpt.get("version")
+            info["trained_at"] = ckpt.get("date")
+            targs = ckpt.get("train_args") or {}
+            if isinstance(targs, dict):
+                info["imgsz"]      = targs.get("imgsz")
+                info["epochs"]     = targs.get("epochs")
+                info["base_model"] = targs.get("model")
+    except Exception:
+        pass
+
+    # YOLO として読めるか（ここが通れば推論可能）
+    try:
+        from ultralytics import YOLO
+
+        model = YOLO(str(model_path))
+        names = getattr(model, "names", None) or {}
+        if isinstance(names, dict):
+            info["names"] = [names[k] for k in sorted(names)]
+        else:
+            info["names"] = list(names)
+        info["task"] = getattr(model, "task", None)
+        info["ok"] = True
+    except Exception as e:
+        info["error"] = f"{type(e).__name__}: {e}"
+
+    if save:
+        try:
+            with open(model_meta_path(model_path), "w") as f:
+                json.dump(info, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+    return info
+
+
+# ---------------------------------------------------------------------------
 # YOLO 推論
 # ---------------------------------------------------------------------------
 def run_inference(
@@ -3663,6 +3733,138 @@ with tab4:
 
     # --- models/ モデル一覧（カード表示） ---
     st.markdown("#### 🤖 学習済みモデル (`models/`)")
+
+    # --- 外部モデルの取り込み ---
+    with st.expander("📤 学習済みモデル (.pt) をアップロード（他PCで学習したモデルの取り込み）"):
+        import io as _io_mu
+
+        st.caption(
+            "他の環境で学習した YOLO の重みを `models/` に取り込みます。"
+            "取り込み時にこの環境の ultralytics で読み込めるか検証し、クラス名を記録します。"
+        )
+        _mu_run = st.text_input(
+            "モデル名（`models/` 以下に作成するディレクトリ名）",
+            value=f"imported_{datetime.now():%Y%m%d_%H%M}",
+            key="mu_run_name",
+        ).strip()
+        _mu_mode = st.radio(
+            "アップロード形式",
+            ["📦 .pt ファイル", "🗜 学習run ディレクトリ ZIP"],
+            horizontal=True,
+            key="mu_mode",
+        )
+        _mu_set_current = st.checkbox(
+            "取り込み後、このモデルを「使用中」にする", value=True, key="mu_set_current"
+        )
+
+        _mu_dir = MODELS_DIR / _mu_run if _mu_run else None
+        if _mu_dir and _mu_dir.exists():
+            st.warning(f"⚠ `models/{_mu_run}/` は既に存在します。同名ファイルは上書きされます。")
+
+        if _mu_mode == "📦 .pt ファイル":
+            _mu_pts = st.file_uploader(
+                "重みファイル（.pt、複数選択可）",
+                type=["pt"],
+                accept_multiple_files=True,
+                key="mu_pt_files",
+            )
+            _mu_extras = st.file_uploader(
+                "付随ファイル（任意・複数可）",
+                type=["csv", "yaml", "yml", "json", "txt", "png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                key="mu_extra_files",
+                help="results.csv を一緒に入れると下のカードに mAP50 が表示されます。"
+                     "args.yaml / confusion_matrix.png なども保存できます。",
+            )
+            if _mu_pts and _mu_run:
+                st.caption(
+                    f"選択中: {len(_mu_pts)} 個の重み "
+                    f"({sum(f.size for f in _mu_pts) / 1024 / 1024:.1f} MB)"
+                    + (f" + 付随 {len(_mu_extras)} ファイル" if _mu_extras else "")
+                )
+                st.caption(f"保存先: `models/{_mu_run}/weights/`")
+                if st.button("📥 models/ に取り込む", key="mu_pt_btn",
+                             type="primary", use_container_width=True):
+                    _mu_w = _mu_dir / "weights"
+                    _mu_w.mkdir(parents=True, exist_ok=True)
+                    _mu_saved = []
+                    for _f in _mu_pts:
+                        _dst = _mu_w / _f.name
+                        _dst.write_bytes(_f.getbuffer())
+                        _mu_saved.append(_dst)
+                    for _f in (_mu_extras or []):
+                        (_mu_dir / _f.name).write_bytes(_f.getbuffer())
+                    st.session_state["mu_saved_paths"] = [str(p) for p in _mu_saved]
+                    st.session_state["mu_pending_current"] = _mu_set_current
+        else:
+            _mu_zip = st.file_uploader(
+                "学習run ディレクトリの ZIP（`weights/best.pt` を含む想定）",
+                type=["zip"],
+                key="mu_zip_file",
+            )
+            if _mu_zip and _mu_run:
+                st.caption(f"選択中: {_mu_zip.name}  ({_mu_zip.size / 1024 / 1024:.1f} MB)")
+                st.caption(f"展開先: `models/{_mu_run}/`")
+                if st.button("📥 展開して models/ に取り込む", key="mu_zip_btn",
+                             type="primary", use_container_width=True):
+                    with zipfile.ZipFile(_io_mu.BytesIO(_mu_zip.read()), "r") as _zf:
+                        _bad = [n for n in _zf.namelist()
+                                if n.startswith("/") or ".." in Path(n).parts]
+                        if _bad:
+                            st.error(f"⚠ ZIP に不正なパスが含まれています: {_bad[:3]}")
+                        else:
+                            _mu_dir.mkdir(parents=True, exist_ok=True)
+                            _zf.extractall(_mu_dir)
+                            _mu_found = sorted(_mu_dir.rglob("*.pt"))
+                            if not _mu_found:
+                                st.error("⚠ ZIP 内に .pt ファイルが見つかりませんでした。")
+                            st.session_state["mu_saved_paths"] = [str(p) for p in _mu_found]
+                            st.session_state["mu_pending_current"] = _mu_set_current
+
+        # --- 取り込み結果の検証・表示 ---
+        _mu_saved_paths = [Path(p) for p in st.session_state.get("mu_saved_paths", [])]
+        if _mu_saved_paths:
+            st.markdown("---")
+            st.markdown("**取り込み結果**")
+            _mu_ok_paths = []
+            for _p in _mu_saved_paths:
+                if not _p.exists():
+                    continue
+                with st.spinner(f"{_p.name} を検証中…"):
+                    _info = inspect_model_file(_p)
+                if _info["ok"]:
+                    _mu_ok_paths.append(_p)
+                    st.success(f"✅ `{_p.relative_to(MODELS_DIR)}` — 読み込み成功")
+                    _mi1, _mi2, _mi3 = st.columns(3)
+                    _mi1.metric("クラス数", len(_info["names"]))
+                    _mi2.metric("タスク", _info["task"] or "—")
+                    _mi3.metric("学習時 ultralytics", _info["ultralytics_version"] or "—")
+                    st.caption("クラス: " + (", ".join(_info["names"]) or "—"))
+                    _mu_detail = [
+                        f"ベースモデル: {_info['base_model']}" if _info.get("base_model") else "",
+                        f"imgsz: {_info['imgsz']}" if _info.get("imgsz") else "",
+                        f"epochs: {_info['epochs']}" if _info.get("epochs") else "",
+                        f"学習日: {_info['trained_at']}" if _info.get("trained_at") else "",
+                    ]
+                    _mu_detail = [d for d in _mu_detail if d]
+                    if _mu_detail:
+                        st.caption(" / ".join(_mu_detail))
+                else:
+                    st.error(
+                        f"❌ `{_p.relative_to(MODELS_DIR)}` はこの環境で読み込めませんでした。\n\n"
+                        f"{_info['error']}\n\n"
+                        "学習元の ultralytics バージョンがこの環境（8.4.48）と乖離している可能性があります。"
+                    )
+            if _mu_ok_paths and st.session_state.get("mu_pending_current"):
+                _mu_best = next((p for p in _mu_ok_paths if p.name == "best.pt"), _mu_ok_paths[0])
+                st.session_state.last_model_path = str(_mu_best)
+                st.session_state["mu_pending_current"] = False
+                st.info(f"⭐ 使用中モデルに設定しました: `{_mu_best.relative_to(MODELS_DIR)}`\n\n"
+                        "→ 「🔭 Step3: 推論・評価」タブで推論を実行できます。")
+            if st.button("表示をクリア", key="mu_clear_result"):
+                st.session_state["mu_saved_paths"] = []
+                st.rerun()
+
     model_files = sorted(
         MODELS_DIR.rglob("*.pt"),
         key=lambda p: p.stat().st_mtime,
@@ -3698,6 +3900,20 @@ with tab4:
                         st.markdown("⭐ **現在使用中**")
                     st.markdown(f"`{mp.relative_to(MODELS_DIR)}`")
                     st.caption(mod_time)
+                    _meta = read_model_meta(mp)
+                    if _meta and _meta.get("ok"):
+                        _cls = _meta.get("names") or []
+                        _cls_txt = ", ".join(_cls[:6])
+                        if len(_cls) > 6:
+                            _cls_txt += f" 他{len(_cls) - 6}件"
+                        st.caption(f"🏷 {len(_cls)} クラス: {_cls_txt}")
+                    elif _meta:
+                        st.caption("⚠ この環境の ultralytics で読み込めないモデルです")
+                    else:
+                        if st.button("🔍 モデル情報を読み込む", key=f"insp_model_{mp}"):
+                            with st.spinner(f"{mp.name} を読み込み中…"):
+                                inspect_model_file(mp)
+                            st.rerun()
                 with _size_col:
                     st.metric("サイズ", f"{size_mb:.1f} MB")
                 with _map_col:
@@ -3713,6 +3929,7 @@ with tab4:
                 with _del_col:
                     if st.button("🗑", key=f"del_model_{mp}", help=f"{mp.name} を削除"):
                         mp.unlink()
+                        model_meta_path(mp).unlink(missing_ok=True)
                         if st.session_state.last_model_path == str(mp):
                             st.session_state.last_model_path = None
                         st.rerun()
