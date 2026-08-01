@@ -234,6 +234,35 @@ def build_reannotation_zip(json_paths: list[Path]) -> tuple[bytes, int, int]:
 # ---------------------------------------------------------------------------
 # YOLO 推論
 # ---------------------------------------------------------------------------
+def prediction_json_path(out_dir: Path, image_path: str) -> Path:
+    """推論結果 JSON の保存先を返す。
+
+    画像名だけで付けると、別のデータセットにある同名画像（`1000color.png` のような
+    連番名は特に）を推論したときに前の結果を黙って上書きしてしまう。
+    元画像の絶対パスから短いハッシュを付けて衝突を防ぐ。
+    同じ画像を再推論した場合は同じ名前になるので、意図した上書きは従来どおり効く。
+    """
+    import hashlib
+
+    p = Path(image_path)
+    digest = hashlib.sha1(str(p.resolve()).encode("utf-8")).hexdigest()[:8]
+    return Path(out_dir) / f"{p.stem}__{digest}.json"
+
+
+def prediction_display_name(json_path: Path) -> str:
+    """一覧表示用の名前。JSON に元画像パスがあればその画像名を使う
+    （ファイル名に付けたハッシュを利用者に見せないため）。
+    """
+    try:
+        pred = json.loads(Path(json_path).read_text())
+        img = pred.get("image_path")
+        if img:
+            return Path(img).name
+    except Exception:
+        pass
+    return Path(json_path).name
+
+
 def run_inference(
     model_path: str,
     image_dir: Path,
@@ -283,7 +312,7 @@ def run_inference(
                                             for x, y in _mask_xyn[_bi]]
                     boxes.append(item)
 
-            out_json = out_dir / (Path(img_path).stem + ".json")
+            out_json = prediction_json_path(out_dir, img_path)
             with open(out_json, "w") as f:
                 json.dump({
                     "image_path": img_path,

@@ -496,6 +496,263 @@ def check_dataset_quality(dataset_dir: Path, tiny_area: float = 0.0005) -> dict:
     return res
 
 
+def dataset_split_counts(dataset_dir: Path) -> dict:
+    """現在の train/val の枚数を返す（再分割前の確認用）"""
+    from .provenance import count_dataset_items
+    return count_dataset_items(Path(dataset_dir))
+
+
+def resplit_dataset(
+    dataset_dir: Path,
+    val_ratio: float = 0.2,
+    seed: int = 0,
+) -> dict:
+    """既存データセットの train / val を混ぜ直して分割し直す。
+
+    生成時に決めた比率のままでは「val が偏っていて評価が信用できない」ときに
+    手が出せないため。画像とラベルを対で動かす。
+    classify はクラスごとに比率を保って分割する（層化）。
+
+    ※ ファイルを移動するだけなので、何度でもやり直せる。
+    """
+    import random
+    import shutil
+
+    res = {"ok": False, "task": "", "moved": 0, "before": {}, "after": {},
+           "error": None}
+    ds = Path(dataset_dir)
+    res["before"] = dataset_split_counts(ds)
+
+    if not (0.01 <= val_ratio <= 0.9):
+        res["error"] = "val の割合は 0.01〜0.9 の範囲で指定してください"
+        return res
+
+    rng = random.Random(seed)
+    yaml_path = ds / "data.yaml"
+    task = dataset_task_type(str(yaml_path)) if yaml_path.exists() else "detect"
+    res["task"] = task
+
+    def _move(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.resolve() == dst.resolve():
+            return
+        # シンボリックリンクを壊さないよう、リンク自体を張り直す
+        if src.is_symlink():
+            target = os.readlink(src)
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            os.symlink(target, dst)
+            src.unlink()
+        else:
+            shutil.move(str(src), str(dst))
+
+    try:
+        if task == "classify":
+            # クラスごとに集めて、クラス内で分割する（少数クラスが片側に寄らないように）
+            per_class: dict[str, list[Path]] = {}
+            for sp in ("train", "val"):
+                sp_dir = ds / sp
+                if not sp_dir.exists():
+                    continue
+                for cdir in sp_dir.iterdir():
+                    if not cdir.is_dir():
+                        continue
+                    per_class.setdefault(cdir.name, []).extend(
+                        p for p in cdir.iterdir()
+                        if p.is_file() and p.suffix.lower() in IMG_EXTS
+                    )
+            if not per_class:
+                res["error"] = "画像が見つかりません"
+                return res
+
+            for cname, files in per_class.items():
+                rng.shuffle(files)
+                n_val = max(1, int(len(files) * val_ratio)) if len(files) > 1 else 0
+                for i, f in enumerate(files):
+                    sp = "val" if i < n_val else "train"
+                    dst = ds / sp / cname / f.name
+                    if f.parent != dst.parent:
+                        _move(f, dst)
+                        res["moved"] += 1
+        else:
+            img_root, lbl_root = ds / "images", ds / "labels"
+            if not img_root.exists():
+                res["error"] = "images/ がありません（YOLO 形式ではありません）"
+                return res
+
+            samples: list[tuple[Path, Optional[Path]]] = []
+            for sp in ("train", "val"):
+                sp_dir = img_root / sp
+                if not sp_dir.exists():
+                    continue
+                for img in sorted(sp_dir.iterdir()):
+                    if not img.is_file() or img.suffix.lower() not in IMG_EXTS:
+                        continue
+                    lbl = lbl_root / sp / f"{img.stem}.txt"
+                    samples.append((img, lbl if lbl.exists() else None))
+
+            if not samples:
+                res["error"] = "画像が見つかりません"
+                return res
+
+            rng.shuffle(samples)
+            n_val = max(1, int(len(samples) * val_ratio)) if len(samples) > 1 else 0
+            for i, (img, lbl) in enumerate(samples):
+                sp = "val" if i < n_val else "train"
+                img_dst = img_root / sp / img.name
+                if img.parent != img_dst.parent:
+                    _move(img, img_dst)
+                    res["moved"] += 1
+                if lbl is not None:
+                    lbl_dst = lbl_root / sp / lbl.name
+                    if lbl.parent != lbl_dst.parent:
+                        _move(lbl, lbl_dst)
+
+        res["after"] = dataset_split_counts(ds)
+        res["ok"] = True
+    except Exception as e:
+        res["error"] = f"{type(e).__name__}: {e}"
+    return res
+
+
+def dataset_class_names(dataset_dir: Path) -> list[str]:
+    """data.yaml のクラス名を順序どおりに返す（インデックス = クラスID）"""
+    yaml_path = Path(dataset_dir) / "data.yaml"
+    if not yaml_path.exists():
+        return []
+    try:
+        import yaml as _y
+        names = (_y.safe_load(yaml_path.read_text()) or {}).get("names")
+        if isinstance(names, dict):
+            return [names[k] for k in sorted(names)]
+        if isinstance(names, list):
+            return list(names)
+    except Exception:
+        pass
+    return []
+
+
+def remap_dataset_classes(
+    dataset_dir: Path,
+    mapping: dict[str, Optional[str]],
+    backup: bool = True,
+) -> dict:
+    """クラス名のリネーム・統合・削除を行う。
+
+    mapping: {現在のクラス名: 新しいクラス名}。値が None または空文字なら
+             そのクラスのアノテーションを削除する。
+             複数の旧名に同じ新名を割り当てると統合になる。
+
+    ラベル txt のクラスID を振り直し、data.yaml の names を書き換える。
+    書き換える .txt は `.txt.bak` にバックアップしてから上書きする。
+    """
+    import shutil
+
+    res = {"ok": False, "task": "", "old_classes": [], "new_classes": [],
+           "files_changed": 0, "lines_removed": 0, "dirs_merged": 0, "error": None}
+
+    ds = Path(dataset_dir)
+    yaml_path = ds / "data.yaml"
+    if not yaml_path.exists():
+        res["error"] = "data.yaml がありません"
+        return res
+
+    old_classes = dataset_class_names(ds)
+    res["old_classes"] = old_classes
+    task = dataset_task_type(str(yaml_path))
+    res["task"] = task
+
+    # 新しいクラス一覧（元の並び順を保ちつつ、統合先をまとめる）
+    new_classes: list[str] = []
+    for c in old_classes:
+        new = mapping.get(c, c)
+        if new and new not in new_classes:
+            new_classes.append(new)
+    if not new_classes:
+        res["error"] = "すべてのクラスが削除対象です。1つ以上残してください。"
+        return res
+    res["new_classes"] = new_classes
+
+    # 旧クラスID → 新クラスID（None は削除）
+    id_map: dict[int, Optional[int]] = {}
+    for i, c in enumerate(old_classes):
+        new = mapping.get(c, c)
+        id_map[i] = new_classes.index(new) if new else None
+
+    try:
+        if task == "classify":
+            # ディレクトリ名の変更・統合
+            for sp in ("train", "val", "test"):
+                sp_dir = ds / sp
+                if not sp_dir.exists():
+                    continue
+                for cdir in sorted(p for p in sp_dir.iterdir() if p.is_dir()):
+                    new = mapping.get(cdir.name, cdir.name)
+                    if not new:
+                        shutil.rmtree(cdir)
+                        res["dirs_merged"] += 1
+                        continue
+                    if new == cdir.name:
+                        continue
+                    dst = sp_dir / new
+                    if dst.exists():
+                        for f in cdir.iterdir():       # 統合: 中身を移してから削除
+                            target = dst / f.name
+                            if target.exists():
+                                target = dst / f"{f.stem}_{cdir.name}{f.suffix}"
+                            shutil.move(str(f), str(target))
+                        cdir.rmdir()
+                    else:
+                        cdir.rename(dst)
+                    res["dirs_merged"] += 1
+        else:
+            lbl_root = ds / "labels"
+            if lbl_root.exists():
+                for lbl_dir in sorted(p for p in lbl_root.iterdir() if p.is_dir()):
+                    for lp in sorted(lbl_dir.glob("*.txt")):
+                        try:
+                            lines = lp.read_text().splitlines()
+                        except Exception:
+                            continue
+                        kept, removed, changed = [], 0, False
+                        for line in lines:
+                            s = line.strip()
+                            if not s:
+                                continue
+                            parts = s.split()
+                            try:
+                                cid = int(float(parts[0]))
+                            except (ValueError, IndexError):
+                                continue
+                            new_id = id_map.get(cid, cid)
+                            if new_id is None:
+                                removed += 1
+                                changed = True
+                                continue
+                            if new_id != cid:
+                                changed = True
+                            kept.append(" ".join([str(new_id)] + parts[1:]))
+                        if changed:
+                            if backup:
+                                lp.with_suffix(".txt.bak").write_text(
+                                    "\n".join(lines) + "\n")
+                            lp.write_text(("\n".join(kept) + "\n") if kept else "")
+                            res["files_changed"] += 1
+                            res["lines_removed"] += removed
+
+        # data.yaml を更新
+        import yaml as _y
+        cfg = _y.safe_load(yaml_path.read_text()) or {}
+        cfg["names"] = new_classes
+        cfg["nc"] = len(new_classes)
+        yaml_path.write_text(_y.dump(cfg, allow_unicode=True,
+                                     default_flow_style=False))
+        res["ok"] = True
+    except Exception as e:
+        res["error"] = f"{type(e).__name__}: {e}"
+    return res
+
+
 def dataset_size_bytes(dataset_dir: Path, labels_only: bool = False) -> int:
     """データセットの概算サイズ（ZIP 生成前の警告用）"""
     total = 0

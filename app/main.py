@@ -600,6 +600,17 @@ def _collect_current_params() -> dict:
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
+# エラー表示（原因の推定と対処をセットで出す）
+# ---------------------------------------------------------------------------
+def show_error(message: str, prefix: str = "") -> None:
+    """エラーを表示し、よくある原因に当てはまれば対処も添える"""
+    st.error(f"{prefix}{message}" if prefix else str(message))
+    hint = explain_error(str(message))
+    if hint:
+        st.warning(f"**{hint['title']}**\n\n{hint['hint']}")
+
+
+# ---------------------------------------------------------------------------
 # パイプライン状態ヘルパー
 # ---------------------------------------------------------------------------
 def _get_pipeline_status() -> dict:
@@ -1032,7 +1043,7 @@ with tab0:
                 st.info(f"⏳ デプロイ実行中: `{_dep_target}`  "
                         "（初回はイメージのビルドに数分〜十数分かかります）")
             elif _dep_error:
-                st.error(f"❌ デプロイ失敗: {_dep_error}")
+                show_error(_dep_error, prefix="❌ デプロイ失敗: ")
             else:
                 st.success(f"✅ デプロイ完了: `{_dep_target}`")
 
@@ -1187,6 +1198,110 @@ with tab0:
         f'🔗 Nuclio ダッシュボードで詳細を見る</a></div>',
         unsafe_allow_html=True,
     )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── 新規タスク作成（アノテーションの入口）──────────────────────────────
+    st.markdown('<div class="pipeline-card"><h3>➕ CVAT に新しいタスクを作る</h3>',
+                unsafe_allow_html=True)
+    st.caption(
+        "アノテーションしたい画像から CVAT のタスクを直接作ります。"
+        "CVAT の画面を開かずに、ここからアノテーションを始められます。"
+    )
+
+    _nt_src = st.radio(
+        "画像の取得元",
+        ["📤 画像をアップロード", "📂 data/ のディレクトリから"],
+        horizontal=True, key="nt_src",
+    )
+
+    _nt_images: list[Path] = []
+    _nt_tmp = PREDICTIONS_DIR / "_newtask_uploads"
+
+    if _nt_src == "📤 画像をアップロード":
+        _nt_files = st.file_uploader(
+            "アノテーションする画像（複数選択可）",
+            type=["jpg", "jpeg", "png", "bmp", "tiff"],
+            accept_multiple_files=True, key="nt_files",
+        )
+        if _nt_files:
+            _nt_tmp.mkdir(parents=True, exist_ok=True)
+            _cur = {f.name for f in _nt_files}
+            _saved = {f.name for f in _nt_tmp.iterdir() if f.is_file()}
+            if _cur != _saved:
+                for _f in list(_nt_tmp.iterdir()):
+                    _f.unlink()
+                for _f in _nt_files:
+                    (_nt_tmp / _f.name).write_bytes(_f.getbuffer())
+            _nt_images = sorted(p for p in _nt_tmp.iterdir() if p.is_file())
+            st.caption(f"✅ {len(_nt_images)} 枚を選択中")
+    else:
+        _nt_dirs = _find_image_dirs(DATA_DIR) if DATA_DIR.exists() else []
+        if not _nt_dirs:
+            st.info("data/ に画像が見つかりません。")
+        else:
+            _nt_dir_sel = st.selectbox(
+                "画像ディレクトリ",
+                [str(d.relative_to(DATA_DIR)) for d in _nt_dirs], key="nt_dir")
+            _nt_dir = DATA_DIR / _nt_dir_sel
+            _nt_all = sorted(p for p in _nt_dir.iterdir()
+                             if p.is_file() and p.suffix.lower() in IMG_EXTS)
+            _nt_limit = st.number_input(
+                "使用する枚数（先頭から）", 1, max(len(_nt_all), 1),
+                min(len(_nt_all), 100), key="nt_limit",
+                help="1タスクが大きすぎると作業しづらいので、分割して作るのがおすすめです")
+            _nt_images = _nt_all[:int(_nt_limit)]
+            st.caption(f"ディレクトリ内 {len(_nt_all)} 枚中 {len(_nt_images)} 枚を使用")
+
+    _ntc1, _ntc2 = st.columns([2, 1])
+    with _ntc1:
+        _nt_name = st.text_input(
+            "タスク名", value=f"annotate_{datetime.now():%Y%m%d_%H%M}", key="nt_name")
+    with _ntc2:
+        _nt_shape = st.selectbox(
+            "アノテーション形式",
+            ["rectangle", "polygon", "points", "tag", "any"], key="nt_shape",
+            help="rectangle: 物体検出 / polygon: セグメンテーション / "
+                 "points: キーポイント / tag: 画像分類 / any: 何でも",
+        )
+
+    # ラベルは既存タスクから引き継げるようにする（表記ゆれを防ぐ）
+    _nt_known: list[str] = []
+    _nt_prev = st.session_state.get("le_labels_by_task") or {}
+    for _lbls in _nt_prev.values():
+        for _l in _lbls:
+            if _l not in _nt_known:
+                _nt_known.append(_l)
+    _nt_default = ", ".join(_nt_known) if _nt_known else ""
+    _nt_labels_raw = st.text_input(
+        "ラベル（カンマ区切り）", value=_nt_default, key="nt_labels",
+        help="既存タスクと同じ名前にしてください。"
+             "自動アノテーションを使う場合は、モデルのクラス名とも一致させる必要があります。",
+    )
+    _nt_labels = [s.strip() for s in _nt_labels_raw.split(",") if s.strip()]
+    if _nt_known and not _nt_labels_raw.strip():
+        st.caption(f"💡 取得済みのラベル: {', '.join(_nt_known)}")
+
+    if st.button(f"➕ CVAT にタスクを作成（{len(_nt_images)} 枚）",
+                 type="primary", use_container_width=True,
+                 disabled=not _nt_images or not _nt_labels or not _nt_name.strip(),
+                 key="nt_create"):
+        with st.spinner("CVAT にタスクを作成中…（画像アップロード中）"):
+            st.session_state["nt_result"] = create_cvat_task_from_images(
+                _nt_name.strip(), _nt_images, _nt_labels, label_type=_nt_shape)
+
+    _nt_res = st.session_state.get("nt_result")
+    if _nt_res:
+        if _nt_res["ok"]:
+            st.success(f"✅ タスクを作成しました（ID: {_nt_res['task_id']} / "
+                       f"{_nt_res['n_images']} 枚 / ラベル: {', '.join(_nt_res['labels'])}）")
+            st.markdown(f"👉 [CVAT でアノテーションを始める]({_nt_res['url']})")
+            st.caption(
+                "自動アノテーションモデルをデプロイ済みなら、CVAT の "
+                "「Actions → Automatic annotation」で下書きを作れます。"
+            )
+        else:
+            show_error(_nt_res["error"], prefix="❌ 作成に失敗しました: ")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ── アノテーション進捗 ────────────────────────────────────────────────
@@ -2161,6 +2276,64 @@ with tab2:
             crop_fraction = 1.0
             auto_augment  = "randaugment"
 
+    # ── データ拡張のプレビュー ────────────────────────────────────────────────
+    with st.expander("👁 データ拡張を目で確認する", expanded=False):
+        st.caption(
+            "上で設定した拡張が画像に何をするかを、学習前に確認できます。"
+            "パラメータの意味を掴むためのものです。"
+        )
+
+        _ap_params = {
+            "hsv_h": float(hsv_h), "hsv_s": float(hsv_s), "hsv_v": float(hsv_v),
+            "degrees": float(degrees), "translate": float(translate),
+            "scale": float(scale), "shear": float(shear),
+            "fliplr": float(fliplr), "flipud": float(flipud),
+            "mosaic": float(mosaic), "erasing": float(erasing),
+        }
+
+        _ap_active = describe_augment(_ap_params)
+        if not _ap_active:
+            st.info("有効な拡張がありません。上の「🎨 データ拡張」で値を設定してください。")
+        else:
+            st.markdown("**有効になっている拡張**")
+            for _label, _val, _desc in _ap_active:
+                st.caption(f"・**{_label}** = `{_val}` … {_desc}")
+
+        _ap_ds = Path(data_yaml_path).parent if data_yaml_path else None
+        _ap_imgs = list_sample_images(_ap_ds) if _ap_ds and _ap_ds.exists() else []
+
+        if not _ap_imgs:
+            st.warning("プレビューに使える画像が見つかりません。"
+                       "先にデータセットを選択してください。")
+        else:
+            _apc1, _apc2 = st.columns([1, 2])
+            with _apc1:
+                _ap_seed = st.number_input("乱数シード", 0, 9999, 0, key="ap_seed",
+                                           help="変えると別のかかり方を試せます")
+            with _apc2:
+                _ap_n = st.slider("表示するパターン数", 1, 4, 3, key="ap_n")
+
+            if st.button("👁 プレビューを作る", use_container_width=True, key="ap_run"):
+                with st.spinner("生成中…"):
+                    st.session_state["ap_preview"] = build_augment_preview(
+                        _ap_imgs, _ap_params, seed=int(_ap_seed), n_variants=int(_ap_n))
+
+            _ap_res = st.session_state.get("ap_preview")
+            if _ap_res:
+                _orig, _vars = _ap_res
+                if _orig is None:
+                    st.error("画像を読み込めませんでした。")
+                else:
+                    _cols = st.columns(len(_vars) + 1)
+                    _cols[0].image(_orig, caption="元画像", use_column_width=True)
+                    for _c, (_lbl, _im) in zip(_cols[1:], _vars):
+                        _c.image(_im, caption=_lbl, use_column_width=True)
+                    st.caption(
+                        "⚠ 実際の学習では拡張が**確率的に**適用され、"
+                        "ここでは効果が見えるよう必ず適用しています。"
+                        "見え方の傾向を掴むための近似表示です。"
+                    )
+
     # ── 学習設定サマリー ──────────────────────────────────────────────────────
     _ds_disp = Path(data_yaml_path).parent.name if data_yaml_path else "—"
     st.markdown("#### 📋 学習設定サマリー")
@@ -2455,7 +2628,7 @@ with tab2:
                 st.text("\n".join(st.session_state.training_log[-500:]))
 
     if st.session_state.training_error:
-        st.error(f"学習エラー: {st.session_state.training_error}")
+        show_error(st.session_state.training_error, prefix="学習エラー: ")
 
     # --- 完了後: モデル選択 ---
     if st.session_state.last_model_path:
@@ -2606,7 +2779,7 @@ with tab3:
                     st.progress(_ev_done / max(_ev_total, 1),
                                 text=f"評価中 {_ev_done}/{_ev_total}　{_ev_current}")
                 elif _ev_error:
-                    st.error(f"❌ 評価に失敗しました: {_ev_error}")
+                    show_error(_ev_error, prefix="❌ 評価に失敗しました: ")
                 else:
                     st.success("✅ 評価が完了しました")
                 st.code("\n".join(_ev_log[-20:]) or "(実行待ち)", language="text")
@@ -2708,6 +2881,90 @@ with tab3:
             st.rerun()
 
     # --- GT との差分分析（ラベル漏れ・誤ラベルの発見）---
+    # --- 実運用の conf を決める ---
+    with st.expander("🎚 最適な信頼度しきい値 (conf) を探す", expanded=False):
+        st.caption(
+            "mAP は「モデルの実力」を測る指標ですが、実際に使うときは "
+            "**どの conf で運用するか**を決める必要があります。"
+            "しきい値を振って Precision / Recall / F1 を測り、判断材料を出します。"
+        )
+
+        _sw_yamls = sorted(DATA_DIR.rglob("data.yaml"), key=lambda p: p.stat().st_mtime,
+                           reverse=True)
+        if not _sw_yamls or not _model_map:
+            st.info("data.yaml と学習済みモデルの両方が必要です。")
+        else:
+            _swc1, _swc2 = st.columns([3, 2])
+            with _swc1:
+                _sw_yaml_sel = st.selectbox(
+                    "データセット (data.yaml)",
+                    [str(p.relative_to(DATA_DIR)) for p in _sw_yamls], key="sw_yaml")
+            with _swc2:
+                _sw_model_sel = st.selectbox(
+                    "モデル", list(_model_map.keys()),
+                    index=(list(_model_map.values()).index(current_model)
+                           if current_model in _model_map.values() else 0),
+                    key="sw_model")
+
+            _swp1, _swp2, _swp3 = st.columns(3)
+            with _swp1:
+                _sw_split = st.selectbox("スプリット", ["val", "train"], key="sw_split")
+            with _swp2:
+                _sw_iou = st.slider("一致とみなす IoU", 0.1, 0.9, 0.5, 0.05, key="sw_iou")
+            with _swp3:
+                _sw_max = st.number_input("最大画像数", 0, 100000, 300, 100, key="sw_max",
+                                          help="0 で全画像")
+
+            if st.button("🎚 しきい値を振って測る", type="primary",
+                         use_container_width=True, key="sw_run"):
+                with st.spinner("推論して各しきい値で評価しています…"):
+                    st.session_state["sw_result"] = sweep_confidence(
+                        Path(_model_map[_sw_model_sel]),
+                        str(DATA_DIR / _sw_yaml_sel), split=_sw_split,
+                        iou_match=float(_sw_iou), max_images=int(_sw_max),
+                    )
+
+            _sw = st.session_state.get("sw_result")
+            if _sw and not _sw["ok"]:
+                show_error(_sw["error"], prefix="❌ 測定に失敗しました: ")
+            elif _sw:
+                import pandas as _pd_sw
+
+                _df_sw = _pd_sw.DataFrame([{
+                    "conf": r["conf"], "Precision": round(r["precision"], 3),
+                    "Recall": round(r["recall"], 3), "F1": round(r["f1"], 3),
+                    "TP": r["tp"], "FP": r["fp"], "FN": r["fn"],
+                } for r in _sw["rows"]])
+
+                st.markdown(f"**{_sw['n_images']} 枚で測定**（IoU {_sw['iou_match']} で一致判定）")
+                st.line_chart(_df_sw.set_index("conf")[["Precision", "Recall", "F1"]])
+
+                _b = _sw["best_f1"]
+                _hp, _hr = _sw["high_precision"], _sw["high_recall"]
+                _rc1, _rc2, _rc3 = st.columns(3)
+                with _rc1:
+                    st.metric("バランス重視 (F1最大)", f"{_b['conf']:.2f}" if _b else "—")
+                    if _b:
+                        st.caption(f"P {_b['precision']:.3f} / R {_b['recall']:.3f} / "
+                                   f"F1 {_b['f1']:.3f}")
+                with _rc2:
+                    st.metric("誤検出を避ける", f"{_hp['conf']:.2f}" if _hp else "—")
+                    st.caption(f"P {_hp['precision']:.3f} / R {_hp['recall']:.3f}"
+                               if _hp else "Precision 0.95 以上に届く点がありません")
+                with _rc3:
+                    st.metric("見逃しを避ける", f"{_hr['conf']:.2f}" if _hr else "—")
+                    st.caption(f"P {_hr['precision']:.3f} / R {_hr['recall']:.3f}"
+                               if _hr else "Recall 0.95 以上を保てる点がありません")
+
+                st.caption(
+                    "用途に合わせて選んでください。"
+                    "検査や安全用途で見逃したくないなら Recall 寄り（低め）、"
+                    "自動処理で誤検出を出したくないなら Precision 寄り（高め）、"
+                    "自動アノテーションの下書きなら少し低めが便利です"
+                    "（消す方が描くより速いため）。"
+                )
+                st.dataframe(_df_sw, use_container_width=True, hide_index=True, height=260)
+
     with st.expander("🔬 正解ラベルとの差分分析（アノテーション漏れを探す）", expanded=False):
         st.caption(
             "モデルの予測を正解ラベル(GT)と突き合わせ、画像ごとに "
@@ -2756,7 +3013,7 @@ with tab3:
 
             _gd = st.session_state.get("gd_result")
             if _gd and not _gd["ok"]:
-                st.error(f"❌ 分析に失敗しました: {_gd['error']}")
+                show_error(_gd["error"], prefix="❌ 分析に失敗しました: ")
             elif _gd:
                 import pandas as _pd_gd
 
@@ -3160,7 +3417,7 @@ with tab3:
                         st.image(_img, caption=f"{_stem} ({_n_boxes}件検出)",
                                  use_column_width=True)
                     else:
-                        st.caption(_jf.stem)
+                        st.caption(prediction_display_name(_jf))
                     _is_flagged = _jf.name in st.session_state.reanno_set
                     _flag_label = "🚩 フラグ解除" if _is_flagged else "🚩 再アノテーション要"
                     if st.button(_flag_label, key=f"prev_flag_{_jf.name}",
@@ -3234,7 +3491,7 @@ with tab3:
                             _img, _n_boxes, _stem = _res
                             st.image(_img, caption=f"{_stem} ({_n_boxes}件)", use_column_width=True)
                         else:
-                            st.caption(_jf.stem)
+                            st.caption(prediction_display_name(_jf))
                             st.markdown("_(プレビュー不可)_")
                         _chk_result = st.checkbox(
                             "選択",
@@ -3448,7 +3705,7 @@ with tab3:
             if _aa_hits:
                 import pandas as _pd_aa
                 _df_aa = _pd_aa.DataFrame([{
-                    "ファイル": _h["name"],
+                    "ファイル": _h.get("display_name") or _h["name"],
                     "検出数": _h["n_boxes"],
                     "最低conf": (f"{_h['min_conf']:.2f}" if _h["min_conf"] is not None else "—"),
                     "理由": ", ".join(_h["reasons"]),
@@ -3551,7 +3808,7 @@ with tab3:
                         st.markdown(f"👉 [CVAT でこのタスクを開く]({_pu_last['url']})")
                         st.caption("作業が終わったら「📤 Step2: データ取込」でエクスポートして学習に回せます。")
                     else:
-                        st.error(f"❌ 送信に失敗しました: {_pu_last['error']}")
+                        show_error(_pu_last["error"], prefix="❌ 送信に失敗しました: ")
 
             st.caption(
                 "ZIP 出力形式: 元画像 (`images/`) + YOLO txt ラベル (`labels/`) "
@@ -3640,6 +3897,90 @@ with tab4:
                 )
             else:
                 st.caption("📚 来歴の記録なし（この機能を入れる前に作られたデータセットです）")
+
+            with st.expander(f"✂️ {ds.name} の train/val を分け直す"):
+                st.caption(
+                    "生成時に決めた比率のままだと「val が偏っていて評価が信用できない」"
+                    "ときに手が出せません。ここで混ぜ直せます。"
+                    "画像とラベルは対のまま移動し、何度でもやり直せます。"
+                )
+                _rs_before = dataset_split_counts(ds)
+                st.caption("現在: " + (" / ".join(f"{k} {v}枚" for k, v in _rs_before.items())
+                                       or "（画像なし）"))
+                _rsc1, _rsc2 = st.columns(2)
+                with _rsc1:
+                    _rs_ratio = st.slider("val の割合", 0.05, 0.50, 0.20, 0.05,
+                                          key=f"rs_ratio_{ds.name}")
+                with _rsc2:
+                    _rs_seed = st.number_input(
+                        "乱数シード", 0, 9999, 0, key=f"rs_seed_{ds.name}",
+                        help="同じ値なら同じ分け方になります。変えると別の組み合わせを試せます")
+                if st.button("✂️ 分け直す", key=f"rs_run_{ds.name}",
+                             use_container_width=True):
+                    with st.spinner("分割し直しています…"):
+                        _rs = resplit_dataset(ds, val_ratio=float(_rs_ratio),
+                                              seed=int(_rs_seed))
+                    if _rs["error"]:
+                        show_error(_rs["error"], prefix="❌ 分割に失敗しました: ")
+                    else:
+                        st.success(
+                            "✅ 分割し直しました　"
+                            + " / ".join(f"{k} {v}枚" for k, v in _rs["after"].items())
+                            + f"（{_rs['moved']} 件を移動）"
+                        )
+                        st.rerun()
+
+            with st.expander(f"🏷 {ds.name} のクラス名を編集・統合する"):
+                _cls_names = dataset_class_names(ds)
+                if not _cls_names:
+                    st.info("data.yaml にクラス定義がありません。")
+                else:
+                    st.caption(
+                        "クラス名の変更・統合・削除ができます。"
+                        "複数のクラスに同じ新しい名前を付けると統合されます。"
+                        "空欄にするとそのクラスのアノテーションを削除します。"
+                        "ラベルは `.txt.bak` にバックアップしてから書き換えます。"
+                    )
+                    _mapping: dict = {}
+                    for _cn in _cls_names:
+                        _mapping[_cn] = st.text_input(
+                            f"`{_cn}` →", value=_cn, key=f"cls_map_{ds.name}_{_cn}",
+                        ).strip()
+
+                    _new_list: list[str] = []
+                    for _cn in _cls_names:
+                        _nv = _mapping[_cn]
+                        if _nv and _nv not in _new_list:
+                            _new_list.append(_nv)
+                    _removed = [c for c in _cls_names if not _mapping[c]]
+
+                    if _new_list != _cls_names or _removed:
+                        st.markdown(f"変更後のクラス: **{', '.join(_new_list) or '（なし）'}**")
+                        if _removed:
+                            st.warning(f"⚠ 削除されるクラス: {', '.join(_removed)}"
+                                       "（該当するアノテーションが消えます）")
+                        if not _new_list:
+                            st.error("すべてのクラスが削除対象です。1つ以上残してください。")
+                        elif st.button("🏷 クラスを更新する", key=f"cls_run_{ds.name}",
+                                       type="primary", use_container_width=True):
+                            with st.spinner("ラベルを書き換えています…"):
+                                _rm = remap_dataset_classes(
+                                    ds, {k: (v or None) for k, v in _mapping.items()})
+                            if _rm["error"]:
+                                show_error(_rm["error"], prefix="❌ 更新に失敗しました: ")
+                            else:
+                                st.success(
+                                    f"✅ {', '.join(_rm['old_classes'])} → "
+                                    f"{', '.join(_rm['new_classes'])}"
+                                    + (f"（{_rm['files_changed']} ファイルを書換、"
+                                       f"{_rm['lines_removed']} 行を除去）"
+                                       if _rm["files_changed"] else "")
+                                    + (f"（{_rm['dirs_merged']} ディレクトリを整理）"
+                                       if _rm["dirs_merged"] else "")
+                                )
+                                st.rerun()
+                    else:
+                        st.caption("変更はありません。")
 
             with st.expander(f"⬇ {ds.name} を持ち出す（ZIP エクスポート）"):
                 st.caption(
@@ -3953,10 +4294,9 @@ with tab4:
                     if _mu_detail:
                         st.caption(" / ".join(_mu_detail))
                 else:
-                    st.error(
-                        f"❌ `{_p.relative_to(MODELS_DIR)}` はこの環境で読み込めませんでした。\n\n"
-                        f"{_info['error']}\n\n"
-                        "学習元の ultralytics バージョンがこの環境（8.4.48）と乖離している可能性があります。"
+                    show_error(
+                        _info["error"],
+                        prefix=f"❌ `{_p.relative_to(MODELS_DIR)}` は読み込めませんでした: ",
                     )
             if _mu_ok_paths and st.session_state.get("mu_pending_current"):
                 _mu_best = next((p for p in _mu_ok_paths if p.name == "best.pt"), _mu_ok_paths[0])

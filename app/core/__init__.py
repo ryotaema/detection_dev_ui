@@ -22,6 +22,8 @@ from .evaluation import *      # noqa: F401,F403
 from .inference import *       # noqa: F401,F403
 from .serverless import *      # noqa: F401,F403
 from .fiftyone_app import *    # noqa: F401,F403
+from .errors import *          # noqa: F401,F403
+from .augment_preview import *  # noqa: F401,F403
 
 # `import *` はアンダースコア始まりを取り込まないため、明示的に公開する
 from .config import (  # noqa: F401

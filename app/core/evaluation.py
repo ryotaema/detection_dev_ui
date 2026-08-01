@@ -69,6 +69,8 @@ def analyze_predictions(
         results.append({
             "json": Path(jf),
             "name": Path(jf).name,
+            # 一覧表示にはハッシュ付きの JSON 名ではなく元画像名を使う
+            "display_name": Path(pred.get("image_path", "") or jf).name,
             "image_path": pred.get("image_path", ""),
             "n_boxes": len(boxes),
             "min_conf": min(confs) if confs else None,
@@ -347,6 +349,83 @@ def evaluate_model(
                 pass
     except Exception as e:
         res["error"] = f"{type(e).__name__}: {e}"
+    return res
+
+
+def sweep_confidence(
+    model_path: Path,
+    data_yaml: str,
+    split: str = "val",
+    iou_match: float = 0.5,
+    max_images: int = 300,
+    thresholds: Optional[list[float]] = None,
+) -> dict:
+    """信頼度しきい値を振って Precision / Recall / F1 を測る。
+
+    mAP は「モデルの実力」を測る指標だが、実運用では
+    「どの conf で使うか」を決める必要がある。ここではその判断材料を出す。
+
+    推論は低い conf で1回だけ行い、その結果をしきい値でふるい直す
+    （しきい値ごとに推論し直すと時間がかかるため）。
+    """
+    res: dict = {
+        "ok": False, "error": None, "n_images": 0, "iou_match": iou_match,
+        "rows": [], "best_f1": None, "high_precision": None, "high_recall": None,
+    }
+    if thresholds is None:
+        thresholds = [round(x / 100, 2) for x in range(5, 96, 5)]
+
+    # conf を最小値まで下げて一度だけ推論する
+    base = compare_with_ground_truth(
+        model_path, data_yaml, split=split,
+        conf=min(thresholds) if thresholds else 0.05,
+        iou_match=iou_match, max_images=max_images,
+    )
+    if not base["ok"]:
+        res["error"] = base["error"]
+        return res
+
+    res["n_images"] = base["n_images"]
+    per_image = base["per_image"]
+
+    for t in thresholds:
+        tp = fp = fn = 0
+        for item in per_image:
+            preds = [p for p in item["pred_boxes"] if p["confidence"] >= t]
+            preds.sort(key=lambda d: -d["confidence"])
+            gts = item["gt_boxes"]
+            matched = [False] * len(gts)
+            for p in preds:
+                best_i, best_iou = -1, 0.0
+                for gi, g in enumerate(gts):
+                    if matched[gi] or g["label"] != p["label"]:
+                        continue
+                    v = _iou(p["bbox_xyxy"], g["bbox_xyxy"])
+                    if v > best_iou:
+                        best_i, best_iou = gi, v
+                if best_i >= 0 and best_iou >= iou_match:
+                    matched[best_i] = True
+                    tp += 1
+                else:
+                    fp += 1
+            fn += matched.count(False)
+
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
+        res["rows"].append({
+            "conf": t, "tp": tp, "fp": fp, "fn": fn,
+            "precision": prec, "recall": rec, "f1": f1,
+        })
+
+    if res["rows"]:
+        res["best_f1"] = max(res["rows"], key=lambda r: r["f1"])
+        # 誤検出を避けたいとき / 見逃しを避けたいときの目安も出す
+        hp = [r for r in res["rows"] if r["precision"] >= 0.95 and r["recall"] > 0]
+        res["high_precision"] = min(hp, key=lambda r: r["conf"]) if hp else None
+        hr = [r for r in res["rows"] if r["recall"] >= 0.95 and r["precision"] > 0]
+        res["high_recall"] = max(hr, key=lambda r: r["conf"]) if hr else None
+    res["ok"] = True
     return res
 
 

@@ -434,6 +434,73 @@ def push_items_to_cvat(
     return out
 
 
+def create_cvat_task_from_images(
+    task_name: str,
+    image_paths: list[Path],
+    labels: list[str],
+    label_type: str = "rectangle",
+) -> dict:
+    """画像だけを渡して CVAT の新規タスクを作る（アノテーションの入口）。
+
+    これまで最初のタスク作成は CVAT を直接操作する必要があったため、
+    UI 側から始められるようにする。
+    label_type: rectangle / polygon / points / tag / any
+    """
+    import shutil as _sh
+    import tempfile
+
+    out = {"ok": False, "task_id": None, "url": "", "n_images": 0,
+           "labels": [], "error": None}
+
+    paths = [Path(p) for p in image_paths if Path(p).exists()]
+    if not paths:
+        out["error"] = "アップロードする画像がありません"
+        return out
+    if not labels:
+        out["error"] = "ラベルを1つ以上指定してください"
+        return out
+
+    client = get_cvat_client()
+    if not client:
+        out["error"] = "CVAT に接続できません"
+        return out
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="cvat_new_"))
+    try:
+        from cvat_sdk.api_client import models
+
+        # 同名ファイルがあると CVAT 側で扱いづらいので連番を振って退避する
+        resources, used = [], set()
+        for p in paths:
+            fname = p.name
+            if fname in used:
+                fname = f"{p.stem}_{len(used)}{p.suffix}"
+            used.add(fname)
+            dst = tmp_dir / fname
+            _sh.copy2(p, dst)
+            resources.append(dst)
+
+        spec = models.TaskWriteRequest(
+            name=task_name,
+            labels=[models.PatchedLabelRequest(name=lb, type=label_type)
+                    for lb in labels],
+        )
+        task = client.tasks.create_from_data(spec=spec, resources=resources)
+
+        out.update({
+            "ok": True,
+            "task_id": task.id,
+            "url": f"{CVAT_WEB}/tasks/{task.id}",
+            "n_images": len(resources),
+            "labels": list(labels),
+        })
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+    return out
+
+
 def push_predictions_to_cvat(
     json_paths: list[Path],
     task_name: str,
