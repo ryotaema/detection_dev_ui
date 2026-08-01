@@ -33,7 +33,12 @@ class ModelHandler:
         if boxes is None:
             return detections
 
-        for box in boxes:
+        # セグメンテーションモデルの場合はインスタンスごとの輪郭が入る。
+        # CVAT へは polygon として返すと、そのままポリゴンとして編集できる。
+        masks = getattr(result, "masks", None)
+        mask_xy = list(getattr(masks, "xy", []) or []) if masks is not None else []
+
+        for idx, box in enumerate(boxes):
             cls_id = int(box.cls.item())
             confidence = float(box.conf.item())
             x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
@@ -43,12 +48,20 @@ class ModelHandler:
             else:
                 label = self.names[cls_id]
 
+            if idx < len(mask_xy) and len(mask_xy[idx]) >= 3:
+                # CVAT の polygon は [x1, y1, x2, y2, ...] のフラットな配列
+                points = [float(v) for xy in mask_xy[idx] for v in xy]
+                shape_type = "polygon"
+            else:
+                points = [x1, y1, x2, y2]
+                shape_type = "rectangle"
+
             detections.append(
                 {
                     "confidence": str(confidence),
                     "label": label,
-                    "points": [x1, y1, x2, y2],
-                    "type": "rectangle",
+                    "points": points,
+                    "type": shape_type,
                 }
             )
 

@@ -1100,6 +1100,15 @@ def _draw_predictions(json_path: Path):
             label = box["label"]
             conf  = box.get("confidence", 0.0)
             color = _COLORS[label_set.index(label) % len(_COLORS)]
+            # セグメンテーション結果があれば輪郭を重ねて塗る
+            _mxy = box.get("mask_xy")
+            if _mxy and len(_mxy) >= 3:
+                import numpy as _np_seg
+                _pts = _np_seg.array(_mxy, dtype=_np_seg.int32).reshape(-1, 1, 2)
+                _overlay = img.copy()
+                cv2.fillPoly(_overlay, [_pts], color)
+                cv2.addWeighted(_overlay, 0.35, img, 0.65, 0, img)
+                cv2.polylines(img, [_pts], True, color, 2)
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
             text = f"{label} {conf:.2f}"
             (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -1525,6 +1534,69 @@ def check_dataset_quality(dataset_dir: Path, tiny_area: float = 0.0005) -> dict:
     return res
 
 
+def dataset_size_bytes(dataset_dir: Path, labels_only: bool = False) -> int:
+    """データセットの概算サイズ（ZIP 生成前の警告用）"""
+    total = 0
+    for p in dataset_dir.rglob("*"):
+        if not p.is_file() or p.name.endswith(".bak"):
+            continue
+        if labels_only and p.suffix.lower() in IMG_EXTS:
+            continue
+        total += p.stat().st_size
+    return total
+
+
+def build_dataset_zip(dataset_dir: Path, out_path: Path,
+                      labels_only: bool = False) -> tuple[bool, str, int]:
+    """データセットを ZIP に固めてディスクへ書き出す。
+
+    画像を含めると数 GB になりうるためメモリ上には載せず、
+    一時ファイル経由で st.download_button に渡す。
+    Returns: (成功, メッセージ, ファイル数)
+    """
+    try:
+        n = 0
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for p in sorted(dataset_dir.rglob("*")):
+                if not p.is_file() or p.name.endswith(".bak"):
+                    continue
+                if labels_only and p.suffix.lower() in IMG_EXTS:
+                    continue
+                zf.write(p, arcname=str(p.relative_to(dataset_dir)))
+                n += 1
+        return True, str(out_path), n
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}", 0
+
+
+def build_model_bundle_zip(model_path: Path, out_path: Path) -> tuple[bool, str, int]:
+    """モデル一式（重み + 学習ログ + 評価結果 + プロット）を ZIP にまとめる。
+
+    他の PC へ持ち出したとき、`models/<run>/weights/best.pt` の構造のまま
+    展開できるようにする（このUIの取込・デプロイがその構造を前提にするため）。
+    """
+    try:
+        run_dir = model_path.parent.parent if model_path.parent.name == "weights" \
+            else model_path.parent
+        n = 0
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.write(model_path, arcname=f"weights/{model_path.name}")
+            n += 1
+            for p in sorted(run_dir.rglob("*")):
+                if not p.is_file() or p == model_path:
+                    continue
+                # 他の重み（last.pt 等）は除き、記録類とメタ情報だけ入れる
+                if p.suffix == ".pt":
+                    continue
+                zf.write(p, arcname=str(p.relative_to(run_dir)))
+                n += 1
+        return True, str(out_path), n
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}", 0
+
+
 def fix_dataset_labels(
     dataset_dir: Path,
     drop_invalid_size: bool = True,
@@ -1691,6 +1763,241 @@ def analyze_predictions(
 
 
 # ---------------------------------------------------------------------------
+# GT vs 予測の差分分析
+#
+#   学習済みモデルの予測を正解ラベル(GT)と突き合わせ、画像ごとに
+#   FN(取りこぼし) / FP(余計な検出) を数える。
+#   精度の高いモデルが FN を出す画像は「モデルが悪い」だけでなく
+#   「GT のアノテーションが漏れている」ことも多く、ラベルの抜けを見つける手段になる。
+# ---------------------------------------------------------------------------
+def _yolo_txt_to_xyxy(txt_path: Path, w: int, h: int,
+                      names: list[str]) -> list[dict]:
+    """YOLO ラベル txt を絶対座標の xyxy に変換する。
+
+    detect 形式 (cls cx cy bw bh) と segment 形式 (cls x1 y1 x2 y2 ... 正規化ポリゴン)
+    の両方を受け付ける。segment の場合はポリゴンの外接矩形を bbox として扱い、
+    輪郭は mask_xy として保持する。
+    """
+    out = []
+    if not txt_path.exists():
+        return out
+    try:
+        for line in txt_path.read_text().splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            try:
+                cid = int(float(parts[0]))
+                vals = [float(v) for v in parts[1:]]
+            except ValueError:
+                continue
+
+            label = names[cid] if 0 <= cid < len(names) else f"id={cid}"
+
+            if len(vals) == 4:
+                cx, cy, bw, bh = vals
+                x1, y1 = (cx - bw / 2) * w, (cy - bh / 2) * h
+                x2, y2 = (cx + bw / 2) * w, (cy + bh / 2) * h
+                out.append({
+                    "label": label,
+                    "bbox_xyxy": [x1, y1, x2, y2],
+                    # FiftyOne 形式(左上+wh の正規化)
+                    "bbox_xywhn": [cx - bw / 2, cy - bh / 2, bw, bh],
+                })
+            elif len(vals) >= 6 and len(vals) % 2 == 0:
+                xs = [vals[i] * w for i in range(0, len(vals), 2)]
+                ys = [vals[i] * h for i in range(1, len(vals), 2)]
+                x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                out.append({
+                    "label": label,
+                    "bbox_xyxy": [x1, y1, x2, y2],
+                    "bbox_xywhn": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
+                    "mask_xy":  [[x, y] for x, y in zip(xs, ys)],
+                    "mask_xyn": [[vals[i], vals[i + 1]] for i in range(0, len(vals), 2)],
+                })
+    except Exception:
+        pass
+    return out
+
+
+def compare_with_ground_truth(
+    model_path: Path,
+    data_yaml: str,
+    split: str = "val",
+    conf: float = 0.25,
+    iou_match: float = 0.5,
+    max_images: int = 500,
+) -> dict:
+    """モデルの予測と GT を突き合わせ、画像ごとの TP/FP/FN を返す。
+
+    マッチングは「同一クラスかつ IoU >= iou_match」を信頼度の高い予測から貪欲に行う。
+    """
+    res: dict = {
+        "ok": False, "error": None,
+        "model": str(model_path), "split": split, "conf": conf, "iou_match": iou_match,
+        "n_images": 0, "tp": 0, "fp": 0, "fn": 0,
+        "precision": None, "recall": None,
+        "per_image": [], "by_class": {},
+    }
+    try:
+        import yaml as _yml
+        from ultralytics import YOLO
+
+        cfg = _yml.safe_load(Path(data_yaml).read_text()) or {}
+        names = cfg.get("names") or []
+        if isinstance(names, dict):
+            names = [names[k] for k in sorted(names)]
+
+        root = Path(cfg.get("path") or Path(data_yaml).parent)
+        rel = cfg.get(split)
+        if not rel:
+            res["error"] = f"data.yaml に {split} の定義がありません"
+            return res
+        img_dir = (root / rel) if not str(rel).startswith("/") else Path(rel)
+        if not img_dir.exists():
+            res["error"] = f"画像ディレクトリが見つかりません: {img_dir}"
+            return res
+
+        images = sorted(p for p in img_dir.iterdir()
+                        if p.is_file() and p.suffix.lower() in IMG_EXTS)
+        if max_images and len(images) > max_images:
+            images = images[:max_images]
+        if not images:
+            res["error"] = f"{img_dir} に画像がありません"
+            return res
+
+        model = YOLO(str(model_path))
+        by_class: dict[str, dict] = {}
+
+        # 画像リストを渡すと Results.path が仮名 (image0.jpg 等) になるため、
+        # 入力順が保たれることを利用して元のパスと zip で対応付ける
+        _results = model.predict(source=[str(p) for p in images], conf=conf,
+                                 stream=True, verbose=False)
+        for img_path, r in zip(images, _results):
+            h, w = r.orig_shape
+
+            _m = getattr(r, "masks", None)
+            _mxy = list(getattr(_m, "xy", []) or []) if _m is not None else []
+
+            preds = []
+            if r.boxes is not None:
+                for _bi, b in enumerate(r.boxes):
+                    item = {
+                        "label": r.names[int(b.cls[0])],
+                        "confidence": float(b.conf[0]),
+                        "bbox_xyxy": [float(v) for v in b.xyxy[0].tolist()],
+                        "bbox_xywhn": [float(v) for v in b.xywhn[0].tolist()],
+                    }
+                    if _bi < len(_mxy):
+                        item["mask_xy"] = [[float(x), float(y)] for x, y in _mxy[_bi]]
+                    preds.append(item)
+            preds.sort(key=lambda d: -d["confidence"])
+
+            # images/... → labels/... の対応（YOLO の標準レイアウト）
+            lbl_path = Path(str(img_path)
+                            .replace(f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}")
+                            ).with_suffix(".txt")
+            gts = _yolo_txt_to_xyxy(lbl_path, w, h, names)
+
+            matched = [False] * len(gts)
+            tp = fp = 0
+            for p in preds:
+                best_i, best_iou = -1, 0.0
+                for gi, g in enumerate(gts):
+                    if matched[gi] or g["label"] != p["label"]:
+                        continue
+                    v = _iou(p["bbox_xyxy"], g["bbox_xyxy"])
+                    if v > best_iou:
+                        best_i, best_iou = gi, v
+                if best_i >= 0 and best_iou >= iou_match:
+                    matched[best_i] = True
+                    tp += 1
+                    by_class.setdefault(p["label"], {"tp": 0, "fp": 0, "fn": 0})["tp"] += 1
+                else:
+                    fp += 1
+                    by_class.setdefault(p["label"], {"tp": 0, "fp": 0, "fn": 0})["fp"] += 1
+
+            fn = 0
+            for gi, g in enumerate(gts):
+                if not matched[gi]:
+                    fn += 1
+                    by_class.setdefault(g["label"], {"tp": 0, "fp": 0, "fn": 0})["fn"] += 1
+
+            res["tp"] += tp
+            res["fp"] += fp
+            res["fn"] += fn
+            res["per_image"].append({
+                "image": str(img_path),
+                "name": img_path.name,
+                "width": w, "height": h,
+                "n_gt": len(gts), "n_pred": len(preds),
+                "tp": tp, "fp": fp, "fn": fn,
+                "gt_boxes": gts, "pred_boxes": preds,
+            })
+
+        n_pred_total = res["tp"] + res["fp"]
+        n_gt_total   = res["tp"] + res["fn"]
+        res.update({
+            "ok": True,
+            "n_images": len(res["per_image"]),
+            "precision": (res["tp"] / n_pred_total) if n_pred_total else None,
+            "recall":    (res["tp"] / n_gt_total) if n_gt_total else None,
+            "by_class":  by_class,
+        })
+    except Exception as e:
+        res["error"] = f"{type(e).__name__}: {e}"
+    return res
+
+
+def launch_fiftyone_comparison(dataset_name: str, per_image: list[dict]) -> Optional[int]:
+    """GT と予測の両方を載せた FiftyOne データセットを作って App を起動する。
+
+    FiftyOne の bounding_box は [左上x, 左上y, w, h] の正規化形式。
+    """
+    try:
+        import fiftyone as fo
+
+        if fo.dataset_exists(dataset_name):
+            fo.delete_dataset(dataset_name)
+        dataset = fo.Dataset(name=dataset_name)
+
+        samples = []
+        for item in per_image:
+            s = fo.Sample(filepath=item["image"])
+            s["ground_truth"] = fo.Detections(detections=[
+                fo.Detection(label=g["label"], bounding_box=g["bbox_xywhn"])
+                for g in item["gt_boxes"]
+            ])
+            s["predictions"] = fo.Detections(detections=[
+                fo.Detection(label=p["label"], bounding_box=p["bbox_xywhn"],
+                             confidence=p.get("confidence", 1.0))
+                for p in item["pred_boxes"]
+            ])
+            # FiftyOne 上でソート・フィルタできるようフィールドにも入れる
+            s["n_fn"] = item["fn"]
+            s["n_fp"] = item["fp"]
+            s["n_tp"] = item["tp"]
+            samples.append(s)
+
+        dataset.add_samples(samples)
+
+        if st.session_state.fiftyone_session:
+            try:
+                st.session_state.fiftyone_session.close()
+            except Exception:
+                pass
+
+        session = fo.launch_app(dataset, port=FIFTYONE_PORT,
+                                address="0.0.0.0", remote=False)
+        st.session_state.fiftyone_session = session
+        st.session_state.fiftyone_port = FIFTYONE_PORT
+        return FIFTYONE_PORT
+    except Exception as e:
+        st.error(f"FiftyOne エラー: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # CVAT への書き戻し (推論結果を新規タスクとして投入)
 #
 #   ZIP のダウンロード → 手動アップロードを不要にする。
@@ -1714,11 +2021,17 @@ def _collect_prediction_items(json_paths: list[Path]) -> tuple[list[dict], list[
         img_path = Path(pred.get("image_path", ""))
         if not img_path.exists():
             continue
-        img = cv2.imread(str(img_path))
-        if img is None:
-            continue
 
-        h, w = img.shape[:2]
+        # 推論時に記録した寸法があれば画像を読み直さない（大量件数で効く）
+        size = pred.get("image_size")
+        if size and len(size) == 2:
+            w, h = int(size[0]), int(size[1])
+        else:
+            img = cv2.imread(str(img_path))
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+
         boxes = pred.get("boxes", []) or []
         for b in boxes:
             lb = b.get("label", "")
@@ -1752,6 +2065,21 @@ def build_cvat_xml(items: list[dict], labels: list[str], task_name: str = "") ->
             width=str(it["width"]), height=str(it["height"]),
         )
         for b in it["boxes"]:
+            conf = b.get("confidence")
+
+            # マスクがあるものは polygon として書き出す（CVAT 側もポリゴンで開く）
+            mask = b.get("mask_xy")
+            if mask and len(mask) >= 3:
+                pts = ";".join(f"{float(x):.2f},{float(y):.2f}" for x, y in mask)
+                shape_el = ET.SubElement(
+                    img_el, "polygon",
+                    label=b.get("label", ""), points=pts, occluded="0",
+                )
+                if conf is not None:
+                    ET.SubElement(shape_el, "attribute",
+                                  name="confidence").text = f"{float(conf):.4f}"
+                continue
+
             xyxy = b.get("bbox_xyxy")
             if not xyxy or len(xyxy) != 4:
                 continue
@@ -1763,7 +2091,6 @@ def build_cvat_xml(items: list[dict], labels: list[str], task_name: str = "") ->
                 xbr=f"{x2:.2f}", ybr=f"{y2:.2f}",
                 occluded="0",
             )
-            conf = b.get("confidence")
             if conf is not None:
                 attr = ET.SubElement(box_el, "attribute", name="confidence")
                 attr.text = f"{float(conf):.4f}"
@@ -1773,17 +2100,15 @@ def build_cvat_xml(items: list[dict], labels: list[str], task_name: str = "") ->
             + ET.tostring(root, encoding="unicode", xml_declaration=False))
 
 
-def push_predictions_to_cvat(
-    json_paths: list[Path],
+def push_items_to_cvat(
+    items: list[dict],
+    labels: list[str],
     task_name: str,
-    extra_labels: Optional[list[str]] = None,
     with_annotations: bool = True,
 ) -> dict:
-    """予測結果を CVAT の新規タスクとして作成する。
+    """画像情報リストから CVAT の新規タスクを作成する（送信処理の本体）。
 
-    with_annotations=True なら予測ボックスを事前アノテーションとして投入する。
-    Returns: {"ok": bool, "task_id": int|None, "url": str, "n_images": int,
-              "labels": [...], "error": str|None}
+    items: [{"path": Path, "width": int, "height": int, "boxes": [...]}]
     """
     import shutil as _sh
     import tempfile
@@ -1791,14 +2116,9 @@ def push_predictions_to_cvat(
     out = {"ok": False, "task_id": None, "url": "", "n_images": 0,
            "labels": [], "error": None}
 
-    items, labels = _collect_prediction_items(json_paths)
     if not items:
         out["error"] = "送信できる画像がありません（元画像が見つからない可能性があります）"
         return out
-
-    for lb in (extra_labels or []):
-        if lb and lb not in labels:
-            labels.append(lb)
     if not labels:
         out["error"] = ("ラベルが1つも決まりません。"
                         "検出ゼロの画像だけを送る場合は、タスクに付けるラベル名を指定してください。")
@@ -1825,9 +2145,12 @@ def push_predictions_to_cvat(
             resources.append(dst)
             it["path"] = dst          # XML の name と実ファイル名を一致させる
 
+        # マスク付きの結果を送る場合は polygon も引けるようにラベル種別を any にする
+        _has_mask = any(b.get("mask_xy") for it in items for b in it.get("boxes", []))
+        _label_type = "any" if _has_mask else "rectangle"
         spec = models.TaskWriteRequest(
             name=task_name,
-            labels=[models.PatchedLabelRequest(name=lb, type="rectangle") for lb in labels],
+            labels=[models.PatchedLabelRequest(name=lb, type=_label_type) for lb in labels],
         )
 
         ann_path = ""
@@ -1854,6 +2177,20 @@ def push_predictions_to_cvat(
     finally:
         _sh.rmtree(tmp_dir, ignore_errors=True)
     return out
+
+
+def push_predictions_to_cvat(
+    json_paths: list[Path],
+    task_name: str,
+    extra_labels: Optional[list[str]] = None,
+    with_annotations: bool = True,
+) -> dict:
+    """予測結果 JSON 群を CVAT の新規タスクとして作成する"""
+    items, labels = _collect_prediction_items(json_paths)
+    for lb in (extra_labels or []):
+        if lb and lb not in labels:
+            labels.append(lb)
+    return push_items_to_cvat(items, labels, task_name, with_annotations)
 
 
 # ---------------------------------------------------------------------------
@@ -1999,6 +2336,7 @@ def generate_function_files(
     class_names: list[str],
     display_name: str = "",
     description: str = "",
+    task: str = "detect",
 ) -> tuple[Path, str]:
     """serverless/custom/<fn_dir>/ に関数定義一式を生成し、(ディレクトリ, 関数名) を返す。
 
@@ -2011,8 +2349,10 @@ def generate_function_files(
     disp     = display_name or f"{model_run} (custom)"
     desc     = description or f"自作 YOLO 検出器 ({model_run} / Ultralytics)"
 
-    # ラベル定義はモデルのクラス名から生成（json.dumps でエスケープを担保）
-    items = [{"id": i, "name": n, "type": "rectangle"} for i, n in enumerate(class_names)]
+    # ラベル定義はモデルのクラス名から生成（json.dumps でエスケープを担保）。
+    # セグメンテーションモデルは polygon を返すため、ラベル種別も合わせる。
+    shape_type = "polygon" if str(task) == "segment" else "rectangle"
+    items = [{"id": i, "name": n, "type": shape_type} for i, n in enumerate(class_names)]
     spec_block = "\n".join(
         "      " + line for line in json.dumps(items, ensure_ascii=False, indent=2).splitlines()
     )
@@ -2230,7 +2570,9 @@ def evaluate_model(
         "ok": False, "error": None,
         "model": str(model_path), "data_yaml": data_yaml, "split": split,
         "imgsz": imgsz, "conf": conf, "iou": iou,
+        "task": None,
         "map50": None, "map50_95": None, "precision": None, "recall": None,
+        "mask_map50": None, "mask_map50_95": None,   # セグメンテーションモデルのみ
         "fitness": None, "per_class": [], "speed_ms": None, "n_images": None,
         "plots_dir": None,
         "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2251,25 +2593,35 @@ def evaluate_model(
         )
 
         box = r.box
+        # セグメンテーションモデルでは r.seg にマスク基準の指標が入る
+        seg = getattr(r, "seg", None)
         names = r.names if isinstance(r.names, dict) else dict(enumerate(r.names or []))
 
         per_class = []
         try:
             for i, c in enumerate(box.ap_class_index):
                 cid = int(c)
-                per_class.append({
+                row = {
                     "class": names.get(cid, f"id={cid}"),
                     "ap50":    float(box.ap50[i]),
                     "ap50_95": float(box.ap[i].mean()),
                     "precision": float(box.p[i]),
                     "recall":    float(box.r[i]),
-                })
+                }
+                if seg is not None:
+                    try:
+                        row["mask_ap50"]    = float(seg.ap50[i])
+                        row["mask_ap50_95"] = float(seg.ap[i].mean())
+                    except Exception:
+                        pass
+                per_class.append(row)
         except Exception:
             pass
 
         speed = getattr(r, "speed", {}) or {}
         res.update({
             "ok": True,
+            "task": getattr(model, "task", None),
             "map50":    float(box.map50),
             "map50_95": float(box.map),
             "precision": float(box.mp),
@@ -2279,6 +2631,12 @@ def evaluate_model(
             "speed_ms":  {k: round(float(v), 2) for k, v in speed.items()},
             "plots_dir": str(out_dir) if out_dir.exists() else None,
         })
+        if seg is not None:
+            try:
+                res["mask_map50"]    = float(seg.map50)
+                res["mask_map50_95"] = float(seg.map)
+            except Exception:
+                pass
     except Exception as e:
         res["error"] = f"{type(e).__name__}: {e}"
     return res
@@ -2370,6 +2728,7 @@ def run_inference(
         from ultralytics import YOLO
 
         model = YOLO(model_path)
+        _task = getattr(model, "task", "detect") or "detect"
         results_list = model.predict(
             source=str(image_dir),
             conf=conf_threshold,
@@ -2378,24 +2737,43 @@ def run_inference(
         saved_jsons = []
         for res in results_list:
             img_path = res.path
+            _h, _w = res.orig_shape
+            # セグメンテーションモデルならインスタンスごとの輪郭が入る
+            _masks = getattr(res, "masks", None)
+            _mask_xy  = list(getattr(_masks, "xy", []) or [])  if _masks is not None else []
+            _mask_xyn = list(getattr(_masks, "xyn", []) or []) if _masks is not None else []
+
             boxes = []
             if res.boxes:
-                for box in res.boxes:
+                for _bi, box in enumerate(res.boxes):
                     xyxy   = box.xyxy[0].tolist()
                     xywhn  = box.xywhn[0].tolist()
                     cls_id = int(box.cls[0])
                     conf   = float(box.conf[0])
                     label  = res.names[cls_id]
-                    boxes.append({
+                    item = {
                         "label": label,
                         "confidence": round(conf, 4),
                         "bbox_xyxy": [round(v, 2) for v in xyxy],
                         "bbox_xywhn": [round(v, 6) for v in xywhn],
-                    })
+                    }
+                    # マスクは輪郭ポリゴンとして保存する（絶対座標と正規化の両方）
+                    if _bi < len(_mask_xy):
+                        item["mask_xy"] = [[round(float(x), 2), round(float(y), 2)]
+                                           for x, y in _mask_xy[_bi]]
+                    if _bi < len(_mask_xyn):
+                        item["mask_xyn"] = [[round(float(x), 6), round(float(y), 6)]
+                                            for x, y in _mask_xyn[_bi]]
+                    boxes.append(item)
 
             out_json = out_dir / (Path(img_path).stem + ".json")
             with open(out_json, "w") as f:
-                json.dump({"image_path": img_path, "boxes": boxes}, f, indent=2, ensure_ascii=False)
+                json.dump({
+                    "image_path": img_path,
+                    "task": _task,                 # detect / segment / pose
+                    "image_size": [int(_w), int(_h)],
+                    "boxes": boxes,
+                }, f, indent=2, ensure_ascii=False)
             saved_jsons.append(out_json)
 
         return saved_jsons
@@ -3183,8 +3561,14 @@ with tab0:
                         f"{_dep_meta.get('error') or 'クラス名が空です'}"
                     )
                 else:
+                    _dep_task = _dep_meta.get("task") or "detect"
+                    _dep_shape = "polygon（ポリゴン）" if _dep_task == "segment" \
+                        else "rectangle（矩形）"
                     st.success(f"🏷 ラベル定義（モデルのクラス名から自動生成）: "
                                f"**{', '.join(_dep_classes)}**")
+                    st.caption(
+                        f"タスク種別: `{_dep_task}` → CVAT には **{_dep_shape}** として返します。"
+                    )
                     st.caption(
                         "⚠ CVAT タスク側のラベル名がこれと一致していないと、"
                         "自動アノテーションの結果が反映されません。"
@@ -3223,6 +3607,7 @@ with tab0:
                             model_run=_dep_run,
                             class_names=_dep_classes,
                             display_name=_dep_disp,
+                            task=_dep_meta.get("task") or "detect",
                         )
                         start_deploy(_dep_dir, use_gpu=_dep_gpu)
                         cached_nuclio_functions.clear()
@@ -4557,19 +4942,29 @@ with tab3:
                 import pandas as _pd_ev
 
                 _ev_tbl = []
+                _has_mask_metric = any(_r.get("mask_map50") is not None for _r in _ev_rows)
                 for _r in _ev_rows:
                     _mp = _r["model_path"]
                     _spd = (_r.get("speed_ms") or {}).get("inference")
-                    _ev_tbl.append({
+                    _row = {
                         "モデル": str(_mp.relative_to(MODELS_DIR)),
                         "mAP50": round(_r["map50"], 4),
                         "mAP50-95": round(_r["map50_95"], 4),
+                    }
+                    # セグメンテーションモデルはマスク基準の mAP も並べる
+                    if _has_mask_metric:
+                        _row["mask mAP50"] = (round(_r["mask_map50"], 4)
+                                              if _r.get("mask_map50") is not None else None)
+                        _row["mask mAP50-95"] = (round(_r["mask_map50_95"], 4)
+                                                 if _r.get("mask_map50_95") is not None else None)
+                    _row.update({
                         "Precision": round(_r["precision"], 3),
                         "Recall": round(_r["recall"], 3),
                         "推論(ms)": _spd,
                         "サイズ(MB)": round(_mp.stat().st_size / 1024 / 1024, 1),
                         "評価日時": _r.get("evaluated_at", ""),
                     })
+                    _ev_tbl.append(_row)
                 _df_ev = _pd_ev.DataFrame(_ev_tbl).sort_values("mAP50-95", ascending=False)
                 st.dataframe(_df_ev, use_container_width=True, hide_index=True)
 
@@ -4615,6 +5010,148 @@ with tab3:
         if _ev_running:
             time.sleep(2)
             st.rerun()
+
+    # --- GT との差分分析（ラベル漏れ・誤ラベルの発見）---
+    with st.expander("🔬 正解ラベルとの差分分析（アノテーション漏れを探す）", expanded=False):
+        st.caption(
+            "モデルの予測を正解ラベル(GT)と突き合わせ、画像ごとに "
+            "**FN（取りこぼし）** と **FP（余計な検出）** を数えます。"
+            "精度の高いモデルが FN を出す画像は、モデルの誤りではなく "
+            "**GT 側のアノテーションが漏れている**ことがよくあります。"
+        )
+
+        _gd_yamls = sorted(DATA_DIR.rglob("data.yaml"), key=lambda p: p.stat().st_mtime,
+                           reverse=True)
+        if not _gd_yamls or not _model_map:
+            st.info("data.yaml と学習済みモデルの両方が必要です。")
+        else:
+            _gd_c1, _gd_c2 = st.columns([3, 2])
+            with _gd_c1:
+                _gd_yaml_sel = st.selectbox(
+                    "データセット (data.yaml)",
+                    [str(p.relative_to(DATA_DIR)) for p in _gd_yamls], key="gd_yaml")
+                _gd_yaml = str(DATA_DIR / _gd_yaml_sel)
+            with _gd_c2:
+                _gd_model_sel = st.selectbox(
+                    "使用するモデル", list(_model_map.keys()),
+                    index=(list(_model_map.values()).index(current_model)
+                           if current_model in _model_map.values() else 0),
+                    key="gd_model")
+
+            _gd_p1, _gd_p2, _gd_p3, _gd_p4 = st.columns(4)
+            with _gd_p1:
+                _gd_split = st.selectbox("スプリット", ["val", "train"], key="gd_split")
+            with _gd_p2:
+                _gd_conf = st.slider("推論 conf", 0.05, 0.9, 0.25, 0.05, key="gd_conf")
+            with _gd_p3:
+                _gd_iou = st.slider("一致とみなす IoU", 0.1, 0.9, 0.5, 0.05, key="gd_iou")
+            with _gd_p4:
+                _gd_max = st.number_input("最大画像数", 0, 100000, 500, 100, key="gd_max",
+                                          help="0 で全画像。多いほど時間がかかります")
+
+            if st.button("🔬 差分を分析", type="primary", use_container_width=True,
+                         key="gd_run"):
+                with st.spinner("推論して GT と突き合わせています…"):
+                    st.session_state["gd_result"] = compare_with_ground_truth(
+                        Path(_model_map[_gd_model_sel]), _gd_yaml, split=_gd_split,
+                        conf=float(_gd_conf), iou_match=float(_gd_iou),
+                        max_images=int(_gd_max),
+                    )
+
+            _gd = st.session_state.get("gd_result")
+            if _gd and not _gd["ok"]:
+                st.error(f"❌ 分析に失敗しました: {_gd['error']}")
+            elif _gd:
+                import pandas as _pd_gd
+
+                _gd_imgs = _gd["per_image"]
+                _n_clean = sum(1 for p in _gd_imgs if p["fp"] == 0 and p["fn"] == 0)
+
+                _gm = st.columns(5)
+                _gm[0].metric("画像数", _gd["n_images"])
+                _gm[1].metric("TP（一致）", _gd["tp"])
+                _gm[2].metric("FN（取りこぼし）", _gd["fn"])
+                _gm[3].metric("FP（余計な検出）", _gd["fp"])
+                _gm[4].metric("完全一致", f"{_n_clean}/{_gd['n_images']}")
+                if _gd["precision"] is not None:
+                    st.caption(f"Precision {_gd['precision']:.3f} / "
+                               f"Recall {_gd['recall']:.3f}"
+                               f"（conf={_gd['conf']}, IoU={_gd['iou_match']} での実測）")
+
+                if _gd["by_class"]:
+                    st.markdown("**クラス別**")
+                    st.dataframe(_pd_gd.DataFrame([
+                        {"クラス": k, "TP": v["tp"], "FP": v["fp"], "FN": v["fn"]}
+                        for k, v in _gd["by_class"].items()
+                    ]), use_container_width=True, hide_index=True)
+
+                # 要確認画像の抽出条件
+                st.markdown("**要確認画像の抽出**")
+                _gf1, _gf2 = st.columns(2)
+                with _gf1:
+                    _gd_min_fn = st.number_input("FN が この件数以上", 0, 50, 1, key="gd_min_fn")
+                with _gf2:
+                    _gd_min_fp = st.number_input("または FP が この件数以上", 0, 50, 2,
+                                                 key="gd_min_fp")
+
+                _gd_hits = [p for p in _gd_imgs
+                            if (_gd_min_fn and p["fn"] >= _gd_min_fn)
+                            or (_gd_min_fp and p["fp"] >= _gd_min_fp)]
+                _gd_hits.sort(key=lambda d: -(d["fn"] * 2 + d["fp"]))
+
+                st.markdown(f"該当: **{len(_gd_hits)}** 件"
+                            f"（差分の大きい順。FN を重く重み付けしています）")
+                if _gd_hits:
+                    st.dataframe(_pd_gd.DataFrame([{
+                        "ファイル": p["name"], "GT": p["n_gt"], "予測": p["n_pred"],
+                        "TP": p["tp"], "FP": p["fp"], "FN": p["fn"],
+                    } for p in _gd_hits]), use_container_width=True, hide_index=True,
+                        height=260)
+
+                    _ga1, _ga2 = st.columns(2)
+                    with _ga1:
+                        _gd_task = st.text_input(
+                            "CVAT タスク名",
+                            value=f"labelfix_{datetime.now():%Y%m%d_%H%M}",
+                            key="gd_task_name")
+                        if st.button(f"📤 {len(_gd_hits)} 件を CVAT に送る",
+                                     type="primary", use_container_width=True,
+                                     disabled=not _gd_task.strip(), key="gd_push"):
+                            _gd_items = [{
+                                "path": Path(p["image"]), "width": p["width"],
+                                "height": p["height"], "boxes": p["pred_boxes"],
+                            } for p in _gd_hits]
+                            _gd_labels = sorted({b["label"] for it in _gd_items
+                                                 for b in it["boxes"]})
+                            if not _gd_labels:
+                                _gd_labels = list(_gd["by_class"].keys())
+                            with st.spinner("CVAT にタスクを作成中…"):
+                                st.session_state["gd_push_result"] = push_items_to_cvat(
+                                    _gd_items, _gd_labels, _gd_task.strip(),
+                                    with_annotations=True)
+                        _gdp = st.session_state.get("gd_push_result")
+                        if _gdp:
+                            if _gdp["ok"]:
+                                st.success(f"✅ タスク作成（ID: {_gdp['task_id']} / "
+                                           f"{_gdp['n_images']} 枚）")
+                                st.markdown(f"👉 [CVAT で開く]({_gdp['url']})")
+                            else:
+                                st.error(f"❌ {_gdp['error']}")
+                    with _ga2:
+                        _gd_fo_name = st.text_input(
+                            "FiftyOne データセット名", value="gt_vs_pred",
+                            key="gd_fo_name")
+                        if st.button("🔭 FiftyOne で GT と予測を見比べる",
+                                     use_container_width=True, key="gd_fo"):
+                            with st.spinner("FiftyOne App を起動中…"):
+                                _gd_port = launch_fiftyone_comparison(
+                                    _gd_fo_name.strip() or "gt_vs_pred", _gd_hits)
+                            if _gd_port:
+                                st.success(f"起動しました → http://localhost:{_gd_port}")
+                                st.caption("`ground_truth`（正解）と `predictions`（予測）を"
+                                           "重ねて表示できます。`n_fn` / `n_fp` でソートも可能です。")
+                else:
+                    st.success("✅ 条件に該当する画像はありませんでした。")
 
     # --- 推論対象ソース ---
     _infer_src = st.radio(
@@ -5390,6 +5927,51 @@ with tab4:
                     shutil.rmtree(ds)
                     st.success(f"{ds.name} を削除しました")
                     st.rerun()
+            with st.expander(f"⬇ {ds.name} を持ち出す（ZIP エクスポート）"):
+                st.caption(
+                    "他の PC で学習させる場合などに、データセットを ZIP で書き出します。"
+                    "展開すればそのまま YOLO の学習に使える構造のままです。"
+                )
+                _ex_labels_only = st.checkbox(
+                    "ラベルと data.yaml のみ（画像を含めない）", value=False,
+                    key=f"ex_lbl_{ds.name}",
+                    help="画像は既に相手側にある場合や、アノテーションだけ共有したい場合に使います",
+                )
+                _ex_bytes = dataset_size_bytes(ds, labels_only=_ex_labels_only)
+                _ex_mb = _ex_bytes / 1024 / 1024
+                st.caption(f"対象サイズ: 約 {_ex_mb:,.1f} MB（圧縮前）")
+                if _ex_mb > 500:
+                    st.warning(
+                        f"⚠ {_ex_mb:,.0f} MB あります。ZIP の生成とダウンロードに時間がかかり、"
+                        "ブラウザ側のメモリも消費します。"
+                        "画像が不要なら「ラベルと data.yaml のみ」を使ってください。"
+                    )
+
+                if st.button("📦 ZIP を生成", key=f"ex_build_{ds.name}",
+                             use_container_width=True):
+                    _ex_out = (PREDICTIONS_DIR / "_exports" /
+                               f"{ds.name}{'_labels' if _ex_labels_only else ''}.zip")
+                    with st.spinner("ZIP を生成中…（サイズによっては数分かかります）"):
+                        _ok_ex, _msg_ex, _n_ex = build_dataset_zip(
+                            ds, _ex_out, labels_only=_ex_labels_only)
+                    st.session_state[f"ex_zip_{ds.name}"] = (
+                        {"path": _msg_ex, "n": _n_ex} if _ok_ex else None)
+                    if not _ok_ex:
+                        st.error(f"❌ 生成に失敗しました: {_msg_ex}")
+
+                _ex_info = st.session_state.get(f"ex_zip_{ds.name}")
+                if _ex_info and Path(_ex_info["path"]).exists():
+                    _ex_p = Path(_ex_info["path"])
+                    st.success(f"✅ {_ex_info['n']} ファイル / "
+                               f"{_ex_p.stat().st_size / 1024 / 1024:,.1f} MB")
+                    with open(_ex_p, "rb") as _fz:
+                        st.download_button(
+                            "⬇ ダウンロード", _fz, file_name=_ex_p.name,
+                            mime="application/zip", use_container_width=True,
+                            key=f"ex_dl_{ds.name}",
+                        )
+                    st.caption(f"生成先: `{_ex_p}`（不要になったら削除して構いません）")
+
             with st.expander(f"🔍 {ds.name} の品質チェック"):
                 st.caption(
                     "画像とラベルの対応漏れ・座標の破損・クラス分布の偏りを検査します。"
@@ -5768,9 +6350,44 @@ with tab4:
                     if st.button("🗑", key=f"del_model_{mp}", help=f"{mp.name} を削除"):
                         mp.unlink()
                         model_meta_path(mp).unlink(missing_ok=True)
+                        model_eval_path(mp).unlink(missing_ok=True)
                         if st.session_state.last_model_path == str(mp):
                             st.session_state.last_model_path = None
                         st.rerun()
+
+                # --- 持ち出し（他PCへ渡す）---
+                _dl1, _dl2 = st.columns(2)
+                with _dl1:
+                    with open(mp, "rb") as _fm:
+                        st.download_button(
+                            f"⬇ {mp.name} をダウンロード", _fm, file_name=mp.name,
+                            mime="application/octet-stream", use_container_width=True,
+                            key=f"dl_pt_{mp}",
+                            help="重みファイル単体。相手側の UI でそのまま取り込めます",
+                        )
+                with _dl2:
+                    _bundle_key = f"bundle_{mp}"
+                    if st.button("📦 一式ZIPを生成", key=f"mkbundle_{mp}",
+                                 use_container_width=True,
+                                 help="重み + results.csv + 評価結果 + プロットをまとめます"):
+                        _b_out = (PREDICTIONS_DIR / "_exports" /
+                                  f"{mp.parent.parent.name}_bundle.zip")
+                        with st.spinner("ZIP を生成中…"):
+                            _ok_b, _msg_b, _n_b = build_model_bundle_zip(mp, _b_out)
+                        st.session_state[_bundle_key] = (
+                            {"path": _msg_b, "n": _n_b} if _ok_b else None)
+                        if not _ok_b:
+                            st.error(f"❌ {_msg_b}")
+                        st.rerun()
+                    _b_info = st.session_state.get(_bundle_key)
+                    if _b_info and Path(_b_info["path"]).exists():
+                        _b_p = Path(_b_info["path"])
+                        with open(_b_p, "rb") as _fb:
+                            st.download_button(
+                                f"⬇ 一式ZIP ({_b_p.stat().st_size / 1024 / 1024:.0f}MB)",
+                                _fb, file_name=_b_p.name, mime="application/zip",
+                                use_container_width=True, key=f"dl_bundle_{mp}",
+                            )
 
     st.markdown("---")
 
