@@ -1,9 +1,11 @@
 # 認証情報
 .env
 
-# 仕様・設計ドキュメント
+# 仕様・設計ドキュメント / 開発方針
+# (リポジトリの利用者に配る必要がなく、手元で管理するもの)
 SPEC.md
 CLAUDE.md
+docs/roadmap.md
 
 # 学習データ・成果物 (大容量 / 機密)
 data/
@@ -15,6 +17,13 @@ __pycache__/
 *.py[cod]
 *.pt
 *.onnx
+*.engine
+
+# Ultralytics が作業ディレクトリに自動生成するもの
+# (事前学習重みの自動ダウンロード先・デフォルトの学習出力先)
+app/datasets/
+app/runs/
+runs/
 
 # 一時ファイル
 *.zip
