@@ -18,6 +18,16 @@ import streamlit.components.v1 as components
 
 
 @st.cache_resource
+def _get_eval_shared() -> tuple[dict, threading.Lock]:
+    """モデル評価のバックグラウンド実行状態"""
+    return (
+        {"log": [], "running": False, "error": None, "finished": False,
+         "total": 0, "done": 0, "current": "", "results": []},
+        threading.Lock(),
+    )
+
+
+@st.cache_resource
 def _get_deploy_shared() -> tuple[dict, threading.Lock]:
     """Nuclio デプロイのバックグラウンド実行状態（学習と同じく rerun をまたいで保持する）"""
     return (
@@ -354,6 +364,7 @@ defaults = {
     "fiftyone_port": None,
     "last_model_path": None,
     "cvat_tasks": [],
+    "cvat_jobs": [],       # ジョブ単位の進捗（タスクの status より細かい）
     "cvat_xml_info": None,
     "cvat_raw_dir": None,
     "theme_name": "ライト シンプル",
@@ -471,6 +482,52 @@ def fetch_cvat_tasks() -> list[dict]:
         return result
     except Exception as e:
         st.error(f"CVATタスク取得エラー: {e}")
+        return []
+
+
+def fetch_cvat_jobs() -> list[dict]:
+    """CVAT のジョブ一覧を取得する。
+
+    タスクの `status` は粗い（completed か否か）ため、実際の進捗はジョブ単位で見る。
+    ジョブは stage(annotation→validation→acceptance) と state(new/in progress/completed)
+    を持ち、担当者も「タスクの担当者」ではなくジョブ単位で割り当てられる。
+    """
+    try:
+        client = get_cvat_client()
+        if not client:
+            return []
+
+        # task_id → タスク名 の対応（ジョブ側はタスク名を持たない）
+        task_names: dict[int, str] = {}
+        try:
+            for t in client.tasks.list():
+                task_names[t.id] = t.name
+        except Exception:
+            pass
+
+        rows = []
+        for j in client.jobs.list():
+            assignee = ""
+            _asg = getattr(j, "assignee", None)
+            if _asg:
+                assignee = getattr(_asg, "username", "") or getattr(_asg, "email", "")
+
+            start = getattr(j, "start_frame", 0) or 0
+            stop  = getattr(j, "stop_frame", 0) or 0
+            rows.append({
+                "job_id":    j.id,
+                "task_id":   getattr(j, "task_id", None),
+                "task_name": task_names.get(getattr(j, "task_id", None), ""),
+                "state":     str(getattr(j, "state", "") or ""),
+                "stage":     str(getattr(j, "stage", "") or ""),
+                "type":      str(getattr(j, "type", "") or ""),
+                "assignee":  assignee,
+                "frames":    max(stop - start + 1, 0),
+                "updated":   getattr(j, "updated_date", None),
+            })
+        return rows
+    except Exception as e:
+        st.error(f"CVATジョブ取得エラー: {e}")
         return []
 
 
@@ -1290,6 +1347,516 @@ def inspect_model_file(model_path: Path, save: bool = True) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# データセット品質チェック
+#
+#   外部から持ち込んだデータや、複数人で分担したアノテーションほど
+#   「画像とラベルの対応漏れ」「座標の壊れ」「クラス分布の偏り」が起きやすい。
+#   学習を回す前に機械的に検査する。
+# ---------------------------------------------------------------------------
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def check_dataset_quality(dataset_dir: Path, tiny_area: float = 0.0005) -> dict:
+    """YOLO 形式データセットの整合性を検査する。
+
+    Returns: {
+      "classes": [...], "splits": {split: {...}}, "class_counts": {name: n},
+      "issues": [{"severity","kind","path","detail"}], "n_issues": int,
+    }
+    """
+    res: dict = {
+        "dataset": dataset_dir.name,
+        "classes": [],
+        "splits": {},
+        "class_counts": {},
+        "issues": [],          # 詳細（種別ごとに ISSUE_CAP 件まで）
+        "issue_counts": {},    # 種別ごとの総数
+        "n_issues": 0,
+        "error": None,
+    }
+
+    # 同じ種別の指摘が数千件出ると読めなくなるため、詳細は種別ごとに打ち切る
+    ISSUE_CAP = 20
+    _kind_counts: dict[str, int] = {}
+    _kind_sev: dict[str, str] = {}
+
+    def _issue(sev: str, kind: str, path: str, detail: str) -> None:
+        n = _kind_counts.get(kind, 0) + 1
+        _kind_counts[kind] = n
+        _kind_sev.setdefault(kind, sev)
+        if sev == "error":
+            _kind_sev[kind] = "error"
+        if n <= ISSUE_CAP:
+            res["issues"].append({"severity": sev, "kind": kind, "path": path, "detail": detail})
+
+    # data.yaml からクラス名を読む（無くても検査は続行する）
+    yaml_path = next(iter(sorted(dataset_dir.rglob("data.yaml"))), None)
+    if yaml_path:
+        try:
+            import yaml as _yml
+            names = (_yml.safe_load(yaml_path.read_text()) or {}).get("names")
+            if isinstance(names, dict):
+                res["classes"] = [names[k] for k in sorted(names)]
+            elif isinstance(names, list):
+                res["classes"] = list(names)
+        except Exception as e:
+            _issue("warn", "data.yaml", str(yaml_path), f"読み込めません: {e}")
+    else:
+        _issue("warn", "data.yaml", str(dataset_dir), "data.yaml が見つかりません")
+
+    n_classes = len(res["classes"])
+    counts: dict[str, int] = {}
+
+    img_root = dataset_dir / "images"
+    lbl_root = dataset_dir / "labels"
+    if not img_root.exists():
+        res["error"] = (
+            "images/ ディレクトリがありません。YOLO 形式ではありません"
+            "（CVAT の raw エクスポートのままの可能性があります。"
+            "Step2: データ取込 の「データセット生成」で YOLO 形式に変換してください）"
+        )
+        return res
+
+    splits = sorted([d.name for d in img_root.iterdir() if d.is_dir()])
+    for sp in splits:
+        img_dir, lbl_dir = img_root / sp, lbl_root / sp
+        images = sorted(p for p in img_dir.iterdir()
+                        if p.is_file() and p.suffix.lower() in IMG_EXTS)
+
+        # labels/<split>/ 自体が無い場合は画像1枚ずつ警告しても意味がないので集約する
+        if not lbl_dir.exists():
+            _issue("error", "labelsディレクトリ無し", f"labels/{sp}",
+                   f"images/{sp}/ に {len(images)} 枚ありますが labels/{sp}/ がありません"
+                   "（アノテーション未取込のため、このままでは学習できません）")
+            res["splits"][sp] = {"images": len(images), "labels": 0, "missing_label": len(images),
+                                 "orphan_label": 0, "empty_label": 0, "boxes": 0}
+            continue
+
+        labels = sorted(p for p in lbl_dir.glob("*.txt"))
+
+        img_stems = {p.stem for p in images}
+        lbl_stems = {p.stem for p in labels}
+
+        stat = {
+            "images": len(images), "labels": len(labels),
+            "missing_label": 0, "orphan_label": 0, "empty_label": 0, "boxes": 0,
+        }
+
+        # 画像はあるがラベルが無い = 未アノテーション（背景画像として意図的な場合もある）
+        for stem in sorted(img_stems - lbl_stems):
+            stat["missing_label"] += 1
+            _issue("warn", "ラベル無し画像", f"{sp}/{stem}",
+                   "対応する .txt がありません（未アノテーション、または背景画像）")
+
+        # ラベルはあるが画像が無い = 学習に使われない迷子ファイル
+        for stem in sorted(lbl_stems - img_stems):
+            stat["orphan_label"] += 1
+            _issue("error", "画像無しラベル", f"{sp}/{stem}.txt",
+                   "対応する画像がありません（このラベルは学習に使われません）")
+
+        for lp in labels:
+            try:
+                lines = [l.strip() for l in lp.read_text().splitlines() if l.strip()]
+            except Exception as e:
+                _issue("error", "読み込み失敗", f"{sp}/{lp.name}", str(e))
+                continue
+
+            if not lines:
+                stat["empty_label"] += 1
+                continue
+
+            for ln_no, line in enumerate(lines, 1):
+                parts = line.split()
+                if len(parts) < 5:
+                    _issue("error", "行フォーマット", f"{sp}/{lp.name}:{ln_no}",
+                           f"フィールド数が不足しています ({len(parts)})")
+                    continue
+                try:
+                    cls_id = int(float(parts[0]))
+                    coords = [float(v) for v in parts[1:]]
+                except ValueError:
+                    _issue("error", "数値変換", f"{sp}/{lp.name}:{ln_no}",
+                           "数値として解釈できない値があります")
+                    continue
+
+                stat["boxes"] += 1
+                cls_name = (res["classes"][cls_id]
+                            if 0 <= cls_id < n_classes else f"id={cls_id}")
+                counts[cls_name] = counts.get(cls_name, 0) + 1
+
+                if n_classes and not (0 <= cls_id < n_classes):
+                    _issue("error", "クラスID範囲外", f"{sp}/{lp.name}:{ln_no}",
+                           f"クラスID {cls_id} は data.yaml の {n_classes} クラスの範囲外です")
+
+                if any(c < -1e-6 or c > 1 + 1e-6 for c in coords):
+                    _issue("error", "座標範囲外", f"{sp}/{lp.name}:{ln_no}",
+                           "正規化座標が 0〜1 の範囲を超えています")
+
+                # detect 形式 (cx cy w h) のみ面積を検査する
+                if len(coords) == 4:
+                    bw, bh = coords[2], coords[3]
+                    if bw <= 0 or bh <= 0:
+                        _issue("error", "サイズ不正", f"{sp}/{lp.name}:{ln_no}",
+                               f"幅または高さが 0 以下です (w={bw:.4f}, h={bh:.4f})")
+                    elif bw * bh < tiny_area:
+                        _issue("warn", "極小ボックス", f"{sp}/{lp.name}:{ln_no}",
+                               f"面積比 {bw * bh:.5f} — ノイズの可能性があります")
+
+        res["splits"][sp] = stat
+
+    res["class_counts"] = counts
+
+    # クラス分布の偏り（最多と最少で 20 倍以上開いていたら警告）
+    if len(counts) >= 2:
+        mx, mn = max(counts.values()), min(counts.values())
+        if mn > 0 and mx / mn >= 20:
+            _issue("warn", "クラス分布の偏り", res["dataset"],
+                   f"最多 {mx} 件 / 最少 {mn} 件 — 少数クラスの精度が出ない可能性があります")
+
+    # train/val のどちらかが欠けている
+    if "train" in res["splits"] and "val" not in res["splits"]:
+        _issue("warn", "スプリット", res["dataset"], "val がありません（評価ができません）")
+
+    res["issue_counts"] = {
+        k: {"count": v, "severity": _kind_sev.get(k, "warn")} for k, v in _kind_counts.items()
+    }
+    res["n_issues"] = sum(_kind_counts.values())
+    res["n_errors"] = sum(v for k, v in _kind_counts.items() if _kind_sev.get(k) == "error")
+    return res
+
+
+def fix_dataset_labels(
+    dataset_dir: Path,
+    drop_invalid_size: bool = True,
+    drop_out_of_range: bool = True,
+    drop_tiny: bool = False,
+    delete_orphan_labels: bool = False,
+    tiny_area: float = 0.0005,
+) -> dict:
+    """品質チェックで見つかった壊れたラベルを修正する。
+
+    書き換える .txt は同じディレクトリに `<name>.txt.bak` としてバックアップしてから
+    上書きする（元に戻せるようにするため）。
+    """
+    res = {"files_changed": 0, "lines_removed": 0, "files_emptied": 0,
+           "orphans_deleted": 0, "backup_suffix": ".bak", "details": [], "error": None}
+
+    img_root, lbl_root = dataset_dir / "images", dataset_dir / "labels"
+    if not lbl_root.exists():
+        res["error"] = "labels/ ディレクトリがありません"
+        return res
+
+    for lbl_dir in sorted(p for p in lbl_root.iterdir() if p.is_dir()):
+        sp = lbl_dir.name
+        img_dir = img_root / sp
+        img_stems = ({p.stem for p in img_dir.iterdir()
+                      if p.is_file() and p.suffix.lower() in IMG_EXTS}
+                     if img_dir.exists() else set())
+
+        for lp in sorted(lbl_dir.glob("*.txt")):
+            # 画像が存在しないラベルの削除
+            if delete_orphan_labels and img_stems and lp.stem not in img_stems:
+                lp.rename(lp.with_suffix(".txt.bak"))
+                res["orphans_deleted"] += 1
+                res["details"].append(f"{sp}/{lp.name}: 画像が無いため退避")
+                continue
+
+            try:
+                lines = lp.read_text().splitlines()
+            except Exception:
+                continue
+
+            kept, removed = [], 0
+            for line in lines:
+                s = line.strip()
+                if not s:
+                    continue
+                parts = s.split()
+                if len(parts) < 5:
+                    removed += 1
+                    continue
+                try:
+                    coords = [float(v) for v in parts[1:]]
+                except ValueError:
+                    removed += 1
+                    continue
+
+                if drop_out_of_range and any(c < -1e-6 or c > 1 + 1e-6 for c in coords):
+                    removed += 1
+                    continue
+                if len(coords) == 4:
+                    bw, bh = coords[2], coords[3]
+                    if drop_invalid_size and (bw <= 0 or bh <= 0):
+                        removed += 1
+                        continue
+                    if drop_tiny and (bw * bh) < tiny_area:
+                        removed += 1
+                        continue
+                kept.append(s)
+
+            if removed:
+                lp.with_suffix(".txt.bak").write_text("\n".join(lines) + "\n")
+                lp.write_text(("\n".join(kept) + "\n") if kept else "")
+                res["files_changed"] += 1
+                res["lines_removed"] += removed
+                if not kept:
+                    res["files_emptied"] += 1
+                res["details"].append(f"{sp}/{lp.name}: {removed} 行を除去"
+                                      + ("（空になりました）" if not kept else ""))
+
+    return res
+
+
+# ---------------------------------------------------------------------------
+# 要確認画像の自動抽出 (アノテーション対象の優先順位付け)
+#
+#   推論結果を分析し「モデルが自信を持てていない画像」を機械的に拾う。
+#   人が全画像を目視して 🚩 を立てる作業を置き換えるためのもの。
+# ---------------------------------------------------------------------------
+def _iou(a: list[float], b: list[float]) -> float:
+    """2つの xyxy ボックスの IoU"""
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    iw, ih = max(ix2 - ix1, 0.0), max(iy2 - iy1, 0.0)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(a[2] - a[0], 0.0) * max(a[3] - a[1], 0.0)
+    area_b = max(b[2] - b[0], 0.0) * max(b[3] - b[1], 0.0)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def analyze_predictions(
+    json_paths: list[Path],
+    conf_low: float = 0.5,
+    tiny_area: float = 0.001,
+    conflict_iou: float = 0.5,
+) -> list[dict]:
+    """推論結果 JSON を分析し、要確認と判断した理由を付けて返す。
+
+    判定理由:
+      - 検出ゼロ            … 写っているのに拾えていない可能性（見逃し）
+      - 低信頼度            … conf_low 未満の検出を含む（誤検出/曖昧）
+      - クラス競合          … ほぼ同じ位置に別クラスが重なっている（モデルが迷っている）
+      - 極小ボックス        … 画像面積比 tiny_area 未満（ノイズ検出の疑い）
+    """
+    results = []
+    for jf in json_paths:
+        try:
+            pred = json.loads(Path(jf).read_text())
+        except Exception:
+            continue
+
+        boxes = pred.get("boxes", []) or []
+        confs = [float(b.get("confidence", 0.0)) for b in boxes]
+        reasons: list[str] = []
+
+        if not boxes:
+            reasons.append("検出ゼロ")
+        else:
+            if min(confs) < conf_low:
+                reasons.append(f"低信頼度({min(confs):.2f})")
+
+            # クラス競合: IoU が高いのにラベルが異なる組み合わせ
+            for i in range(len(boxes)):
+                for k in range(i + 1, len(boxes)):
+                    if boxes[i].get("label") == boxes[k].get("label"):
+                        continue
+                    bi, bk = boxes[i].get("bbox_xyxy"), boxes[k].get("bbox_xyxy")
+                    if bi and bk and _iou(bi, bk) >= conflict_iou:
+                        reasons.append("クラス競合")
+                        break
+                if "クラス競合" in reasons:
+                    break
+
+            # 極小ボックス（正規化 w*h で判定）
+            for b in boxes:
+                xywhn = b.get("bbox_xywhn")
+                if xywhn and len(xywhn) == 4 and (xywhn[2] * xywhn[3]) < tiny_area:
+                    reasons.append("極小ボックス")
+                    break
+
+        results.append({
+            "json": Path(jf),
+            "name": Path(jf).name,
+            "image_path": pred.get("image_path", ""),
+            "n_boxes": len(boxes),
+            "min_conf": min(confs) if confs else None,
+            "mean_conf": (sum(confs) / len(confs)) if confs else None,
+            "reasons": reasons,
+            "flagged": bool(reasons),
+        })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# CVAT への書き戻し (推論結果を新規タスクとして投入)
+#
+#   ZIP のダウンロード → 手動アップロードを不要にする。
+#   予測ボックスが事前アノテーションとして入った状態でタスクが作られるので、
+#   作業者は「ゼロから引く」のではなく「直す」だけで済む。
+# ---------------------------------------------------------------------------
+def _collect_prediction_items(json_paths: list[Path]) -> tuple[list[dict], list[str]]:
+    """予測 JSON 群から (画像情報リスト, 出現ラベル一覧) を作る。
+    元画像が見つからないもの・読めないものは除外する。
+    """
+    import cv2
+
+    items: list[dict] = []
+    labels: list[str] = []
+    for jf in json_paths:
+        try:
+            pred = json.loads(Path(jf).read_text())
+        except Exception:
+            continue
+
+        img_path = Path(pred.get("image_path", ""))
+        if not img_path.exists():
+            continue
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+
+        h, w = img.shape[:2]
+        boxes = pred.get("boxes", []) or []
+        for b in boxes:
+            lb = b.get("label", "")
+            if lb and lb not in labels:
+                labels.append(lb)
+
+        items.append({"path": img_path, "width": w, "height": h, "boxes": boxes})
+    return items, labels
+
+
+def build_cvat_xml(items: list[dict], labels: list[str], task_name: str = "") -> str:
+    """画像情報から CVAT for images 1.1 形式の annotations.xml を組み立てる"""
+    import xml.etree.ElementTree as ET
+
+    root = ET.Element("annotations")
+    ET.SubElement(root, "version").text = "1.1"
+    meta = ET.SubElement(root, "meta")
+    task_el = ET.SubElement(meta, "task")
+    if task_name:
+        ET.SubElement(task_el, "name").text = task_name
+    labels_el = ET.SubElement(task_el, "labels")
+    for lb in labels:
+        lb_el = ET.SubElement(labels_el, "label")
+        ET.SubElement(lb_el, "name").text = lb
+        ET.SubElement(lb_el, "attributes")
+
+    for idx, it in enumerate(items):
+        img_el = ET.SubElement(
+            root, "image",
+            id=str(idx), name=it["path"].name,
+            width=str(it["width"]), height=str(it["height"]),
+        )
+        for b in it["boxes"]:
+            xyxy = b.get("bbox_xyxy")
+            if not xyxy or len(xyxy) != 4:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in xyxy]
+            box_el = ET.SubElement(
+                img_el, "box",
+                label=b.get("label", ""),
+                xtl=f"{x1:.2f}", ytl=f"{y1:.2f}",
+                xbr=f"{x2:.2f}", ybr=f"{y2:.2f}",
+                occluded="0",
+            )
+            conf = b.get("confidence")
+            if conf is not None:
+                attr = ET.SubElement(box_el, "attribute", name="confidence")
+                attr.text = f"{float(conf):.4f}"
+
+    ET.indent(root)
+    return ('<?xml version="1.0" encoding="utf-8"?>\n'
+            + ET.tostring(root, encoding="unicode", xml_declaration=False))
+
+
+def push_predictions_to_cvat(
+    json_paths: list[Path],
+    task_name: str,
+    extra_labels: Optional[list[str]] = None,
+    with_annotations: bool = True,
+) -> dict:
+    """予測結果を CVAT の新規タスクとして作成する。
+
+    with_annotations=True なら予測ボックスを事前アノテーションとして投入する。
+    Returns: {"ok": bool, "task_id": int|None, "url": str, "n_images": int,
+              "labels": [...], "error": str|None}
+    """
+    import shutil as _sh
+    import tempfile
+
+    out = {"ok": False, "task_id": None, "url": "", "n_images": 0,
+           "labels": [], "error": None}
+
+    items, labels = _collect_prediction_items(json_paths)
+    if not items:
+        out["error"] = "送信できる画像がありません（元画像が見つからない可能性があります）"
+        return out
+
+    for lb in (extra_labels or []):
+        if lb and lb not in labels:
+            labels.append(lb)
+    if not labels:
+        out["error"] = ("ラベルが1つも決まりません。"
+                        "検出ゼロの画像だけを送る場合は、タスクに付けるラベル名を指定してください。")
+        return out
+
+    client = get_cvat_client()
+    if not client:
+        out["error"] = "CVAT に接続できません"
+        return out
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="cvat_push_"))
+    try:
+        from cvat_sdk.api_client import models
+
+        # 画像を一時ディレクトリへ集約（同名衝突は連番で回避）
+        resources, used = [], set()
+        for it in items:
+            fname = it["path"].name
+            if fname in used:
+                fname = f"{it['path'].stem}_{len(used)}{it['path'].suffix}"
+            used.add(fname)
+            dst = tmp_dir / fname
+            _sh.copy2(it["path"], dst)
+            resources.append(dst)
+            it["path"] = dst          # XML の name と実ファイル名を一致させる
+
+        spec = models.TaskWriteRequest(
+            name=task_name,
+            labels=[models.PatchedLabelRequest(name=lb, type="rectangle") for lb in labels],
+        )
+
+        ann_path = ""
+        if with_annotations:
+            ann_path = str(tmp_dir / "annotations.xml")
+            Path(ann_path).write_text(build_cvat_xml(items, labels, task_name))
+
+        task = client.tasks.create_from_data(
+            spec=spec,
+            resources=resources,
+            annotation_path=ann_path,
+            annotation_format="CVAT 1.1",
+        )
+
+        out.update({
+            "ok": True,
+            "task_id": task.id,
+            "url": f"{CVAT_WEB}/tasks/{task.id}",
+            "n_images": len(resources),
+            "labels": labels,
+        })
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # CVAT 自動アノテーション (Nuclio serverless) 連携
 #
 #   models/<run>/weights/best.pt
@@ -1609,6 +2176,184 @@ def delete_nuclio_function(fn_name: str) -> tuple[bool, str]:
         return False, (proc.stderr or proc.stdout).strip()
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# モデル評価 (model.val)
+#
+#   学習時の results.csv は「そのモデルが自分の val で出した値」でしかないため、
+#   別環境で学習したモデルとは比較できない。ここでは任意のデータセットに対して
+#   同一条件で val を回し、モデル同士を同じ土俵で比べられるようにする。
+# ---------------------------------------------------------------------------
+def model_eval_path(model_path: Path) -> Path:
+    """評価結果の保存先（rglob('*.pt') に載らないドット始まりの名前）"""
+    return model_path.parent / f".{model_path.name}.eval.json"
+
+
+def read_model_evals(model_path: Path) -> dict:
+    """{データセットキー: 評価結果} を返す"""
+    p = model_eval_path(model_path)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def save_model_eval(model_path: Path, dataset_key: str, result: dict) -> None:
+    evals = read_model_evals(model_path)
+    evals[dataset_key] = result
+    try:
+        model_eval_path(model_path).write_text(
+            json.dumps(evals, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+def evaluate_model(
+    model_path: Path,
+    data_yaml: str,
+    split: str = "val",
+    imgsz: int = 640,
+    batch: int = 8,
+    conf: float = 0.001,
+    iou: float = 0.6,
+    plots: bool = True,
+) -> dict:
+    """1モデルを1データセットで評価する。
+
+    conf の既定 0.001 は Ultralytics の val と同じ。mAP は全信頼度域の
+    Precision-Recall 曲線から計算するため、低い値を使うのが正しい。
+    """
+    res: dict = {
+        "ok": False, "error": None,
+        "model": str(model_path), "data_yaml": data_yaml, "split": split,
+        "imgsz": imgsz, "conf": conf, "iou": iou,
+        "map50": None, "map50_95": None, "precision": None, "recall": None,
+        "fitness": None, "per_class": [], "speed_ms": None, "n_images": None,
+        "plots_dir": None,
+        "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        from ultralytics import YOLO
+
+        # 成果物（PR曲線・混同行列）はモデルの隣に置く
+        plots_root = model_path.parent / ".eval_plots"
+        run_name = slugify_function_name(f"{Path(data_yaml).parent.name}-{split}")
+        out_dir = plots_root / run_name
+
+        model = YOLO(str(model_path))
+        r = model.val(
+            data=data_yaml, split=split, imgsz=imgsz, batch=batch,
+            conf=conf, iou=iou, plots=plots, verbose=False,
+            project=str(plots_root), name=run_name, exist_ok=True,
+        )
+
+        box = r.box
+        names = r.names if isinstance(r.names, dict) else dict(enumerate(r.names or []))
+
+        per_class = []
+        try:
+            for i, c in enumerate(box.ap_class_index):
+                cid = int(c)
+                per_class.append({
+                    "class": names.get(cid, f"id={cid}"),
+                    "ap50":    float(box.ap50[i]),
+                    "ap50_95": float(box.ap[i].mean()),
+                    "precision": float(box.p[i]),
+                    "recall":    float(box.r[i]),
+                })
+        except Exception:
+            pass
+
+        speed = getattr(r, "speed", {}) or {}
+        res.update({
+            "ok": True,
+            "map50":    float(box.map50),
+            "map50_95": float(box.map),
+            "precision": float(box.mp),
+            "recall":    float(box.mr),
+            "fitness":   float(getattr(r, "fitness", 0.0) or 0.0),
+            "per_class": per_class,
+            "speed_ms":  {k: round(float(v), 2) for k, v in speed.items()},
+            "plots_dir": str(out_dir) if out_dir.exists() else None,
+        })
+    except Exception as e:
+        res["error"] = f"{type(e).__name__}: {e}"
+    return res
+
+
+def collect_model_evals(dataset_key: Optional[str] = None) -> list[dict]:
+    """全モデルの保存済み評価結果を集める（モデル横断の比較表に使う）"""
+    rows = []
+    if not MODELS_DIR.exists():
+        return rows
+    for mp in MODELS_DIR.rglob("*.pt"):
+        for key, r in read_model_evals(mp).items():
+            if dataset_key and key != dataset_key:
+                continue
+            if not r.get("ok"):
+                continue
+            rows.append({"model_path": mp, "dataset_key": key, **r})
+    return rows
+
+
+def _eval_worker(model_paths: list[str], data_yaml: str, split: str,
+                 imgsz: int, batch: int, conf: float, iou: float) -> None:
+    """複数モデルを順に評価する（バックグラウンドスレッド）"""
+    state, lock = _get_eval_shared()
+
+    def _log(msg: str) -> None:
+        with lock:
+            state["log"].append(msg)
+
+    dataset_key = f"{Path(data_yaml).parent.name}:{split}"
+    try:
+        for i, mp_str in enumerate(model_paths):
+            mp = Path(mp_str)
+            with lock:
+                state["current"] = mp.name
+                state["done"] = i
+            _log(f"[{i + 1}/{len(model_paths)}] 評価中: {mp.relative_to(MODELS_DIR)}")
+
+            r = evaluate_model(mp, data_yaml, split=split, imgsz=imgsz,
+                               batch=batch, conf=conf, iou=iou)
+            if r["ok"]:
+                save_model_eval(mp, dataset_key, r)
+                _log(f"    mAP50={r['map50']:.4f}  mAP50-95={r['map50_95']:.4f}  "
+                     f"P={r['precision']:.3f}  R={r['recall']:.3f}")
+            else:
+                _log(f"    ❌ 失敗: {r['error']}")
+
+            with lock:
+                state["results"].append({"model": str(mp), **r})
+                state["done"] = i + 1
+        _log("")
+        _log("✅ 評価が完了しました")
+    except Exception as e:
+        with lock:
+            state["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with lock:
+            state["running"] = False
+            state["finished"] = True
+            state["current"] = ""
+
+
+def start_evaluation(model_paths: list[str], data_yaml: str, split: str,
+                     imgsz: int, batch: int, conf: float, iou: float) -> None:
+    state, lock = _get_eval_shared()
+    with lock:
+        if state["running"]:
+            return
+        state.update({"log": [], "running": True, "error": None, "finished": False,
+                      "total": len(model_paths), "done": 0, "current": "", "results": []})
+    threading.Thread(
+        target=_eval_worker,
+        args=(model_paths, data_yaml, split, imgsz, batch, conf, iou),
+        daemon=True,
+    ).start()
 
 
 # ---------------------------------------------------------------------------
@@ -2086,8 +2831,24 @@ def _get_pipeline_status() -> dict:
     model_exists = len(list(MODELS_DIR.rglob("*.pt"))) > 0
     pred_exists  = len(list(PREDICTIONS_DIR.glob("*.json"))) > 0
     training_now = _train_state.get("running", False)
+
+    # STEP1(アノテーション) は取得済みのジョブ進捗から判定する。
+    # 未取得のときは判定材料が無いので complete 扱いのままにする。
+    jobs = st.session_state.get("cvat_jobs") or []
+    if jobs:
+        total_f = sum(j.get("frames", 0) for j in jobs)
+        done_f  = sum(j.get("frames", 0) for j in jobs if j.get("state") == "completed")
+        if total_f and done_f >= total_f:
+            step1 = "complete"
+        elif done_f > 0:
+            step1 = "active"
+        else:
+            step1 = "pending"
+    else:
+        step1 = "complete"
+
     return {
-        "step1": "complete",
+        "step1": step1,
         "step2": "complete" if yaml_exists  else "pending",
         "step3": "active"   if training_now else ("complete" if model_exists else "pending"),
         "step4": "complete" if pred_exists  else "pending",
@@ -2273,10 +3034,10 @@ with st.sidebar:
 # タブ構成
 # ---------------------------------------------------------------------------
 tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🏷 アノテーション",
-    "📤 Step1: データ取込",
-    "🚀 Step2: モデル学習",
-    "🔭 Step3: 推論・評価",
+    "🏷 Step1: アノテーション",
+    "📤 Step2: データ取込",
+    "🚀 Step3: モデル学習",
+    "🔭 Step4: 推論・評価",
     "📁 データ管理",
     "📚 トピックス",
 ])
@@ -2287,7 +3048,7 @@ tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
 with tab0:
     st.markdown(f"""
 <div class="step-banner">
-  <div class="sb-title">🏷 STEP 0: アノテーション</div>
+  <div class="sb-title">🏷 STEP 1: アノテーション</div>
   <div class="sb-prev">← 作業場所: CVAT ({CVAT_WEB}) — ここはその作業を支援する管理画面です</div>
   <div class="sb-desc">→ ここでやること: 学習済みモデルを自動アノテーションに載せる / チームの進捗を把握する</div>
 </div>""", unsafe_allow_html=True)
@@ -2393,7 +3154,7 @@ with tab0:
         _dep_models = sorted(MODELS_DIR.rglob("*.pt"), key=lambda p: p.stat().st_mtime,
                              reverse=True) if MODELS_DIR.exists() else []
         if not _dep_models:
-            st.info("models/ に .pt がありません。Step2で学習するか、データ管理タブから取り込んでください。")
+            st.info("models/ に .pt がありません。Step3で学習するか、データ管理タブから取り込んでください。")
         else:
             _dep_map = {str(p.relative_to(MODELS_DIR)): p for p in _dep_models}
             _dep_sel = st.selectbox("デプロイするモデル", list(_dep_map.keys()), key="dep_model_sel")
@@ -2481,60 +3242,111 @@ with tab0:
     # ── アノテーション進捗 ────────────────────────────────────────────────
     st.markdown('<div class="pipeline-card"><h3>📊 アノテーション進捗</h3>', unsafe_allow_html=True)
 
+    st.caption(
+        "進捗はジョブ単位で集計しています。CVAT はタスクを複数のジョブに分割し、"
+        "担当者もジョブ単位で割り当てるため、タスクの status より実態に近い数字が出ます。"
+    )
     _pc1, _pc2 = st.columns([3, 1])
     with _pc2:
         if st.button("🔄 CVATから進捗を取得", use_container_width=True, key="anno_fetch_tasks"):
-            with st.spinner("CVATからタスクを取得中…"):
+            with st.spinner("CVATからタスク・ジョブを取得中…"):
                 st.session_state.cvat_tasks = fetch_cvat_tasks()
+                st.session_state.cvat_jobs  = fetch_cvat_jobs()
 
     _anno_tasks = st.session_state.cvat_tasks
-    if not _anno_tasks:
-        st.info("「CVATから進捗を取得」を押すと、タスクの進捗と担当者別の状況を表示します。")
+    _anno_jobs  = st.session_state.cvat_jobs
+    if not _anno_jobs and not _anno_tasks:
+        st.info("「CVATから進捗を取得」を押すと、ジョブ単位の進捗と担当者別の状況を表示します。")
+    elif not _anno_jobs:
+        st.warning("ジョブ情報を取得できませんでした。もう一度「CVATから進捗を取得」を試してください。")
     else:
         import pandas as _pd_anno
 
-        _df_a = _pd_anno.DataFrame(_anno_tasks)
-        _total_imgs = int(_df_a["size"].fillna(0).sum())
-        _done_mask  = _df_a["status"] == "completed"
-        _done_imgs  = int(_df_a.loc[_done_mask, "size"].fillna(0).sum())
-        _rate = (_done_imgs / _total_imgs * 100) if _total_imgs else 0.0
+        _df_j = _pd_anno.DataFrame(_anno_jobs)
+        _df_j["担当者"] = _df_j["assignee"].replace("", None).fillna("（未割当）")
+
+        _total_f = int(_df_j["frames"].fillna(0).sum())
+        _done_f  = int(_df_j.loc[_df_j["state"] == "completed", "frames"].fillna(0).sum())
+        _rate    = (_done_f / _total_f * 100) if _total_f else 0.0
 
         _sm1, _sm2, _sm3, _sm4 = st.columns(4)
-        _sm1.metric("タスク数", len(_df_a))
-        _sm2.metric("総画像数", f"{_total_imgs:,}")
-        _sm3.metric("完了画像数", f"{_done_imgs:,}")
+        _sm1.metric("タスク数", len(_anno_tasks) or _df_j["task_id"].nunique())
+        _sm2.metric("ジョブ数", len(_df_j))
+        _sm3.metric("総フレーム数", f"{_total_f:,}")
         _sm4.metric("完了率", f"{_rate:.1f}%")
-        st.progress(min(_rate / 100, 1.0), text=f"全体進捗 {_rate:.1f}%")
+        st.progress(min(_rate / 100, 1.0),
+                    text=f"完了 {_done_f:,} / {_total_f:,} フレーム（{_rate:.1f}%）")
 
-        # 担当者別の集計（未割当は「（未割当）」に寄せる）
+        # state / stage の内訳
+        _st1, _st2 = st.columns(2)
+        with _st1:
+            st.markdown("**進行状態 (state)**")
+            _by_state = _df_j.groupby("state").agg(
+                ジョブ数=("job_id", "count"), フレーム数=("frames", "sum")
+            ).reset_index().rename(columns={"state": "状態"})
+            st.dataframe(_by_state, use_container_width=True, hide_index=True)
+        with _st2:
+            st.markdown("**工程 (stage)**")
+            _by_stage = _df_j.groupby("stage").agg(
+                ジョブ数=("job_id", "count"), フレーム数=("frames", "sum")
+            ).reset_index().rename(columns={"stage": "工程"})
+            st.dataframe(_by_stage, use_container_width=True, hide_index=True)
+
+        # 担当者別（ジョブ単位。4人以上で分担するときの主指標）
         st.markdown("**👥 担当者別**")
-        _df_a["担当者"] = _df_a["assignee"].replace("", None).fillna("（未割当）")
-        _by_user = _df_a.groupby("担当者").agg(
-            タスク数=("id", "count"),
-            画像数=("size", "sum"),
-            完了タスク数=("status", lambda s: int((s == "completed").sum())),
+        _by_user = _df_j.groupby("担当者").agg(
+            担当ジョブ数=("job_id", "count"),
+            フレーム数=("frames", "sum"),
+            完了ジョブ数=("state", lambda s: int((s == "completed").sum())),
+            完了フレーム数=("frames", "sum"),   # 後で上書きする
         ).reset_index()
+        _done_by_user = (_df_j[_df_j["state"] == "completed"]
+                         .groupby("担当者")["frames"].sum())
+        _by_user["完了フレーム数"] = _by_user["担当者"].map(_done_by_user).fillna(0).astype(int)
         _by_user["完了率"] = (
-            _by_user["完了タスク数"] / _by_user["タスク数"] * 100
+            _by_user["完了フレーム数"] / _by_user["フレーム数"].replace(0, 1) * 100
         ).round(1).astype(str) + "%"
-        st.dataframe(_by_user, use_container_width=True, hide_index=True)
+        st.dataframe(_by_user.sort_values("フレーム数", ascending=False),
+                     use_container_width=True, hide_index=True)
 
-        # ステータス別の内訳
-        st.markdown("**📋 タスク一覧**")
-        _status_filter = st.multiselect(
-            "ステータスで絞り込み",
-            options=sorted(_df_a["status"].dropna().unique().tolist()),
-            default=[],
-            key="anno_status_filter",
+        _unassigned = _df_j[_df_j["担当者"] == "（未割当）"]
+        if len(_unassigned) > 0:
+            st.warning(
+                f"⚠ 未割当のジョブが {len(_unassigned)} 件 "
+                f"（{int(_unassigned['frames'].sum()):,} フレーム）あります。"
+                f"CVAT 側で担当者を割り当ててください。"
+            )
+
+        # タスク別の進捗
+        st.markdown("**📋 タスク別の進捗**")
+        _task_prog = _df_j.groupby(["task_id", "task_name"]).agg(
+            ジョブ数=("job_id", "count"),
+            フレーム数=("frames", "sum"),
+        ).reset_index()
+        _done_by_task = (_df_j[_df_j["state"] == "completed"]
+                         .groupby("task_id")["frames"].sum())
+        _task_prog["完了フレーム"] = _task_prog["task_id"].map(_done_by_task).fillna(0).astype(int)
+        _task_prog["進捗"] = (
+            _task_prog["完了フレーム"] / _task_prog["フレーム数"].replace(0, 1)
+        ).round(3)
+        _task_prog["担当者"] = _task_prog["task_id"].map(
+            _df_j.groupby("task_id")["担当者"].agg(lambda s: ", ".join(sorted(set(s))))
         )
-        _df_show = _df_a[_df_a["status"].isin(_status_filter)] if _status_filter else _df_a
-        _df_show = _df_show[["id", "name", "status", "担当者", "size"]].copy()
-        _df_show.columns = ["ID", "タスク名", "ステータス", "担当者", "画像数"]
-        st.dataframe(_df_show, use_container_width=True, hide_index=True)
+        _task_prog = _task_prog.rename(columns={"task_id": "ID", "task_name": "タスク名"})
+
+        _only_incomplete = st.checkbox("未完了のタスクだけ表示", value=False,
+                                       key="anno_only_incomplete")
+        _tp_show = _task_prog[_task_prog["進捗"] < 1.0] if _only_incomplete else _task_prog
+        st.dataframe(
+            _tp_show[["ID", "タスク名", "担当者", "ジョブ数", "フレーム数", "完了フレーム", "進捗"]],
+            use_container_width=True, hide_index=True,
+            column_config={"進捗": st.column_config.ProgressColumn(
+                "進捗", min_value=0.0, max_value=1.0, format="%.0f%%")},
+        )
 
         st.caption(
             f"CVAT で作業する → [{CVAT_WEB}]({CVAT_WEB})　"
-            "／ アノテーションが終わったタスクは「📤 Step1: データ取込」でエクスポートします。"
+            "／ アノテーションが終わったタスクは「📤 Step2: データ取込」でエクスポートします。"
         )
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -2545,7 +3357,7 @@ with tab0:
 with tab1:
     st.markdown("""
 <div class="step-banner">
-  <div class="sb-title">📤 STEP 1: データ取込</div>
+  <div class="sb-title">📤 STEP 2: データ取込</div>
   <div class="sb-prev">← 事前準備: CVATでアノテーションを完了させてください (http://localhost:8080)</div>
   <div class="sb-desc">→ ここでやること: CVATタスクをエクスポート → YOLOデータセット形式に変換</div>
 </div>""", unsafe_allow_html=True)
@@ -2585,8 +3397,8 @@ with tab1:
             value=f"dataset_{_first_id}_{datetime.now():%Y%m%d}",
         )
 
-        # ─── Step 1: CVAT for images 1.1 エクスポート ───────────────────────
-        st.markdown("#### Step 1: CVATエクスポート")
+        # ─── 手順① CVAT for images 1.1 エクスポート ─────────────────────────
+        st.markdown("#### ① CVATエクスポート")
         if st.button("⬇️ エクスポート実行 (CVAT for images 1.1)", type="primary",
                      use_container_width=True,
                      disabled=len(selected_ids) == 0):
@@ -2632,11 +3444,11 @@ with tab1:
                     if xml_info:
                         st.session_state.cvat_xml_info = xml_info
 
-        # ─── Step 2: ラベル・タスク種別の設定 ───────────────────────────────
+        # ─── 手順② ラベル・タスク種別の設定 ─────────────────────────────────
         if st.session_state.cvat_raw_dir and st.session_state.cvat_xml_info:
             xml_info = st.session_state.cvat_xml_info
             st.markdown("---")
-            st.markdown("#### Step 2: ラベルとタスク種別の設定")
+            st.markdown("#### ② ラベルとタスク種別の設定")
 
             col_stat1, col_stat2, col_stat3 = st.columns(3)
             with col_stat1:
@@ -2670,9 +3482,9 @@ with tab1:
             with col_val:
                 val_ratio = st.slider("バリデーション割合", 0.05, 0.40, 0.20, step=0.05)
 
-            # ─── Step 3: データセット生成 ────────────────────────────────────
+            # ─── 手順③ データセット生成 ──────────────────────────────────────
             st.markdown("---")
-            st.markdown("#### Step 3: データセット生成")
+            st.markdown("#### ③ データセット生成")
 
             gen_dir_name = st.text_input(
                 "生成先ディレクトリ名",
@@ -2699,7 +3511,7 @@ with tab1:
                         yaml_path = result / "data.yaml"
                         st.success("✅ データセット生成完了！")
                         st.info(
-                            f"🗂 data.yaml パス（タブ②にコピーして使用）:\n`{yaml_path}`"
+                            f"🗂 data.yaml パス（Step3: モデル学習 タブで使用）:\n`{yaml_path}`"
                         )
                         st.code(str(yaml_path), language="text")
 
@@ -2717,7 +3529,7 @@ with tab1:
                 if xml_info:
                     st.session_state.cvat_raw_dir = str(raw_p)
                     st.session_state.cvat_xml_info = xml_info
-                    st.success("解析完了。Step 2が表示されます。")
+                    st.success("解析完了。下に②が表示されます。")
                     st.rerun()
             else:
                 st.error(f"ディレクトリが存在しません: {raw_p}")
@@ -2758,7 +3570,7 @@ with tab1:
                     if _ul_yamls:
                         st.info(f"🗂 data.yaml: `{_ul_yamls[0]}`")
                     else:
-                        st.warning("data.yaml が見つかりません。Step2で手動入力が必要です。")
+                        st.warning("data.yaml が見つかりません。Step3で手動入力が必要です。")
         else:
             _ul_imgs = st.file_uploader(
                 "画像ファイル（複数選択可）",
@@ -2779,7 +3591,7 @@ with tab1:
                     for _f in _ul_imgs:
                         (_ul_out / _f.name).write_bytes(_f.getbuffer())
                     st.success(f"✅ {len(_ul_imgs)} ファイルを保存: `{_ul_out}`")
-                    st.info("アノテーションを付与する場合は CVATにアップロード後、Step1からエクスポートしてください。")
+                    st.info("アノテーションを付与する場合は CVATにアップロード後、Step2からエクスポートしてください。")
 
 
     # ── +α: チーム共通ラベルエクスポート ──────────────────────────────────────
@@ -2888,10 +3700,10 @@ with tab1:
 with tab2:
     _yaml_count = len(list(DATA_DIR.rglob("data.yaml")))
     _prev_info2 = (f"← 前のステップ: ✅ data.yaml が {_yaml_count} 件あります"
-                   if _yaml_count > 0 else "← 前のステップ: ⚠ Step1でデータセットを先に生成してください")
+                   if _yaml_count > 0 else "← 前のステップ: ⚠ Step2でデータセットを先に生成してください")
     st.markdown(f"""
 <div class="step-banner">
-  <div class="sb-title">🚀 STEP 2: モデル学習</div>
+  <div class="sb-title">🚀 STEP 3: モデル学習</div>
   <div class="sb-prev">{_prev_info2}</div>
   <div class="sb-desc">→ ここでやること: モデルサイズ・学習パラメータを設定して学習開始</div>
 </div>""", unsafe_allow_html=True)
@@ -3631,10 +4443,10 @@ with tab2:
 with tab3:
     _mdl_count3 = len(list(MODELS_DIR.rglob("*.pt")))
     _prev_info3 = (f"← 前のステップ: ✅ 学習済みモデルが {_mdl_count3} 件あります"
-                   if _mdl_count3 > 0 else "← 前のステップ: ⚠ Step2でモデルを先に学習してください")
+                   if _mdl_count3 > 0 else "← 前のステップ: ⚠ Step3でモデルを先に学習してください")
     st.markdown(f"""
 <div class="step-banner">
-  <div class="sb-title">🔭 STEP 3: 推論・評価</div>
+  <div class="sb-title">🔭 STEP 4: 推論・評価</div>
   <div class="sb-prev">{_prev_info3}</div>
   <div class="sb-desc">→ ここでやること: 推論実行 → FiftyOneで結果を可視化・確認</div>
 </div>""", unsafe_allow_html=True)
@@ -3657,6 +4469,152 @@ with tab3:
         )
     else:
         selected_compare_models = []
+
+    # --- モデル評価（mAP を同一データセットで測る）---
+    with st.expander("📊 モデル評価・比較（mAP を同一条件で測る）", expanded=False):
+        st.caption(
+            "学習時の results.csv は「そのモデルが自分の val で出した値」なので、"
+            "別環境で学習したモデルとは比較できません。"
+            "ここで同じデータセット・同じ条件で val を回すと、同じ土俵で比べられます。"
+        )
+
+        _ev_state, _ev_lock = _get_eval_shared()
+        with _ev_lock:
+            _ev_running  = _ev_state["running"]
+            _ev_log      = list(_ev_state["log"])
+            _ev_total    = _ev_state["total"]
+            _ev_done     = _ev_state["done"]
+            _ev_current  = _ev_state["current"]
+            _ev_finished = _ev_state["finished"]
+            _ev_error    = _ev_state["error"]
+
+        _ev_yamls = sorted(DATA_DIR.rglob("data.yaml"), key=lambda p: p.stat().st_mtime,
+                           reverse=True)
+        if not _ev_yamls:
+            st.info("評価に使える data.yaml がありません。Step2 でデータセットを作成してください。")
+        elif not _model_map:
+            st.info("models/ に .pt がありません。")
+        else:
+            _ev_c1, _ev_c2, _ev_c3 = st.columns([3, 1, 1])
+            with _ev_c1:
+                _ev_yaml_sel = st.selectbox(
+                    "評価に使うデータセット (data.yaml)",
+                    [str(p.relative_to(DATA_DIR)) for p in _ev_yamls],
+                    key="ev_yaml_sel",
+                )
+                _ev_yaml_path = str(DATA_DIR / _ev_yaml_sel)
+            with _ev_c2:
+                _ev_split = st.selectbox("スプリット", ["val", "train"], key="ev_split")
+            with _ev_c3:
+                _ev_imgsz = st.selectbox("imgsz", [640, 960, 1280], key="ev_imgsz")
+
+            _ev_models_sel = st.multiselect(
+                "評価するモデル（複数選択で比較できます）",
+                list(_model_map.keys()),
+                default=([str(Path(current_model).relative_to(MODELS_DIR))]
+                         if current_model and Path(current_model).exists() else []),
+                key="ev_models_sel",
+            )
+
+            _ev_a1, _ev_a2, _ev_a3 = st.columns(3)
+            with _ev_a1:
+                _ev_batch = st.number_input("バッチサイズ", 1, 64, 8, key="ev_batch")
+            with _ev_a2:
+                _ev_conf = st.number_input("conf しきい値", 0.0001, 0.9, 0.001,
+                                           format="%.4f", key="ev_conf",
+                                           help="mAP は全信頼度域の PR 曲線から計算するため、"
+                                                "低い値（既定 0.001）を使うのが正しい計測です")
+            with _ev_a3:
+                _ev_iou = st.number_input("NMS IoU", 0.1, 0.95, 0.6, key="ev_iou")
+
+            _ev_key = f"{Path(_ev_yaml_path).parent.name}:{_ev_split}"
+
+            if st.button(f"📊 {len(_ev_models_sel)} 件のモデルを評価",
+                         type="primary", use_container_width=True,
+                         disabled=_ev_running or not _ev_models_sel, key="ev_run"):
+                start_evaluation(
+                    [_model_map[m] for m in _ev_models_sel],
+                    _ev_yaml_path, _ev_split, int(_ev_imgsz),
+                    int(_ev_batch), float(_ev_conf), float(_ev_iou),
+                )
+                st.rerun()
+
+            # --- 実行中 / 完了ログ ---
+            if _ev_running or _ev_finished:
+                if _ev_running:
+                    st.progress(_ev_done / max(_ev_total, 1),
+                                text=f"評価中 {_ev_done}/{_ev_total}　{_ev_current}")
+                elif _ev_error:
+                    st.error(f"❌ 評価に失敗しました: {_ev_error}")
+                else:
+                    st.success("✅ 評価が完了しました")
+                st.code("\n".join(_ev_log[-20:]) or "(実行待ち)", language="text")
+
+            # --- 比較表（保存済みの評価結果を横断で集める）---
+            _ev_rows = collect_model_evals(_ev_key)
+            if _ev_rows:
+                st.markdown(f"**📋 比較表 — `{_ev_key}` で評価済みの {len(_ev_rows)} モデル**")
+                import pandas as _pd_ev
+
+                _ev_tbl = []
+                for _r in _ev_rows:
+                    _mp = _r["model_path"]
+                    _spd = (_r.get("speed_ms") or {}).get("inference")
+                    _ev_tbl.append({
+                        "モデル": str(_mp.relative_to(MODELS_DIR)),
+                        "mAP50": round(_r["map50"], 4),
+                        "mAP50-95": round(_r["map50_95"], 4),
+                        "Precision": round(_r["precision"], 3),
+                        "Recall": round(_r["recall"], 3),
+                        "推論(ms)": _spd,
+                        "サイズ(MB)": round(_mp.stat().st_size / 1024 / 1024, 1),
+                        "評価日時": _r.get("evaluated_at", ""),
+                    })
+                _df_ev = _pd_ev.DataFrame(_ev_tbl).sort_values("mAP50-95", ascending=False)
+                st.dataframe(_df_ev, use_container_width=True, hide_index=True)
+
+                _best = _df_ev.iloc[0]
+                st.success(
+                    f"🏆 このデータセットで最も精度が高いのは **{_best['モデル']}** "
+                    f"（mAP50-95 = {_best['mAP50-95']:.4f} / mAP50 = {_best['mAP50']:.4f}）"
+                )
+
+                # クラス別 AP と成果物プロット
+                _ev_detail_sel = st.selectbox(
+                    "詳細を見るモデル", _df_ev["モデル"].tolist(), key="ev_detail_sel")
+                _ev_detail = next(
+                    (r for r in _ev_rows
+                     if str(r["model_path"].relative_to(MODELS_DIR)) == _ev_detail_sel), None)
+                if _ev_detail:
+                    if _ev_detail.get("per_class"):
+                        st.markdown("**クラス別**")
+                        st.dataframe(
+                            _pd_ev.DataFrame([{
+                                "クラス": c["class"],
+                                "AP50": round(c["ap50"], 4),
+                                "AP50-95": round(c["ap50_95"], 4),
+                                "Precision": round(c["precision"], 3),
+                                "Recall": round(c["recall"], 3),
+                            } for c in _ev_detail["per_class"]]),
+                            use_container_width=True, hide_index=True,
+                        )
+                    _pd_dir = _ev_detail.get("plots_dir")
+                    if _pd_dir and Path(_pd_dir).exists():
+                        _cm = Path(_pd_dir) / "confusion_matrix_normalized.png"
+                        _pr = Path(_pd_dir) / "BoxPR_curve.png"
+                        _pcols = st.columns(2)
+                        if _cm.exists():
+                            _pcols[0].image(str(_cm), caption="混同行列（正規化）",
+                                            use_column_width=True)
+                        if _pr.exists():
+                            _pcols[1].image(str(_pr), caption="Precision-Recall 曲線",
+                                            use_column_width=True)
+            else:
+                st.caption(f"`{_ev_key}` での評価結果はまだありません。")
+
+        if _ev_running:
+            time.sleep(2)
+            st.rerun()
 
     # --- 推論対象ソース ---
     _infer_src = st.radio(
@@ -3777,7 +4735,7 @@ with tab3:
                 if not test_video_path:
                     st.error("動画ファイルを選択してください")
                 elif not current_model:
-                    st.error("モデルが未設定です。Step2 で学習するか、データ管理タブで選択してください")
+                    st.error("モデルが未設定です。Step3 で学習するか、データ管理タブで選択してください")
                 else:
                     _prog_bar = st.progress(0.0, text="動画推論中…")
                     def _video_prog(fi, tot):
@@ -4197,6 +5155,88 @@ with tab3:
             if _ng > 0:
                 st.warning(f"⚠ {_ng} 件スキップ（元画像が見つからないため）")
 
+    # --- 要確認画像の自動抽出 ---
+    if _pred_jsons:
+        st.markdown("#### 🔍 要確認画像の自動抽出")
+        st.caption(
+            "推論結果を分析して「モデルが自信を持てていない画像」を機械的に拾います。"
+            "全画像を目視して 🚩 を立てる代わりに、ここで一括フラグできます。"
+        )
+
+        _aa_c1, _aa_c2 = st.columns([2, 3])
+        with _aa_c1:
+            _aa_conf = st.slider("低信頼度のしきい値", 0.05, 0.95, 0.50, 0.05,
+                                 key="aa_conf_low",
+                                 help="この値未満の検出を含む画像を要確認とみなします")
+        with _aa_c2:
+            st.markdown("**抽出する条件**")
+            _ac1, _ac2 = st.columns(2)
+            with _ac1:
+                _aa_zero     = st.checkbox("検出ゼロ（見逃しの疑い）", value=True, key="aa_zero")
+                _aa_low      = st.checkbox("低信頼度を含む", value=True, key="aa_low")
+            with _ac2:
+                _aa_conflict = st.checkbox("クラス競合（迷っている）", value=True, key="aa_conflict")
+                _aa_tiny     = st.checkbox("極小ボックス（ノイズの疑い）", value=False, key="aa_tiny")
+
+        if st.button("🔍 要確認画像を抽出", use_container_width=True, key="aa_run"):
+            with st.spinner(f"{len(_pred_jsons)} 件を分析中…"):
+                st.session_state["aa_rows"] = analyze_predictions(
+                    _pred_jsons, conf_low=_aa_conf)
+
+        _aa_rows = st.session_state.get("aa_rows") or []
+        if _aa_rows:
+            # チェックした条件だけを採用する
+            _aa_want = set()
+            if _aa_zero:     _aa_want.add("検出ゼロ")
+            if _aa_low:      _aa_want.add("低信頼度")
+            if _aa_conflict: _aa_want.add("クラス競合")
+            if _aa_tiny:     _aa_want.add("極小ボックス")
+
+            _aa_hits = []
+            for _r in _aa_rows:
+                _kinds = {x.split("(")[0] for x in _r["reasons"]}
+                if _kinds & _aa_want:
+                    _aa_hits.append({**_r, "matched": sorted(_kinds & _aa_want)})
+
+            _am1, _am2, _am3 = st.columns(3)
+            _am1.metric("分析した画像", len(_aa_rows))
+            _am2.metric("要確認", len(_aa_hits))
+            _am3.metric("要確認の割合",
+                        f"{len(_aa_hits) / len(_aa_rows) * 100:.1f}%" if _aa_rows else "—")
+
+            # 理由別の内訳
+            _aa_agg: dict[str, int] = {}
+            for _h in _aa_hits:
+                for _k in _h["matched"]:
+                    _aa_agg[_k] = _aa_agg.get(_k, 0) + 1
+            if _aa_agg:
+                st.markdown("　".join(f"`{k}` {v}件" for k, v in sorted(_aa_agg.items())))
+
+            if _aa_hits:
+                import pandas as _pd_aa
+                _df_aa = _pd_aa.DataFrame([{
+                    "ファイル": _h["name"],
+                    "検出数": _h["n_boxes"],
+                    "最低conf": (f"{_h['min_conf']:.2f}" if _h["min_conf"] is not None else "—"),
+                    "理由": ", ".join(_h["reasons"]),
+                } for _h in _aa_hits])
+                st.dataframe(_df_aa, use_container_width=True, hide_index=True, height=260)
+
+                _ab1, _ab2 = st.columns(2)
+                with _ab1:
+                    if st.button(f"🚩 {len(_aa_hits)} 件にまとめてフラグを立てる",
+                                 type="primary", use_container_width=True, key="aa_flag_all"):
+                        for _h in _aa_hits:
+                            st.session_state.reanno_set.add(_h["name"])
+                        st.success(f"{len(_aa_hits)} 件にフラグを立てました")
+                        st.rerun()
+                with _ab2:
+                    if st.button("抽出結果をクリア", use_container_width=True, key="aa_clear"):
+                        st.session_state["aa_rows"] = []
+                        st.rerun()
+            else:
+                st.success("✅ 選択した条件に該当する画像はありませんでした。")
+
     # --- 再アノテーション用エクスポート ---
     if _pred_jsons:
         st.markdown("#### 🚩 再アノテーション用エクスポート")
@@ -4205,7 +5245,7 @@ with tab3:
                      if (PREDICTIONS_DIR / n).exists()]
 
         if not _ra_jsons:
-            st.info("プレビューまたは選択グリッドの 🚩 ボタンで画像にフラグを立てると、ここに表示されます。")
+            st.info("上の自動抽出、またはプレビューの 🚩 ボタンで画像にフラグを立てると、ここに表示されます。")
         else:
             st.markdown(
                 f'<div style="color:#f4a84e; font-size:.9rem; margin-bottom:8px;">'
@@ -4226,8 +5266,62 @@ with tab3:
                             else:
                                 st.caption(_rj.stem)
 
+            # ── CVAT へ直接送る（ZIP ダウンロード → 手動アップロードを不要にする）──
+            with st.expander("📤 CVAT に新規タスクとして送る（推奨）", expanded=True):
+                st.caption(
+                    "フラグ済み画像を CVAT のタスクとして直接作成します。"
+                    "予測ボックスを事前アノテーションとして入れておけば、"
+                    "作業者はゼロから引くのではなく「直す」だけで済みます。"
+                )
+                _pu_name = st.text_input(
+                    "CVAT タスク名",
+                    value=f"recheck_{datetime.now():%Y%m%d_%H%M}",
+                    key="push_task_name",
+                )
+                _pu_c1, _pu_c2 = st.columns(2)
+                with _pu_c1:
+                    _pu_with_ann = st.checkbox(
+                        "予測ボックスを事前アノテーションとして入れる",
+                        value=True, key="push_with_ann",
+                    )
+                with _pu_c2:
+                    _pu_extra = st.text_input(
+                        "追加ラベル（カンマ区切り・任意）",
+                        value="", key="push_extra_labels",
+                        help="検出ゼロの画像だけを送る場合や、"
+                             "予測に出てこないクラスを後から付けたい場合に指定します",
+                    )
+
+                if len(_ra_jsons) > 200:
+                    st.warning(f"⚠ {len(_ra_jsons)} 件を送信します。画像のアップロードに時間がかかります。")
+
+                if st.button(f"📤 CVAT に {len(_ra_jsons)} 件を送る",
+                             type="primary", use_container_width=True,
+                             disabled=not _pu_name.strip(), key="push_run"):
+                    _pu_labels = [s.strip() for s in _pu_extra.split(",") if s.strip()]
+                    with st.spinner("CVAT にタスクを作成中…（画像アップロード中）"):
+                        _pu_res = push_predictions_to_cvat(
+                            _ra_jsons,
+                            task_name=_pu_name.strip(),
+                            extra_labels=_pu_labels,
+                            with_annotations=_pu_with_ann,
+                        )
+                    st.session_state["push_result"] = _pu_res
+
+                _pu_last = st.session_state.get("push_result")
+                if _pu_last:
+                    if _pu_last["ok"]:
+                        st.success(
+                            f"✅ タスクを作成しました（ID: {_pu_last['task_id']} / "
+                            f"{_pu_last['n_images']} 枚 / ラベル: {', '.join(_pu_last['labels'])}）"
+                        )
+                        st.markdown(f"👉 [CVAT でこのタスクを開く]({_pu_last['url']})")
+                        st.caption("作業が終わったら「📤 Step2: データ取込」でエクスポートして学習に回せます。")
+                    else:
+                        st.error(f"❌ 送信に失敗しました: {_pu_last['error']}")
+
             st.caption(
-                "出力形式: 元画像 (`images/`) + YOLO txt ラベル (`labels/`) "
+                "ZIP 出力形式: 元画像 (`images/`) + YOLO txt ラベル (`labels/`) "
                 "+ `classes.txt` + CVAT for images 1.1 XML (`annotations.xml`)"
             )
             _ra_c1, _ra_c2 = st.columns(2)
@@ -4296,6 +5390,126 @@ with tab4:
                     shutil.rmtree(ds)
                     st.success(f"{ds.name} を削除しました")
                     st.rerun()
+            with st.expander(f"🔍 {ds.name} の品質チェック"):
+                st.caption(
+                    "画像とラベルの対応漏れ・座標の破損・クラス分布の偏りを検査します。"
+                    "外部から持ち込んだデータや複数人で分担したデータほど確認する価値があります。"
+                )
+                if st.button("🔍 チェックを実行", key=f"qc_run_{ds.name}",
+                             use_container_width=True):
+                    with st.spinner(f"{ds.name} を検査中…"):
+                        st.session_state[f"qc_{ds.name}"] = check_dataset_quality(ds)
+
+                _qc = st.session_state.get(f"qc_{ds.name}")
+                if _qc:
+                    if _qc["error"]:
+                        st.error(f"❌ {_qc['error']}")
+                    else:
+                        _n_err = _qc.get("n_errors", 0)
+                        if _qc["n_issues"] == 0:
+                            st.success("✅ 問題は見つかりませんでした。")
+                        elif _n_err > 0:
+                            st.error(f"❌ 要対応 {_n_err} 件 / 指摘 {_qc['n_issues']} 件")
+                        else:
+                            st.warning(f"⚠ 指摘 {_qc['n_issues']} 件（いずれも警告レベル）")
+
+                        # スプリット別の内訳
+                        import pandas as _pd_qc
+                        _rows_qc = [{
+                            "スプリット": sp,
+                            "画像": v["images"], "ラベル": v["labels"],
+                            "ラベル無し画像": v["missing_label"],
+                            "画像無しラベル": v["orphan_label"],
+                            "空ラベル": v["empty_label"],
+                            "ボックス数": v["boxes"],
+                        } for sp, v in _qc["splits"].items()]
+                        if _rows_qc:
+                            st.dataframe(_pd_qc.DataFrame(_rows_qc),
+                                         use_container_width=True, hide_index=True)
+
+                        # クラス分布
+                        if _qc["class_counts"]:
+                            st.markdown("**クラス分布**")
+                            _df_cls = _pd_qc.DataFrame(
+                                sorted(_qc["class_counts"].items(),
+                                       key=lambda kv: -kv[1]),
+                                columns=["クラス", "件数"],
+                            )
+                            st.dataframe(_df_cls, use_container_width=True, hide_index=True)
+
+                        # 指摘の内訳と詳細
+                        if _qc["issue_counts"]:
+                            st.markdown("**指摘の内訳**")
+                            for _k, _v in sorted(_qc["issue_counts"].items(),
+                                                 key=lambda kv: -kv[1]["count"]):
+                                _icon = "❌" if _v["severity"] == "error" else "⚠"
+                                st.markdown(f"- {_icon} **{_k}**: {_v['count']} 件")
+                            # expander の入れ子は不可のためチェックボックスで開閉する
+                            if st.checkbox("詳細を表示（種別ごとに最大20件）",
+                                           key=f"qc_detail_{ds.name}"):
+                                with st.container(border=True):
+                                    for _is in _qc["issues"]:
+                                        _icon = "❌" if _is["severity"] == "error" else "⚠"
+                                        st.caption(f"{_icon} `{_is['path']}` — "
+                                                   f"{_is['kind']}: {_is['detail']}")
+
+                            # --- 自動修正 ---
+                            _fixable = {"サイズ不正", "座標範囲外", "行フォーマット",
+                                        "数値変換", "極小ボックス", "画像無しラベル"}
+                            if _fixable & set(_qc["issue_counts"].keys()):
+                                st.markdown("**🔧 壊れたラベルの自動修正**")
+                                st.caption(
+                                    "該当する行だけを取り除きます。書き換える前に "
+                                    "`<ファイル名>.txt.bak` としてバックアップを作るので元に戻せます。"
+                                )
+                                _fx1, _fx2 = st.columns(2)
+                                with _fx1:
+                                    _fx_size = st.checkbox(
+                                        "幅・高さが0以下の行を除去", value=True,
+                                        key=f"fx_size_{ds.name}")
+                                    _fx_range = st.checkbox(
+                                        "座標が0〜1の範囲外の行を除去", value=True,
+                                        key=f"fx_range_{ds.name}")
+                                with _fx2:
+                                    _fx_tiny = st.checkbox(
+                                        "極小ボックスも除去", value=False,
+                                        key=f"fx_tiny_{ds.name}",
+                                        help="小さな物体を意図的にアノテーションしている場合は"
+                                             "OFF のままにしてください")
+                                    _fx_orphan = st.checkbox(
+                                        "画像が無いラベルを退避", value=False,
+                                        key=f"fx_orphan_{ds.name}")
+
+                                if st.button("🔧 修正を実行", key=f"fx_run_{ds.name}",
+                                             type="primary", use_container_width=True):
+                                    with st.spinner("修正中…"):
+                                        _fx = fix_dataset_labels(
+                                            ds,
+                                            drop_invalid_size=_fx_size,
+                                            drop_out_of_range=_fx_range,
+                                            drop_tiny=_fx_tiny,
+                                            delete_orphan_labels=_fx_orphan,
+                                        )
+                                    if _fx["error"]:
+                                        st.error(f"❌ {_fx['error']}")
+                                    else:
+                                        st.success(
+                                            f"✅ {_fx['files_changed']} ファイルを修正し "
+                                            f"{_fx['lines_removed']} 行を除去しました"
+                                            + (f"／ {_fx['orphans_deleted']} 件の迷子ラベルを退避"
+                                               if _fx["orphans_deleted"] else "")
+                                        )
+                                        if _fx["files_emptied"]:
+                                            st.warning(
+                                                f"⚠ {_fx['files_emptied']} ファイルが空になりました"
+                                                "（その画像は背景画像として扱われます）")
+                                        for _d in _fx["details"][:20]:
+                                            st.caption(f"・{_d}")
+                                        # 修正後の状態で再チェック
+                                        st.session_state[f"qc_{ds.name}"] = \
+                                            check_dataset_quality(ds)
+                                        st.rerun()
+
             with st.expander(f"➕ {ds.name} に画像を追加"):
                 _add_imgs = st.file_uploader(
                     "追加する画像ファイル（複数選択可）",
@@ -4453,7 +5667,7 @@ with tab4:
                 st.session_state.last_model_path = str(_mu_best)
                 st.session_state["mu_pending_current"] = False
                 st.info(f"⭐ 使用中モデルに設定しました: `{_mu_best.relative_to(MODELS_DIR)}`\n\n"
-                        "→ 「🔭 Step3: 推論・評価」タブで推論を実行できます。")
+                        "→ 「🔭 Step4: 推論・評価」タブで推論を実行できます。")
             if st.button("表示をクリア", key="mu_clear_result"):
                 st.session_state["mu_saved_paths"] = []
                 st.rerun()
@@ -4513,6 +5727,19 @@ with tab4:
                             with st.spinner(f"{mp.name} を読み込み中…"):
                                 inspect_model_file(mp)
                             st.rerun()
+
+                    # 評価済みなら最新の mAP を出す（results.csv とは別に、
+                    # 任意データセットで測り直した値）
+                    _evs = read_model_evals(mp)
+                    if _evs:
+                        _latest_key = max(_evs, key=lambda k: _evs[k].get("evaluated_at", ""))
+                        _lv = _evs[_latest_key]
+                        if _lv.get("ok"):
+                            st.caption(
+                                f"📊 評価 `{_latest_key}` — mAP50 {_lv['map50']:.4f} / "
+                                f"mAP50-95 {_lv['map50_95']:.4f}"
+                                + (f"（他 {len(_evs) - 1} 件）" if len(_evs) > 1 else "")
+                            )
 
                     # CVAT 自動アノテーションへのデプロイ状態
                     _run_name = (mp.parent.parent.name
