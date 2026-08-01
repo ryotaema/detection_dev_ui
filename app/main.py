@@ -16,57 +16,14 @@ from typing import Optional
 import streamlit as st
 import streamlit.components.v1 as components
 
-
-@st.cache_resource
-def _get_eval_shared() -> tuple[dict, threading.Lock]:
-    """モデル評価のバックグラウンド実行状態"""
-    return (
-        {"log": [], "running": False, "error": None, "finished": False,
-         "total": 0, "done": 0, "current": "", "results": []},
-        threading.Lock(),
-    )
-
-
-@st.cache_resource
-def _get_deploy_shared() -> tuple[dict, threading.Lock]:
-    """Nuclio デプロイのバックグラウンド実行状態（学習と同じく rerun をまたいで保持する）"""
-    return (
-        {"log": [], "running": False, "error": None, "target": None, "finished": False},
-        threading.Lock(),
-    )
-
-
-@st.cache_resource
-def _get_train_shared() -> tuple[dict, threading.Lock]:
-    """st.rerun() をまたいで同一オブジェクトを保持する共有状態。
-    Streamlit はスクリプトを再実行するたびにモジュール変数を再初期化するため、
-    st.cache_resource でキャッシュして常に同一インスタンスを返す。
-    """
-    return (
-        {"log": [], "progress": 0, "running": False, "error": None, "model_path": None, "metrics_history": []},
-        threading.Lock(),
-    )
-
-# ---------------------------------------------------------------------------
-# 定数・環境変数
-# ---------------------------------------------------------------------------
-DATA_DIR       = Path(os.getenv("DATA_DIR",       "/workspace/data"))
-MODELS_DIR     = Path(os.getenv("MODELS_DIR",     "/workspace/models"))
-PREDICTIONS_DIR      = Path(os.getenv("PREDICTIONS_DIR","/workspace/predictions"))
-PREDICTIONS_VIDEOS_DIR = PREDICTIONS_DIR / "videos"
-SERVERLESS_DIR = Path(os.getenv("SERVERLESS_DIR", "/workspace/serverless"))
-CVAT_NETWORK   = os.getenv("CVAT_NETWORK", "")                          # Nuclio 関数を載せる網
-NUCLIO_WEB     = os.getenv("NUCLIO_DASHBOARD", "http://localhost:8070") # ブラウザ表示用
-CVAT_HOST      = os.getenv("CVAT_HOST",     "http://cvat-server:8080")  # コンテナ内通信用
-CVAT_WEB       = os.getenv("CVAT_WEB_HOST", "http://localhost:8080")    # ブラウザ表示用
-CVAT_USER      = os.getenv("CVAT_USERNAME","admin")
-CVAT_PASS      = os.getenv("CVAT_PASSWORD","admin")
-MLFLOW_URI     = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-MLFLOW_WEB     = os.getenv("MLFLOW_WEB_HOST", "http://localhost:5000")
-FIFTYONE_PORT  = int(os.getenv("FIFTYONE_PORT","5151"))
-
-for d in [DATA_DIR, MODELS_DIR, PREDICTIONS_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+# ロジック層。画面を持たない処理はすべて core/ 側にある
+from core import *  # noqa: F401,F403
+from core import (  # アンダースコア始まりは * で入らないので明示的に取り込む
+    _box_iou, _collect_prediction_items, _deploy_worker, _DOC_AUG, _DOC_TRAIN,
+    _draw_predictions, _eval_worker, _find_image_dirs, _get_deploy_shared,
+    _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
+    _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
+)
 
 USER_THEMES_PATH = MODELS_DIR / ".user_themes.json"
 
@@ -365,11 +322,21 @@ defaults = {
     "last_model_path": None,
     "cvat_tasks": [],
     "cvat_jobs": [],       # ジョブ単位の進捗（タスクの status より細かい）
+    "cvat_export_tasks": [],   # 直近にエクスポートしたタスク（来歴に残す）
     "cvat_xml_info": None,
     "cvat_raw_dir": None,
     "theme_name": "ライト シンプル",
     "reanno_set": set(),   # 再アノテーション要フラグを立てた JSON ファイル名の集合
 }
+# データもモデルも無い＝初回起動とみなし、はじめかたガイドを開いた状態にする
+if "show_onboarding" not in st.session_state:
+    try:
+        _first_run = (not any(DATA_DIR.rglob("data.yaml"))
+                      and not any(MODELS_DIR.rglob("*.pt")))
+    except Exception:
+        _first_run = False
+    defaults["show_onboarding"] = _first_run
+
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -438,2565 +405,6 @@ def _build_theme_vars(t: dict) -> str:
 
 # テーマ変数を注入（デフォルトCSS変数を上書き）
 st.markdown(_build_theme_vars(_get_active_theme()), unsafe_allow_html=True)
-
-# ===========================================================================
-# ヘルパー関数群
-# ===========================================================================
-
-# ---------------------------------------------------------------------------
-# CVAT API クライアント
-# ---------------------------------------------------------------------------
-def get_cvat_client():
-    """cvat-sdk の CvatClient を返す（接続失敗時は None）"""
-    try:
-        from cvat_sdk import make_client
-        client = make_client(
-            host=CVAT_HOST,
-            credentials=(CVAT_USER, CVAT_PASS),
-        )
-        return client
-    except Exception as e:
-        st.error(f"CVAT接続エラー: {e}")
-        return None
-
-
-def fetch_cvat_tasks() -> list[dict]:
-    """CVATのタスク一覧を取得する"""
-    try:
-        client = get_cvat_client()
-        if not client:
-            return []
-        tasks = client.tasks.list()
-        result = []
-        for t in tasks:
-            assignee_name = ""
-            if hasattr(t, "assignee") and t.assignee:
-                assignee_name = getattr(t.assignee, "username", "") or getattr(t.assignee, "email", "")
-            result.append({
-                "id": t.id,
-                "name": t.name,
-                "size": t.size,
-                "status": t.status,
-                "assignee": assignee_name,
-            })
-        return result
-    except Exception as e:
-        st.error(f"CVATタスク取得エラー: {e}")
-        return []
-
-
-def fetch_cvat_jobs() -> list[dict]:
-    """CVAT のジョブ一覧を取得する。
-
-    タスクの `status` は粗い（completed か否か）ため、実際の進捗はジョブ単位で見る。
-    ジョブは stage(annotation→validation→acceptance) と state(new/in progress/completed)
-    を持ち、担当者も「タスクの担当者」ではなくジョブ単位で割り当てられる。
-    """
-    try:
-        client = get_cvat_client()
-        if not client:
-            return []
-
-        # task_id → タスク名 の対応（ジョブ側はタスク名を持たない）
-        task_names: dict[int, str] = {}
-        try:
-            for t in client.tasks.list():
-                task_names[t.id] = t.name
-        except Exception:
-            pass
-
-        rows = []
-        for j in client.jobs.list():
-            assignee = ""
-            _asg = getattr(j, "assignee", None)
-            if _asg:
-                assignee = getattr(_asg, "username", "") or getattr(_asg, "email", "")
-
-            start = getattr(j, "start_frame", 0) or 0
-            stop  = getattr(j, "stop_frame", 0) or 0
-            rows.append({
-                "job_id":    j.id,
-                "task_id":   getattr(j, "task_id", None),
-                "task_name": task_names.get(getattr(j, "task_id", None), ""),
-                "state":     str(getattr(j, "state", "") or ""),
-                "stage":     str(getattr(j, "stage", "") or ""),
-                "type":      str(getattr(j, "type", "") or ""),
-                "assignee":  assignee,
-                "frames":    max(stop - start + 1, 0),
-                "updated":   getattr(j, "updated_date", None),
-            })
-        return rows
-    except Exception as e:
-        st.error(f"CVATジョブ取得エラー: {e}")
-        return []
-
-
-def fetch_cvat_task_labels(task_ids: list[int]) -> dict[str, list[str]]:
-    """複数タスクIDからラベル名リストを返す {タスク名(ID:xx): [label, ...]}"""
-    try:
-        client = get_cvat_client()
-        if not client:
-            return {}
-        result = {}
-        for tid in task_ids:
-            try:
-                task = client.tasks.retrieve(tid)
-                labels = task.get_labels()
-                result[f"{task.name}  (ID: {tid})"] = [lb.name for lb in labels]
-            except Exception as e:
-                st.warning(f"タスクID {tid} のラベル取得失敗: {e}")
-        return result
-    except Exception as e:
-        st.error(f"ラベル取得エラー: {e}")
-        return {}
-
-
-def export_cvat_task_raw(task_id: int, out_dir: Path) -> Optional[Path]:
-    """指定タスクを「CVAT for images 1.1」(XML形式) でエクスポートし、
-    out_dir/raw/ に解凍したパスを返す。
-    CVAT v2.64.0 の非同期エクスポート API (POST→ポーリング→ダウンロード) を使用。
-    """
-    import requests as _requests
-
-    raw_dir  = out_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = out_dir / "cvat_export.zip"
-    session  = _requests.Session()
-
-    try:
-        login = session.post(
-            f"{CVAT_HOST}/api/auth/login",
-            json={"username": CVAT_USER, "password": CVAT_PASS},
-        )
-        login.raise_for_status()
-        token = login.json().get("key")
-        session.headers.update({"Authorization": f"Token {token}"})
-
-        export = session.post(
-            f"{CVAT_HOST}/api/tasks/{task_id}/dataset/export",
-            params={
-                "save_images": "True",
-                "format": "CVAT for images 1.1",
-            },
-        )
-        export.raise_for_status()
-        rq_id = export.json().get("rq_id")
-        if not rq_id:
-            st.error("エクスポートジョブID が取得できませんでした")
-            return None
-
-        result_url = None
-        for _ in range(180):
-            status_resp = session.get(f"{CVAT_HOST}/api/requests/{rq_id}")
-            status_resp.raise_for_status()
-            data = status_resp.json()
-            status = data.get("status")
-            if status == "finished":
-                result_url = data.get("result_url")
-                break
-            elif status == "failed":
-                st.error(f"エクスポートに失敗しました: {data}")
-                return None
-            time.sleep(1)
-        else:
-            st.error("エクスポートがタイムアウトしました（180秒）")
-            return None
-
-        dl = session.get(result_url, stream=True)
-        dl.raise_for_status()
-        with open(zip_path, "wb") as f:
-            for chunk in dl.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(raw_dir)
-        zip_path.unlink()
-        return raw_dir
-
-    except Exception as e:
-        st.error(f"CVATからのエクスポート中にエラーが発生しました: {e}")
-        return None
-
-
-def parse_cvat_xml(raw_dir: Path) -> Optional[dict]:
-    """CVAT for images 1.1 のXMLを解析してメタ情報を返す。
-
-    Returns:
-        {
-          "xml_path": str,
-          "labels": [str, ...],           # タスク定義のラベル一覧
-          "annotation_types": [str, ...], # 実際に使われている種別 (box/polygon/points)
-          "image_count": int,
-          "annotated_count": int,         # 1件以上アノテーション付きの画像数
-        }
-    """
-    import xml.etree.ElementTree as ET
-
-    xml_candidates = list(raw_dir.glob("**/*.xml"))
-    if not xml_candidates:
-        st.error("XMLファイルが見つかりません")
-        return None
-
-    xml_path = xml_candidates[0]
-    try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-
-        # タスク定義のラベル一覧
-        labels: list[str] = []
-        for lbl in root.findall(".//meta/task/labels/label"):
-            name = lbl.find("name")
-            if name is not None and name.text:
-                labels.append(name.text.strip())
-
-        # 画像・アノテーション統計
-        annotation_types: set[str] = set()
-        image_count = 0
-        annotated_count = 0
-        for img in root.findall("image"):
-            image_count += 1
-            has_annot = False
-            for child in img:
-                if child.tag in ("box", "polygon", "polyline", "points", "ellipse"):
-                    annotation_types.add(child.tag)
-                    has_annot = True
-            if has_annot:
-                annotated_count += 1
-
-        return {
-            "xml_path": str(xml_path),
-            "labels": labels,
-            "annotation_types": sorted(annotation_types),
-            "image_count": image_count,
-            "annotated_count": annotated_count,
-        }
-    except Exception as e:
-        st.error(f"XML解析エラー: {e}")
-        return None
-
-
-def generate_yolo_dataset(
-    raw_dir: Path,
-    xml_info: dict,
-    selected_labels: list[str],
-    task_type: str,
-    out_dir: Path,
-    val_ratio: float = 0.2,
-) -> Optional[Path]:
-    """選択ラベル × タスク種別で YOLO 形式データセットを生成する。
-
-    - 画像は raw_dir 内から探してシンボリックリンクを張る（大容量でもコピー不要）
-    - train/val は annotated サンプルを 80/20 でランダム分割
-    - data.yaml は絶対パス + names リスト形式で生成
-    """
-    import xml.etree.ElementTree as ET
-    import random
-    import yaml
-
-    label2id = {lbl: i for i, lbl in enumerate(selected_labels)}
-    xml_path = Path(xml_info["xml_path"])
-
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-
-    # 画像ディレクトリを探す（ZIPの構造に依存するため複数候補）
-    img_roots: list[Path] = []
-    for d in raw_dir.rglob("*"):
-        if d.is_dir() and d.name in ("images", "train", "val"):
-            img_roots.append(d)
-    if not img_roots:
-        img_roots = [raw_dir]
-
-    def _find_image(name: str) -> Optional[Path]:
-        for base in img_roots:
-            p = base / name
-            if p.exists():
-                return p
-        for p in raw_dir.rglob(Path(name).name):
-            if p.is_file():
-                return p
-        return None
-
-    def _box_to_detect(box, w: int, h: int) -> str:
-        xtl, ytl = float(box.get("xtl", 0)), float(box.get("ytl", 0))
-        xbr, ybr = float(box.get("xbr", 0)), float(box.get("ybr", 0))
-        cx = (xtl + xbr) / 2 / w
-        cy = (ytl + ybr) / 2 / h
-        bw = (xbr - xtl) / w
-        bh = (ybr - ytl) / h
-        return f"{cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
-
-    def _polygon_to_segment(polygon, w: int, h: int) -> str:
-        pts = []
-        for pt in polygon.get("points", "").split(";"):
-            pt = pt.strip()
-            if "," in pt:
-                x, y = pt.split(",")
-                pts.append(f"{float(x)/w:.6f} {float(y)/h:.6f}")
-        return " ".join(pts)
-
-    samples: list[dict] = []
-    for img_elem in root.findall("image"):
-        img_name = img_elem.get("name", "")
-        w = int(img_elem.get("width", 1))
-        h = int(img_elem.get("height", 1))
-        lines: list[str] = []
-
-        if task_type == "detect":
-            for box in img_elem.findall("box"):
-                lbl = box.get("label", "")
-                if lbl not in label2id:
-                    continue
-                lines.append(f"{label2id[lbl]} {_box_to_detect(box, w, h)}")
-
-        elif task_type == "segment":
-            for polygon in img_elem.findall("polygon"):
-                lbl = polygon.get("label", "")
-                if lbl not in label2id:
-                    continue
-                seg = _polygon_to_segment(polygon, w, h)
-                if seg:
-                    lines.append(f"{label2id[lbl]} {seg}")
-            for box in img_elem.findall("box"):
-                lbl = box.get("label", "")
-                if lbl not in label2id:
-                    continue
-                xtl, ytl = float(box.get("xtl", 0)), float(box.get("ytl", 0))
-                xbr, ybr = float(box.get("xbr", 0)), float(box.get("ybr", 0))
-                pts = " ".join([
-                    f"{xtl/w:.6f} {ytl/h:.6f}",
-                    f"{xbr/w:.6f} {ytl/h:.6f}",
-                    f"{xbr/w:.6f} {ybr/h:.6f}",
-                    f"{xtl/w:.6f} {ybr/h:.6f}",
-                ])
-                lines.append(f"{label2id[lbl]} {pts}")
-
-        elif task_type == "pose":
-            for box in img_elem.findall("box"):
-                lbl = box.get("label", "")
-                if lbl not in label2id:
-                    continue
-                lines.append(f"{label2id[lbl]} {_box_to_detect(box, w, h)}")
-
-        if lines:
-            samples.append({"name": img_name, "lines": lines})
-
-    if not samples:
-        st.error("選択したラベルにマッチするアノテーションがありません")
-        return None
-
-    random.shuffle(samples)
-    split = max(1, int(len(samples) * (1 - val_ratio)))
-    splits = {"train": samples[:split], "val": samples[split:]}
-
-    for sp in ("train", "val"):
-        (out_dir / "images" / sp).mkdir(parents=True, exist_ok=True)
-        (out_dir / "labels" / sp).mkdir(parents=True, exist_ok=True)
-
-    for sp, sp_samples in splits.items():
-        for s in sp_samples:
-            img_src = _find_image(s["name"])
-            if img_src is None:
-                continue
-            stem = Path(s["name"]).stem
-            img_dst = out_dir / "images" / sp / img_src.name
-            lbl_dst = out_dir / "labels" / sp / f"{stem}.txt"
-            if not img_dst.exists():
-                try:
-                    img_dst.symlink_to(img_src.resolve())
-                except Exception:
-                    import shutil
-                    shutil.copy2(img_src, img_dst)
-            with open(lbl_dst, "w") as f:
-                f.write("\n".join(s["lines"]))
-
-    cfg = {
-        "path": str(out_dir.resolve()),
-        "train": "images/train",
-        "val": "images/val",
-        "nc": len(selected_labels),
-        "names": selected_labels,
-    }
-    with open(out_dir / "data.yaml", "w") as f:
-        yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
-
-    return out_dir
-
-
-# ---------------------------------------------------------------------------
-# MLflow 設定
-# ---------------------------------------------------------------------------
-def init_mlflow(project_name: str, run_name: str) -> bool:
-    """MLflow サーバーへの接続確認と環境変数設定。
-    Ultralytics の MLflow コールバックが自動でメトリクス・モデルを記録する。
-    """
-    try:
-        import mlflow
-        mlflow.set_tracking_uri(MLFLOW_URI)
-        mlflow.tracking.MlflowClient().search_experiments()  # 接続テスト
-        os.environ["MLFLOW_TRACKING_URI"]   = MLFLOW_URI
-        os.environ["MLFLOW_EXPERIMENT_NAME"] = project_name
-        os.environ["MLFLOW_RUN"]             = run_name
-        print(f"[MLflow] 接続OK: {MLFLOW_URI} / {project_name} / {run_name}")
-        return True
-    except Exception as e:
-        print(f"[MLflow] 接続エラー（実験追跡なし）: {e}")
-        return False
-
-
-# ---------------------------------------------------------------------------
-# YOLO 学習ワーカー (別スレッドで実行)
-# ---------------------------------------------------------------------------
-
-class _StdoutCapture:
-    """sys.stdout を乗っ取り、YOLO の print 出力を _train_state["log"] に転送する。
-    元の stdout にも同時に書くので docker logs でも確認できる。
-    """
-    def __init__(self, original, lock: threading.Lock, state: dict) -> None:
-        self._orig  = original
-        self._lock  = lock
-        self._state = state
-        self._buf   = ""
-
-    def write(self, text: str) -> int:
-        self._orig.write(text)
-        self._buf += text
-        # 改行単位で確定させる
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            line = line.rstrip()
-            if line:
-                with self._lock:
-                    self._state["log"].append(line)
-        return len(text)
-
-    def flush(self) -> None:
-        self._orig.flush()
-
-    def fileno(self) -> int:
-        return self._orig.fileno()
-
-
-def _train_worker(
-    data_yaml: str,
-    model_name: str,
-    epochs: int,
-    batch_size: int,
-    project_name: str,
-    run_name: str,
-    train_kwargs: dict,
-):
-    """バックグラウンドスレッドで YOLO 学習を実行する。
-    sys.stdout を _StdoutCapture に差し替えて全 print 出力を UI に転送する。
-    st.session_state はスレッド外から参照不可のため、_train_state 経由で通信する。
-    train_kwargs は model.train() に **kwargs として渡す追加パラメータ。
-    """
-    import sys
-
-    def _log(msg: str) -> None:
-        with _train_log_lock:
-            _train_state["log"].append(msg)
-
-    def _on_epoch_end(trainer) -> None:
-        cur   = trainer.epoch + 1
-        total = trainer.epochs
-        with _train_log_lock:
-            _train_state["progress"] = int(cur / total * 95)
-
-    def _on_fit_epoch_end(trainer) -> None:
-        row: dict = {"epoch": trainer.epoch + 1}
-        if hasattr(trainer, "metrics") and trainer.metrics:
-            for k, v in trainer.metrics.items():
-                try:
-                    row[k] = float(v)
-                except (TypeError, ValueError):
-                    pass
-        with _train_log_lock:
-            _train_state["metrics_history"].append(row)
-
-    _orig_stdout = sys.stdout
-    sys.stdout   = _StdoutCapture(_orig_stdout, _train_log_lock, _train_state)
-
-    try:
-        mlflow_ok = init_mlflow(project_name, run_name)
-        if mlflow_ok:
-            _log(f"[MLflow] 実験追跡: {project_name} / {run_name}")
-        else:
-            _log("[MLflow] スキップ（実験追跡なし）")
-
-        from ultralytics import YOLO
-
-        model = YOLO(model_name)
-        model.add_callback("on_train_epoch_end", _on_epoch_end)
-        model.add_callback("on_fit_epoch_end", _on_fit_epoch_end)
-
-        results = model.train(
-            data=data_yaml,
-            epochs=epochs,
-            batch=batch_size,
-            project=str(MODELS_DIR),
-            name=run_name,
-            exist_ok=True,
-            **train_kwargs,
-        )
-
-        best_model = Path(results.save_dir) / "weights" / "best.pt"
-        with _train_log_lock:
-            _train_state["model_path"] = str(best_model)
-            _train_state["progress"]   = 100
-        _log(f"[完了] best.pt: {best_model}")
-
-        if mlflow_ok:
-            try:
-                import mlflow
-                # Ultralytics callback がすでに run を close している場合に備えて、
-                # 最後の run を取得して model を登録する
-                runs = mlflow.search_runs(
-                    experiment_names=[project_name],
-                    filter_string=f"tags.mlflow.runName = '{run_name}'",
-                    max_results=1,
-                )
-                if not runs.empty:
-                    run_id = runs.iloc[0]["run_id"]
-                    mv = mlflow.register_model(
-                        f"runs:/{run_id}/weights",
-                        project_name,
-                    )
-                    _log(f"[MLflow] モデル登録: {project_name} v{mv.version}")
-            except Exception as e:
-                _log(f"[MLflow] モデル登録スキップ: {e}")
-
-    except Exception as e:
-        _log(f"[ERROR] {e}")
-        with _train_log_lock:
-            _train_state["error"] = str(e)
-
-    finally:
-        sys.stdout = _orig_stdout
-        with _train_log_lock:
-            _train_state["running"] = False
-
-
-# ---------------------------------------------------------------------------
-# 画像ディレクトリスキャン
-# ---------------------------------------------------------------------------
-def _find_image_dirs(base_dir: Path, max_depth: int = 4) -> list[Path]:
-    """base_dir 以下で画像ファイルが1件以上あるディレクトリを返す。
-    シンボリックリンク先も辿る。深さは max_depth で制限。
-    """
-    img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-    result: list[Path] = []
-    base_depth = len(base_dir.parts)
-    for root, dirs, files in os.walk(str(base_dir), followlinks=True):
-        root_path = Path(root)
-        if len(root_path.parts) - base_depth > max_depth:
-            dirs.clear()
-            continue
-        dirs.sort()
-        if any(Path(f).suffix.lower() in img_exts for f in files):
-            result.append(root_path)
-    return result
-
-
-# ---------------------------------------------------------------------------
-# FiftyOne セッション管理
-# ---------------------------------------------------------------------------
-def launch_fiftyone(dataset_name: str, predictions_dir: Path) -> Optional[int]:
-    """
-    FiftyOne データセットを作成し、Appを起動してポート番号を返す。
-    既存のセッションがあれば再利用。
-
-    Fix: remote=True → remote=False, address="0.0.0.0"
-        コンテナ内で 0.0.0.0:5151 でListenさせてホストブラウザからアクセス可能にする。
-    """
-    try:
-        import fiftyone as fo
-
-        # 既存データセットをリセット
-        if fo.dataset_exists(dataset_name):
-            fo.delete_dataset(dataset_name)
-
-        dataset = fo.Dataset(name=dataset_name)
-
-        # predictions_dir の JSON ファイルを読み込んでサンプル追加
-        json_files = list(predictions_dir.glob("*.json"))
-        if not json_files:
-            st.warning("predictions/ に結果JSONがありません。先に推論を実行してください。")
-            return None
-
-        samples = []
-        for jf in json_files:
-            with open(jf) as f:
-                pred = json.load(f)
-
-            img_path = pred.get("image_path", "")
-            detections = []
-            for box in pred.get("boxes", []):
-                detections.append(
-                    fo.Detection(
-                        label=box["label"],
-                        bounding_box=box["bbox_xywhn"],  # [x, y, w, h] 正規化済
-                        confidence=box.get("confidence", 1.0),
-                    )
-                )
-            sample = fo.Sample(filepath=img_path)
-            sample["predictions"] = fo.Detections(detections=detections)
-            samples.append(sample)
-
-        dataset.add_samples(samples)
-
-        # 既存セッションを閉じる
-        if st.session_state.fiftyone_session:
-            try:
-                st.session_state.fiftyone_session.close()
-            except Exception:
-                pass
-
-        # Fix: remote=False, address="0.0.0.0" でコンテナ外から直接アクセス可能に
-        session = fo.launch_app(
-            dataset,
-            port=FIFTYONE_PORT,
-            address="0.0.0.0",
-            remote=False,
-        )
-        st.session_state.fiftyone_session = session
-        st.session_state.fiftyone_port = FIFTYONE_PORT
-        return FIFTYONE_PORT
-
-    except Exception as e:
-        st.error(f"FiftyOne エラー: {e}")
-        return None
-
-
-# ---------------------------------------------------------------------------
-# 推論結果プレビュー描画
-# ---------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def _draw_predictions(json_path: Path):
-    """JSONを読み込みバウンディングボックスを描画した RGB 画像配列を返す。失敗時は None。"""
-    import cv2
-
-    _COLORS = [
-        (78, 207, 244), (244, 168, 78), (126, 207, 78),
-        (207, 78, 126), (168, 78, 244), (78, 168, 207),
-    ]
-    try:
-        with open(json_path) as f:
-            pred = json.load(f)
-        img_path = pred.get("image_path", "")
-        if not img_path or not Path(img_path).exists():
-            return None
-        img = cv2.imread(img_path)
-        if img is None:
-            return None
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        boxes = pred.get("boxes", [])
-        label_set = list(dict.fromkeys(b["label"] for b in boxes))
-        for box in boxes:
-            xyxy = box.get("bbox_xyxy", [])
-            if len(xyxy) != 4:
-                continue
-            x1, y1, x2, y2 = [int(v) for v in xyxy]
-            label = box["label"]
-            conf  = box.get("confidence", 0.0)
-            color = _COLORS[label_set.index(label) % len(_COLORS)]
-            # セグメンテーション結果があれば輪郭を重ねて塗る
-            _mxy = box.get("mask_xy")
-            if _mxy and len(_mxy) >= 3:
-                import numpy as _np_seg
-                _pts = _np_seg.array(_mxy, dtype=_np_seg.int32).reshape(-1, 1, 2)
-                _overlay = img.copy()
-                cv2.fillPoly(_overlay, [_pts], color)
-                cv2.addWeighted(_overlay, 0.35, img, 0.65, 0, img)
-                cv2.polylines(img, [_pts], True, color, 2)
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-            text = f"{label} {conf:.2f}"
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(img, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(img, text, (x1 + 2, y1 - 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        return img, len(boxes), json_path.stem
-    except Exception:
-        return None
-
-
-def export_prediction_images(
-    out_dir: Path,
-    img_format: str = "PNG",
-    quality: int = 95,
-    target_files: Optional[list[Path]] = None,
-    progress_cb=None,
-) -> tuple[int, int]:
-    """predictions/*.json を描画済み画像として out_dir に書き出す。
-    target_files が None のときは predictions/ の全 JSON を対象とする。
-    progress_cb(current, total, filename) を渡すと処理ごとに呼ばれる。
-    Returns (成功数, スキップ数)
-    """
-    from PIL import Image as PILImage
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ext = ".jpg" if img_format == "JPEG" else ".png"
-    json_files = target_files if target_files else sorted(PREDICTIONS_DIR.glob("*.json"))
-    total = len(json_files)
-    success = 0
-    skipped = 0
-    for i, jf in enumerate(json_files):
-        if progress_cb:
-            progress_cb(i, total, jf.name)
-        result = _draw_predictions(jf)
-        if result is None:
-            skipped += 1
-            continue
-        img_arr, _, stem = result
-        out_path = out_dir / f"{stem}{ext}"
-        pil_img = PILImage.fromarray(img_arr)
-        if img_format == "JPEG":
-            pil_img.save(out_path, "JPEG", quality=quality)
-        else:
-            pil_img.save(out_path, "PNG")
-        success += 1
-    return success, skipped
-
-
-# ---------------------------------------------------------------------------
-# 再アノテーション用 ZIP 生成
-# ---------------------------------------------------------------------------
-def build_reannotation_zip(json_paths: list[Path]) -> tuple[bytes, int, int]:
-    """フラグ済み predictions JSON から CVAT for images 1.1 XML + YOLO txt + 元画像を
-    まとめた ZIP バイト列を返す。
-    Returns: (zip_bytes, 成功数, スキップ数)
-    """
-    import io as _io
-    import xml.etree.ElementTree as ET
-    import cv2
-
-    success, skipped = 0, 0
-
-    # ── 全JSONからクラス名を収集してインデックスを確定 ──────────────────────
-    all_labels: list[str] = []
-    pred_cache: dict[str, dict] = {}
-    for jf in json_paths:
-        try:
-            with open(jf) as f:
-                pred = json.load(f)
-            pred_cache[str(jf)] = pred
-            for b in pred.get("boxes", []):
-                lbl = b.get("label", "")
-                if lbl and lbl not in all_labels:
-                    all_labels.append(lbl)
-        except Exception:
-            pass
-    label2id = {lbl: i for i, lbl in enumerate(all_labels)}
-
-    # ── CVAT for images 1.1 XML ルート構築 ──────────────────────────────────
-    root_el = ET.Element("annotations")
-    ET.SubElement(root_el, "version").text = "1.1"
-    meta_el = ET.SubElement(root_el, "meta")
-    task_el = ET.SubElement(meta_el, "task")
-    labels_el = ET.SubElement(task_el, "labels")
-    for lbl in all_labels:
-        lbl_el = ET.SubElement(labels_el, "label")
-        ET.SubElement(lbl_el, "name").text = lbl
-        ET.SubElement(lbl_el, "attributes")
-
-    zip_buf = _io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-
-        for img_id, jf in enumerate(json_paths):
-            pred = pred_cache.get(str(jf))
-            if pred is None:
-                skipped += 1
-                continue
-
-            orig_path = Path(pred.get("image_path", ""))
-            if not orig_path.exists():
-                skipped += 1
-                continue
-
-            # 画像サイズ取得
-            img_cv = cv2.imread(str(orig_path))
-            if img_cv is None:
-                skipped += 1
-                continue
-            img_h, img_w = img_cv.shape[:2]
-
-            fname = orig_path.name
-            boxes = pred.get("boxes", [])
-
-            # ── 元画像をそのまま images/ に追加 ─────────────────────────────
-            zf.write(orig_path, f"images/{fname}")
-
-            # ── YOLO txt ラベルファイル ──────────────────────────────────────
-            txt_lines: list[str] = []
-            for b in boxes:
-                lbl = b.get("label", "")
-                if lbl not in label2id:
-                    continue
-                cls_id = label2id[lbl]
-                xywhn = b.get("bbox_xywhn")
-                if xywhn and len(xywhn) == 4:
-                    cx, cy, bw, bh = xywhn
-                else:
-                    # bbox_xywhn がない場合（動画推論など）は xyxy から計算
-                    xyxy = b.get("bbox_xyxy", [])
-                    if len(xyxy) != 4:
-                        continue
-                    x1, y1, x2, y2 = xyxy
-                    cx = (x1 + x2) / 2 / img_w
-                    cy = (y1 + y2) / 2 / img_h
-                    bw = (x2 - x1) / img_w
-                    bh = (y2 - y1) / img_h
-                txt_lines.append(f"{cls_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
-            stem = Path(fname).stem
-            zf.writestr(f"labels/{stem}.txt", "\n".join(txt_lines))
-
-            # ── CVAT XML の <image> 要素 ──────────────────────────────────────
-            img_el = ET.SubElement(root_el, "image",
-                                   id=str(img_id), name=fname,
-                                   width=str(img_w), height=str(img_h))
-            for b in boxes:
-                lbl = b.get("label", "")
-                xyxy = b.get("bbox_xyxy", [])
-                if len(xyxy) != 4 or lbl not in label2id:
-                    continue
-                x1, y1, x2, y2 = xyxy
-                box_el = ET.SubElement(img_el, "box",
-                                       label=lbl,
-                                       xtl=f"{x1:.2f}", ytl=f"{y1:.2f}",
-                                       xbr=f"{x2:.2f}", ybr=f"{y2:.2f}",
-                                       occluded="0")
-                conf = b.get("confidence")
-                if conf is not None:
-                    attr_el = ET.SubElement(box_el, "attribute", name="confidence")
-                    attr_el.text = f"{conf:.4f}"
-
-            success += 1
-
-        # ── classes.txt ─────────────────────────────────────────────────────
-        zf.writestr("classes.txt", "\n".join(all_labels))
-
-        # ── annotations.xml ─────────────────────────────────────────────────
-        ET.indent(root_el)
-        xml_str = ET.tostring(root_el, encoding="unicode", xml_declaration=False)
-        xml_str = '<?xml version="1.0" encoding="utf-8"?>\n' + xml_str
-        zf.writestr("annotations.xml", xml_str)
-
-    zip_buf.seek(0)
-    return zip_buf.getvalue(), success, skipped
-
-
-# ---------------------------------------------------------------------------
-# モデルファイル (.pt) のメタ情報
-# ---------------------------------------------------------------------------
-def model_meta_path(model_path: Path) -> Path:
-    """`weights/best.pt` に対する `weights/.best.pt.meta.json` を返す（rglob('*.pt') に載らない名前）"""
-    return model_path.parent / f".{model_path.name}.meta.json"
-
-
-def read_model_meta(model_path: Path) -> Optional[dict]:
-    """保存済みメタ情報を読む。存在しない/壊れている場合は None"""
-    mp = model_meta_path(model_path)
-    if not mp.exists():
-        return None
-    try:
-        with open(mp) as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def inspect_model_file(model_path: Path, save: bool = True) -> dict:
-    """.pt を実際に読み込んでクラス名などを取得する。
-    この環境の ultralytics で読めるか（バージョン互換）の検証も兼ねる。
-    """
-    info: dict = {
-        "ok": False, "error": None, "names": [], "task": None,
-        "ultralytics_version": None, "trained_at": None,
-        "imgsz": None, "epochs": None, "base_model": None,
-        "inspected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-    # ckpt 側のメタ（学習時の情報）。読めなくても致命的ではない
-    try:
-        import torch
-        ckpt = torch.load(str(model_path), map_location="cpu", weights_only=False)
-        if isinstance(ckpt, dict):
-            info["ultralytics_version"] = ckpt.get("version")
-            info["trained_at"] = ckpt.get("date")
-            targs = ckpt.get("train_args") or {}
-            if isinstance(targs, dict):
-                info["imgsz"]      = targs.get("imgsz")
-                info["epochs"]     = targs.get("epochs")
-                info["base_model"] = targs.get("model")
-    except Exception:
-        pass
-
-    # YOLO として読めるか（ここが通れば推論可能）
-    try:
-        from ultralytics import YOLO
-
-        model = YOLO(str(model_path))
-        names = getattr(model, "names", None) or {}
-        if isinstance(names, dict):
-            info["names"] = [names[k] for k in sorted(names)]
-        else:
-            info["names"] = list(names)
-        info["task"] = getattr(model, "task", None)
-        info["ok"] = True
-    except Exception as e:
-        info["error"] = f"{type(e).__name__}: {e}"
-
-    if save:
-        try:
-            with open(model_meta_path(model_path), "w") as f:
-                json.dump(info, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-    return info
-
-
-# ---------------------------------------------------------------------------
-# データセット品質チェック
-#
-#   外部から持ち込んだデータや、複数人で分担したアノテーションほど
-#   「画像とラベルの対応漏れ」「座標の壊れ」「クラス分布の偏り」が起きやすい。
-#   学習を回す前に機械的に検査する。
-# ---------------------------------------------------------------------------
-IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
-
-
-def check_dataset_quality(dataset_dir: Path, tiny_area: float = 0.0005) -> dict:
-    """YOLO 形式データセットの整合性を検査する。
-
-    Returns: {
-      "classes": [...], "splits": {split: {...}}, "class_counts": {name: n},
-      "issues": [{"severity","kind","path","detail"}], "n_issues": int,
-    }
-    """
-    res: dict = {
-        "dataset": dataset_dir.name,
-        "classes": [],
-        "splits": {},
-        "class_counts": {},
-        "issues": [],          # 詳細（種別ごとに ISSUE_CAP 件まで）
-        "issue_counts": {},    # 種別ごとの総数
-        "n_issues": 0,
-        "error": None,
-    }
-
-    # 同じ種別の指摘が数千件出ると読めなくなるため、詳細は種別ごとに打ち切る
-    ISSUE_CAP = 20
-    _kind_counts: dict[str, int] = {}
-    _kind_sev: dict[str, str] = {}
-
-    def _issue(sev: str, kind: str, path: str, detail: str) -> None:
-        n = _kind_counts.get(kind, 0) + 1
-        _kind_counts[kind] = n
-        _kind_sev.setdefault(kind, sev)
-        if sev == "error":
-            _kind_sev[kind] = "error"
-        if n <= ISSUE_CAP:
-            res["issues"].append({"severity": sev, "kind": kind, "path": path, "detail": detail})
-
-    # data.yaml からクラス名を読む（無くても検査は続行する）
-    yaml_path = next(iter(sorted(dataset_dir.rglob("data.yaml"))), None)
-    if yaml_path:
-        try:
-            import yaml as _yml
-            names = (_yml.safe_load(yaml_path.read_text()) or {}).get("names")
-            if isinstance(names, dict):
-                res["classes"] = [names[k] for k in sorted(names)]
-            elif isinstance(names, list):
-                res["classes"] = list(names)
-        except Exception as e:
-            _issue("warn", "data.yaml", str(yaml_path), f"読み込めません: {e}")
-    else:
-        _issue("warn", "data.yaml", str(dataset_dir), "data.yaml が見つかりません")
-
-    n_classes = len(res["classes"])
-    counts: dict[str, int] = {}
-
-    img_root = dataset_dir / "images"
-    lbl_root = dataset_dir / "labels"
-    if not img_root.exists():
-        res["error"] = (
-            "images/ ディレクトリがありません。YOLO 形式ではありません"
-            "（CVAT の raw エクスポートのままの可能性があります。"
-            "Step2: データ取込 の「データセット生成」で YOLO 形式に変換してください）"
-        )
-        return res
-
-    splits = sorted([d.name for d in img_root.iterdir() if d.is_dir()])
-    for sp in splits:
-        img_dir, lbl_dir = img_root / sp, lbl_root / sp
-        images = sorted(p for p in img_dir.iterdir()
-                        if p.is_file() and p.suffix.lower() in IMG_EXTS)
-
-        # labels/<split>/ 自体が無い場合は画像1枚ずつ警告しても意味がないので集約する
-        if not lbl_dir.exists():
-            _issue("error", "labelsディレクトリ無し", f"labels/{sp}",
-                   f"images/{sp}/ に {len(images)} 枚ありますが labels/{sp}/ がありません"
-                   "（アノテーション未取込のため、このままでは学習できません）")
-            res["splits"][sp] = {"images": len(images), "labels": 0, "missing_label": len(images),
-                                 "orphan_label": 0, "empty_label": 0, "boxes": 0}
-            continue
-
-        labels = sorted(p for p in lbl_dir.glob("*.txt"))
-
-        img_stems = {p.stem for p in images}
-        lbl_stems = {p.stem for p in labels}
-
-        stat = {
-            "images": len(images), "labels": len(labels),
-            "missing_label": 0, "orphan_label": 0, "empty_label": 0, "boxes": 0,
-        }
-
-        # 画像はあるがラベルが無い = 未アノテーション（背景画像として意図的な場合もある）
-        for stem in sorted(img_stems - lbl_stems):
-            stat["missing_label"] += 1
-            _issue("warn", "ラベル無し画像", f"{sp}/{stem}",
-                   "対応する .txt がありません（未アノテーション、または背景画像）")
-
-        # ラベルはあるが画像が無い = 学習に使われない迷子ファイル
-        for stem in sorted(lbl_stems - img_stems):
-            stat["orphan_label"] += 1
-            _issue("error", "画像無しラベル", f"{sp}/{stem}.txt",
-                   "対応する画像がありません（このラベルは学習に使われません）")
-
-        for lp in labels:
-            try:
-                lines = [l.strip() for l in lp.read_text().splitlines() if l.strip()]
-            except Exception as e:
-                _issue("error", "読み込み失敗", f"{sp}/{lp.name}", str(e))
-                continue
-
-            if not lines:
-                stat["empty_label"] += 1
-                continue
-
-            for ln_no, line in enumerate(lines, 1):
-                parts = line.split()
-                if len(parts) < 5:
-                    _issue("error", "行フォーマット", f"{sp}/{lp.name}:{ln_no}",
-                           f"フィールド数が不足しています ({len(parts)})")
-                    continue
-                try:
-                    cls_id = int(float(parts[0]))
-                    coords = [float(v) for v in parts[1:]]
-                except ValueError:
-                    _issue("error", "数値変換", f"{sp}/{lp.name}:{ln_no}",
-                           "数値として解釈できない値があります")
-                    continue
-
-                stat["boxes"] += 1
-                cls_name = (res["classes"][cls_id]
-                            if 0 <= cls_id < n_classes else f"id={cls_id}")
-                counts[cls_name] = counts.get(cls_name, 0) + 1
-
-                if n_classes and not (0 <= cls_id < n_classes):
-                    _issue("error", "クラスID範囲外", f"{sp}/{lp.name}:{ln_no}",
-                           f"クラスID {cls_id} は data.yaml の {n_classes} クラスの範囲外です")
-
-                if any(c < -1e-6 or c > 1 + 1e-6 for c in coords):
-                    _issue("error", "座標範囲外", f"{sp}/{lp.name}:{ln_no}",
-                           "正規化座標が 0〜1 の範囲を超えています")
-
-                # detect 形式 (cx cy w h) のみ面積を検査する
-                if len(coords) == 4:
-                    bw, bh = coords[2], coords[3]
-                    if bw <= 0 or bh <= 0:
-                        _issue("error", "サイズ不正", f"{sp}/{lp.name}:{ln_no}",
-                               f"幅または高さが 0 以下です (w={bw:.4f}, h={bh:.4f})")
-                    elif bw * bh < tiny_area:
-                        _issue("warn", "極小ボックス", f"{sp}/{lp.name}:{ln_no}",
-                               f"面積比 {bw * bh:.5f} — ノイズの可能性があります")
-
-        res["splits"][sp] = stat
-
-    res["class_counts"] = counts
-
-    # クラス分布の偏り（最多と最少で 20 倍以上開いていたら警告）
-    if len(counts) >= 2:
-        mx, mn = max(counts.values()), min(counts.values())
-        if mn > 0 and mx / mn >= 20:
-            _issue("warn", "クラス分布の偏り", res["dataset"],
-                   f"最多 {mx} 件 / 最少 {mn} 件 — 少数クラスの精度が出ない可能性があります")
-
-    # train/val のどちらかが欠けている
-    if "train" in res["splits"] and "val" not in res["splits"]:
-        _issue("warn", "スプリット", res["dataset"], "val がありません（評価ができません）")
-
-    res["issue_counts"] = {
-        k: {"count": v, "severity": _kind_sev.get(k, "warn")} for k, v in _kind_counts.items()
-    }
-    res["n_issues"] = sum(_kind_counts.values())
-    res["n_errors"] = sum(v for k, v in _kind_counts.items() if _kind_sev.get(k) == "error")
-    return res
-
-
-def dataset_size_bytes(dataset_dir: Path, labels_only: bool = False) -> int:
-    """データセットの概算サイズ（ZIP 生成前の警告用）"""
-    total = 0
-    for p in dataset_dir.rglob("*"):
-        if not p.is_file() or p.name.endswith(".bak"):
-            continue
-        if labels_only and p.suffix.lower() in IMG_EXTS:
-            continue
-        total += p.stat().st_size
-    return total
-
-
-def build_dataset_zip(dataset_dir: Path, out_path: Path,
-                      labels_only: bool = False) -> tuple[bool, str, int]:
-    """データセットを ZIP に固めてディスクへ書き出す。
-
-    画像を含めると数 GB になりうるためメモリ上には載せず、
-    一時ファイル経由で st.download_button に渡す。
-    Returns: (成功, メッセージ, ファイル数)
-    """
-    try:
-        n = 0
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for p in sorted(dataset_dir.rglob("*")):
-                if not p.is_file() or p.name.endswith(".bak"):
-                    continue
-                if labels_only and p.suffix.lower() in IMG_EXTS:
-                    continue
-                zf.write(p, arcname=str(p.relative_to(dataset_dir)))
-                n += 1
-        return True, str(out_path), n
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}", 0
-
-
-def build_model_bundle_zip(model_path: Path, out_path: Path) -> tuple[bool, str, int]:
-    """モデル一式（重み + 学習ログ + 評価結果 + プロット）を ZIP にまとめる。
-
-    他の PC へ持ち出したとき、`models/<run>/weights/best.pt` の構造のまま
-    展開できるようにする（このUIの取込・デプロイがその構造を前提にするため）。
-    """
-    try:
-        run_dir = model_path.parent.parent if model_path.parent.name == "weights" \
-            else model_path.parent
-        n = 0
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            zf.write(model_path, arcname=f"weights/{model_path.name}")
-            n += 1
-            for p in sorted(run_dir.rglob("*")):
-                if not p.is_file() or p == model_path:
-                    continue
-                # 他の重み（last.pt 等）は除き、記録類とメタ情報だけ入れる
-                if p.suffix == ".pt":
-                    continue
-                zf.write(p, arcname=str(p.relative_to(run_dir)))
-                n += 1
-        return True, str(out_path), n
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}", 0
-
-
-def fix_dataset_labels(
-    dataset_dir: Path,
-    drop_invalid_size: bool = True,
-    drop_out_of_range: bool = True,
-    drop_tiny: bool = False,
-    delete_orphan_labels: bool = False,
-    tiny_area: float = 0.0005,
-) -> dict:
-    """品質チェックで見つかった壊れたラベルを修正する。
-
-    書き換える .txt は同じディレクトリに `<name>.txt.bak` としてバックアップしてから
-    上書きする（元に戻せるようにするため）。
-    """
-    res = {"files_changed": 0, "lines_removed": 0, "files_emptied": 0,
-           "orphans_deleted": 0, "backup_suffix": ".bak", "details": [], "error": None}
-
-    img_root, lbl_root = dataset_dir / "images", dataset_dir / "labels"
-    if not lbl_root.exists():
-        res["error"] = "labels/ ディレクトリがありません"
-        return res
-
-    for lbl_dir in sorted(p for p in lbl_root.iterdir() if p.is_dir()):
-        sp = lbl_dir.name
-        img_dir = img_root / sp
-        img_stems = ({p.stem for p in img_dir.iterdir()
-                      if p.is_file() and p.suffix.lower() in IMG_EXTS}
-                     if img_dir.exists() else set())
-
-        for lp in sorted(lbl_dir.glob("*.txt")):
-            # 画像が存在しないラベルの削除
-            if delete_orphan_labels and img_stems and lp.stem not in img_stems:
-                lp.rename(lp.with_suffix(".txt.bak"))
-                res["orphans_deleted"] += 1
-                res["details"].append(f"{sp}/{lp.name}: 画像が無いため退避")
-                continue
-
-            try:
-                lines = lp.read_text().splitlines()
-            except Exception:
-                continue
-
-            kept, removed = [], 0
-            for line in lines:
-                s = line.strip()
-                if not s:
-                    continue
-                parts = s.split()
-                if len(parts) < 5:
-                    removed += 1
-                    continue
-                try:
-                    coords = [float(v) for v in parts[1:]]
-                except ValueError:
-                    removed += 1
-                    continue
-
-                if drop_out_of_range and any(c < -1e-6 or c > 1 + 1e-6 for c in coords):
-                    removed += 1
-                    continue
-                if len(coords) == 4:
-                    bw, bh = coords[2], coords[3]
-                    if drop_invalid_size and (bw <= 0 or bh <= 0):
-                        removed += 1
-                        continue
-                    if drop_tiny and (bw * bh) < tiny_area:
-                        removed += 1
-                        continue
-                kept.append(s)
-
-            if removed:
-                lp.with_suffix(".txt.bak").write_text("\n".join(lines) + "\n")
-                lp.write_text(("\n".join(kept) + "\n") if kept else "")
-                res["files_changed"] += 1
-                res["lines_removed"] += removed
-                if not kept:
-                    res["files_emptied"] += 1
-                res["details"].append(f"{sp}/{lp.name}: {removed} 行を除去"
-                                      + ("（空になりました）" if not kept else ""))
-
-    return res
-
-
-# ---------------------------------------------------------------------------
-# 要確認画像の自動抽出 (アノテーション対象の優先順位付け)
-#
-#   推論結果を分析し「モデルが自信を持てていない画像」を機械的に拾う。
-#   人が全画像を目視して 🚩 を立てる作業を置き換えるためのもの。
-# ---------------------------------------------------------------------------
-def _iou(a: list[float], b: list[float]) -> float:
-    """2つの xyxy ボックスの IoU"""
-    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
-    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
-    iw, ih = max(ix2 - ix1, 0.0), max(iy2 - iy1, 0.0)
-    inter = iw * ih
-    if inter <= 0:
-        return 0.0
-    area_a = max(a[2] - a[0], 0.0) * max(a[3] - a[1], 0.0)
-    area_b = max(b[2] - b[0], 0.0) * max(b[3] - b[1], 0.0)
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
-
-
-def analyze_predictions(
-    json_paths: list[Path],
-    conf_low: float = 0.5,
-    tiny_area: float = 0.001,
-    conflict_iou: float = 0.5,
-) -> list[dict]:
-    """推論結果 JSON を分析し、要確認と判断した理由を付けて返す。
-
-    判定理由:
-      - 検出ゼロ            … 写っているのに拾えていない可能性（見逃し）
-      - 低信頼度            … conf_low 未満の検出を含む（誤検出/曖昧）
-      - クラス競合          … ほぼ同じ位置に別クラスが重なっている（モデルが迷っている）
-      - 極小ボックス        … 画像面積比 tiny_area 未満（ノイズ検出の疑い）
-    """
-    results = []
-    for jf in json_paths:
-        try:
-            pred = json.loads(Path(jf).read_text())
-        except Exception:
-            continue
-
-        boxes = pred.get("boxes", []) or []
-        confs = [float(b.get("confidence", 0.0)) for b in boxes]
-        reasons: list[str] = []
-
-        if not boxes:
-            reasons.append("検出ゼロ")
-        else:
-            if min(confs) < conf_low:
-                reasons.append(f"低信頼度({min(confs):.2f})")
-
-            # クラス競合: IoU が高いのにラベルが異なる組み合わせ
-            for i in range(len(boxes)):
-                for k in range(i + 1, len(boxes)):
-                    if boxes[i].get("label") == boxes[k].get("label"):
-                        continue
-                    bi, bk = boxes[i].get("bbox_xyxy"), boxes[k].get("bbox_xyxy")
-                    if bi and bk and _iou(bi, bk) >= conflict_iou:
-                        reasons.append("クラス競合")
-                        break
-                if "クラス競合" in reasons:
-                    break
-
-            # 極小ボックス（正規化 w*h で判定）
-            for b in boxes:
-                xywhn = b.get("bbox_xywhn")
-                if xywhn and len(xywhn) == 4 and (xywhn[2] * xywhn[3]) < tiny_area:
-                    reasons.append("極小ボックス")
-                    break
-
-        results.append({
-            "json": Path(jf),
-            "name": Path(jf).name,
-            "image_path": pred.get("image_path", ""),
-            "n_boxes": len(boxes),
-            "min_conf": min(confs) if confs else None,
-            "mean_conf": (sum(confs) / len(confs)) if confs else None,
-            "reasons": reasons,
-            "flagged": bool(reasons),
-        })
-    return results
-
-
-# ---------------------------------------------------------------------------
-# GT vs 予測の差分分析
-#
-#   学習済みモデルの予測を正解ラベル(GT)と突き合わせ、画像ごとに
-#   FN(取りこぼし) / FP(余計な検出) を数える。
-#   精度の高いモデルが FN を出す画像は「モデルが悪い」だけでなく
-#   「GT のアノテーションが漏れている」ことも多く、ラベルの抜けを見つける手段になる。
-# ---------------------------------------------------------------------------
-def _yolo_txt_to_xyxy(txt_path: Path, w: int, h: int,
-                      names: list[str]) -> list[dict]:
-    """YOLO ラベル txt を絶対座標の xyxy に変換する。
-
-    detect 形式 (cls cx cy bw bh) と segment 形式 (cls x1 y1 x2 y2 ... 正規化ポリゴン)
-    の両方を受け付ける。segment の場合はポリゴンの外接矩形を bbox として扱い、
-    輪郭は mask_xy として保持する。
-    """
-    out = []
-    if not txt_path.exists():
-        return out
-    try:
-        for line in txt_path.read_text().splitlines():
-            parts = line.split()
-            if len(parts) < 5:
-                continue
-            try:
-                cid = int(float(parts[0]))
-                vals = [float(v) for v in parts[1:]]
-            except ValueError:
-                continue
-
-            label = names[cid] if 0 <= cid < len(names) else f"id={cid}"
-
-            if len(vals) == 4:
-                cx, cy, bw, bh = vals
-                x1, y1 = (cx - bw / 2) * w, (cy - bh / 2) * h
-                x2, y2 = (cx + bw / 2) * w, (cy + bh / 2) * h
-                out.append({
-                    "label": label,
-                    "bbox_xyxy": [x1, y1, x2, y2],
-                    # FiftyOne 形式(左上+wh の正規化)
-                    "bbox_xywhn": [cx - bw / 2, cy - bh / 2, bw, bh],
-                })
-            elif len(vals) >= 6 and len(vals) % 2 == 0:
-                xs = [vals[i] * w for i in range(0, len(vals), 2)]
-                ys = [vals[i] * h for i in range(1, len(vals), 2)]
-                x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
-                out.append({
-                    "label": label,
-                    "bbox_xyxy": [x1, y1, x2, y2],
-                    "bbox_xywhn": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
-                    "mask_xy":  [[x, y] for x, y in zip(xs, ys)],
-                    "mask_xyn": [[vals[i], vals[i + 1]] for i in range(0, len(vals), 2)],
-                })
-    except Exception:
-        pass
-    return out
-
-
-def compare_with_ground_truth(
-    model_path: Path,
-    data_yaml: str,
-    split: str = "val",
-    conf: float = 0.25,
-    iou_match: float = 0.5,
-    max_images: int = 500,
-) -> dict:
-    """モデルの予測と GT を突き合わせ、画像ごとの TP/FP/FN を返す。
-
-    マッチングは「同一クラスかつ IoU >= iou_match」を信頼度の高い予測から貪欲に行う。
-    """
-    res: dict = {
-        "ok": False, "error": None,
-        "model": str(model_path), "split": split, "conf": conf, "iou_match": iou_match,
-        "n_images": 0, "tp": 0, "fp": 0, "fn": 0,
-        "precision": None, "recall": None,
-        "per_image": [], "by_class": {},
-    }
-    try:
-        import yaml as _yml
-        from ultralytics import YOLO
-
-        cfg = _yml.safe_load(Path(data_yaml).read_text()) or {}
-        names = cfg.get("names") or []
-        if isinstance(names, dict):
-            names = [names[k] for k in sorted(names)]
-
-        root = Path(cfg.get("path") or Path(data_yaml).parent)
-        rel = cfg.get(split)
-        if not rel:
-            res["error"] = f"data.yaml に {split} の定義がありません"
-            return res
-        img_dir = (root / rel) if not str(rel).startswith("/") else Path(rel)
-        if not img_dir.exists():
-            res["error"] = f"画像ディレクトリが見つかりません: {img_dir}"
-            return res
-
-        images = sorted(p for p in img_dir.iterdir()
-                        if p.is_file() and p.suffix.lower() in IMG_EXTS)
-        if max_images and len(images) > max_images:
-            images = images[:max_images]
-        if not images:
-            res["error"] = f"{img_dir} に画像がありません"
-            return res
-
-        model = YOLO(str(model_path))
-        by_class: dict[str, dict] = {}
-
-        # 画像リストを渡すと Results.path が仮名 (image0.jpg 等) になるため、
-        # 入力順が保たれることを利用して元のパスと zip で対応付ける
-        _results = model.predict(source=[str(p) for p in images], conf=conf,
-                                 stream=True, verbose=False)
-        for img_path, r in zip(images, _results):
-            h, w = r.orig_shape
-
-            _m = getattr(r, "masks", None)
-            _mxy = list(getattr(_m, "xy", []) or []) if _m is not None else []
-
-            preds = []
-            if r.boxes is not None:
-                for _bi, b in enumerate(r.boxes):
-                    item = {
-                        "label": r.names[int(b.cls[0])],
-                        "confidence": float(b.conf[0]),
-                        "bbox_xyxy": [float(v) for v in b.xyxy[0].tolist()],
-                        "bbox_xywhn": [float(v) for v in b.xywhn[0].tolist()],
-                    }
-                    if _bi < len(_mxy):
-                        item["mask_xy"] = [[float(x), float(y)] for x, y in _mxy[_bi]]
-                    preds.append(item)
-            preds.sort(key=lambda d: -d["confidence"])
-
-            # images/... → labels/... の対応（YOLO の標準レイアウト）
-            lbl_path = Path(str(img_path)
-                            .replace(f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}")
-                            ).with_suffix(".txt")
-            gts = _yolo_txt_to_xyxy(lbl_path, w, h, names)
-
-            matched = [False] * len(gts)
-            tp = fp = 0
-            for p in preds:
-                best_i, best_iou = -1, 0.0
-                for gi, g in enumerate(gts):
-                    if matched[gi] or g["label"] != p["label"]:
-                        continue
-                    v = _iou(p["bbox_xyxy"], g["bbox_xyxy"])
-                    if v > best_iou:
-                        best_i, best_iou = gi, v
-                if best_i >= 0 and best_iou >= iou_match:
-                    matched[best_i] = True
-                    tp += 1
-                    by_class.setdefault(p["label"], {"tp": 0, "fp": 0, "fn": 0})["tp"] += 1
-                else:
-                    fp += 1
-                    by_class.setdefault(p["label"], {"tp": 0, "fp": 0, "fn": 0})["fp"] += 1
-
-            fn = 0
-            for gi, g in enumerate(gts):
-                if not matched[gi]:
-                    fn += 1
-                    by_class.setdefault(g["label"], {"tp": 0, "fp": 0, "fn": 0})["fn"] += 1
-
-            res["tp"] += tp
-            res["fp"] += fp
-            res["fn"] += fn
-            res["per_image"].append({
-                "image": str(img_path),
-                "name": img_path.name,
-                "width": w, "height": h,
-                "n_gt": len(gts), "n_pred": len(preds),
-                "tp": tp, "fp": fp, "fn": fn,
-                "gt_boxes": gts, "pred_boxes": preds,
-            })
-
-        n_pred_total = res["tp"] + res["fp"]
-        n_gt_total   = res["tp"] + res["fn"]
-        res.update({
-            "ok": True,
-            "n_images": len(res["per_image"]),
-            "precision": (res["tp"] / n_pred_total) if n_pred_total else None,
-            "recall":    (res["tp"] / n_gt_total) if n_gt_total else None,
-            "by_class":  by_class,
-        })
-    except Exception as e:
-        res["error"] = f"{type(e).__name__}: {e}"
-    return res
-
-
-def launch_fiftyone_comparison(dataset_name: str, per_image: list[dict]) -> Optional[int]:
-    """GT と予測の両方を載せた FiftyOne データセットを作って App を起動する。
-
-    FiftyOne の bounding_box は [左上x, 左上y, w, h] の正規化形式。
-    """
-    try:
-        import fiftyone as fo
-
-        if fo.dataset_exists(dataset_name):
-            fo.delete_dataset(dataset_name)
-        dataset = fo.Dataset(name=dataset_name)
-
-        samples = []
-        for item in per_image:
-            s = fo.Sample(filepath=item["image"])
-            s["ground_truth"] = fo.Detections(detections=[
-                fo.Detection(label=g["label"], bounding_box=g["bbox_xywhn"])
-                for g in item["gt_boxes"]
-            ])
-            s["predictions"] = fo.Detections(detections=[
-                fo.Detection(label=p["label"], bounding_box=p["bbox_xywhn"],
-                             confidence=p.get("confidence", 1.0))
-                for p in item["pred_boxes"]
-            ])
-            # FiftyOne 上でソート・フィルタできるようフィールドにも入れる
-            s["n_fn"] = item["fn"]
-            s["n_fp"] = item["fp"]
-            s["n_tp"] = item["tp"]
-            samples.append(s)
-
-        dataset.add_samples(samples)
-
-        if st.session_state.fiftyone_session:
-            try:
-                st.session_state.fiftyone_session.close()
-            except Exception:
-                pass
-
-        session = fo.launch_app(dataset, port=FIFTYONE_PORT,
-                                address="0.0.0.0", remote=False)
-        st.session_state.fiftyone_session = session
-        st.session_state.fiftyone_port = FIFTYONE_PORT
-        return FIFTYONE_PORT
-    except Exception as e:
-        st.error(f"FiftyOne エラー: {e}")
-        return None
-
-
-# ---------------------------------------------------------------------------
-# CVAT への書き戻し (推論結果を新規タスクとして投入)
-#
-#   ZIP のダウンロード → 手動アップロードを不要にする。
-#   予測ボックスが事前アノテーションとして入った状態でタスクが作られるので、
-#   作業者は「ゼロから引く」のではなく「直す」だけで済む。
-# ---------------------------------------------------------------------------
-def _collect_prediction_items(json_paths: list[Path]) -> tuple[list[dict], list[str]]:
-    """予測 JSON 群から (画像情報リスト, 出現ラベル一覧) を作る。
-    元画像が見つからないもの・読めないものは除外する。
-    """
-    import cv2
-
-    items: list[dict] = []
-    labels: list[str] = []
-    for jf in json_paths:
-        try:
-            pred = json.loads(Path(jf).read_text())
-        except Exception:
-            continue
-
-        img_path = Path(pred.get("image_path", ""))
-        if not img_path.exists():
-            continue
-
-        # 推論時に記録した寸法があれば画像を読み直さない（大量件数で効く）
-        size = pred.get("image_size")
-        if size and len(size) == 2:
-            w, h = int(size[0]), int(size[1])
-        else:
-            img = cv2.imread(str(img_path))
-            if img is None:
-                continue
-            h, w = img.shape[:2]
-
-        boxes = pred.get("boxes", []) or []
-        for b in boxes:
-            lb = b.get("label", "")
-            if lb and lb not in labels:
-                labels.append(lb)
-
-        items.append({"path": img_path, "width": w, "height": h, "boxes": boxes})
-    return items, labels
-
-
-def build_cvat_xml(items: list[dict], labels: list[str], task_name: str = "") -> str:
-    """画像情報から CVAT for images 1.1 形式の annotations.xml を組み立てる"""
-    import xml.etree.ElementTree as ET
-
-    root = ET.Element("annotations")
-    ET.SubElement(root, "version").text = "1.1"
-    meta = ET.SubElement(root, "meta")
-    task_el = ET.SubElement(meta, "task")
-    if task_name:
-        ET.SubElement(task_el, "name").text = task_name
-    labels_el = ET.SubElement(task_el, "labels")
-    for lb in labels:
-        lb_el = ET.SubElement(labels_el, "label")
-        ET.SubElement(lb_el, "name").text = lb
-        ET.SubElement(lb_el, "attributes")
-
-    for idx, it in enumerate(items):
-        img_el = ET.SubElement(
-            root, "image",
-            id=str(idx), name=it["path"].name,
-            width=str(it["width"]), height=str(it["height"]),
-        )
-        for b in it["boxes"]:
-            conf = b.get("confidence")
-
-            # マスクがあるものは polygon として書き出す（CVAT 側もポリゴンで開く）
-            mask = b.get("mask_xy")
-            if mask and len(mask) >= 3:
-                pts = ";".join(f"{float(x):.2f},{float(y):.2f}" for x, y in mask)
-                shape_el = ET.SubElement(
-                    img_el, "polygon",
-                    label=b.get("label", ""), points=pts, occluded="0",
-                )
-                if conf is not None:
-                    ET.SubElement(shape_el, "attribute",
-                                  name="confidence").text = f"{float(conf):.4f}"
-                continue
-
-            xyxy = b.get("bbox_xyxy")
-            if not xyxy or len(xyxy) != 4:
-                continue
-            x1, y1, x2, y2 = [float(v) for v in xyxy]
-            box_el = ET.SubElement(
-                img_el, "box",
-                label=b.get("label", ""),
-                xtl=f"{x1:.2f}", ytl=f"{y1:.2f}",
-                xbr=f"{x2:.2f}", ybr=f"{y2:.2f}",
-                occluded="0",
-            )
-            if conf is not None:
-                attr = ET.SubElement(box_el, "attribute", name="confidence")
-                attr.text = f"{float(conf):.4f}"
-
-    ET.indent(root)
-    return ('<?xml version="1.0" encoding="utf-8"?>\n'
-            + ET.tostring(root, encoding="unicode", xml_declaration=False))
-
-
-def push_items_to_cvat(
-    items: list[dict],
-    labels: list[str],
-    task_name: str,
-    with_annotations: bool = True,
-) -> dict:
-    """画像情報リストから CVAT の新規タスクを作成する（送信処理の本体）。
-
-    items: [{"path": Path, "width": int, "height": int, "boxes": [...]}]
-    """
-    import shutil as _sh
-    import tempfile
-
-    out = {"ok": False, "task_id": None, "url": "", "n_images": 0,
-           "labels": [], "error": None}
-
-    if not items:
-        out["error"] = "送信できる画像がありません（元画像が見つからない可能性があります）"
-        return out
-    if not labels:
-        out["error"] = ("ラベルが1つも決まりません。"
-                        "検出ゼロの画像だけを送る場合は、タスクに付けるラベル名を指定してください。")
-        return out
-
-    client = get_cvat_client()
-    if not client:
-        out["error"] = "CVAT に接続できません"
-        return out
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix="cvat_push_"))
-    try:
-        from cvat_sdk.api_client import models
-
-        # 画像を一時ディレクトリへ集約（同名衝突は連番で回避）
-        resources, used = [], set()
-        for it in items:
-            fname = it["path"].name
-            if fname in used:
-                fname = f"{it['path'].stem}_{len(used)}{it['path'].suffix}"
-            used.add(fname)
-            dst = tmp_dir / fname
-            _sh.copy2(it["path"], dst)
-            resources.append(dst)
-            it["path"] = dst          # XML の name と実ファイル名を一致させる
-
-        # マスク付きの結果を送る場合は polygon も引けるようにラベル種別を any にする
-        _has_mask = any(b.get("mask_xy") for it in items for b in it.get("boxes", []))
-        _label_type = "any" if _has_mask else "rectangle"
-        spec = models.TaskWriteRequest(
-            name=task_name,
-            labels=[models.PatchedLabelRequest(name=lb, type=_label_type) for lb in labels],
-        )
-
-        ann_path = ""
-        if with_annotations:
-            ann_path = str(tmp_dir / "annotations.xml")
-            Path(ann_path).write_text(build_cvat_xml(items, labels, task_name))
-
-        task = client.tasks.create_from_data(
-            spec=spec,
-            resources=resources,
-            annotation_path=ann_path,
-            annotation_format="CVAT 1.1",
-        )
-
-        out.update({
-            "ok": True,
-            "task_id": task.id,
-            "url": f"{CVAT_WEB}/tasks/{task.id}",
-            "n_images": len(resources),
-            "labels": labels,
-        })
-    except Exception as e:
-        out["error"] = f"{type(e).__name__}: {e}"
-    finally:
-        _sh.rmtree(tmp_dir, ignore_errors=True)
-    return out
-
-
-def push_predictions_to_cvat(
-    json_paths: list[Path],
-    task_name: str,
-    extra_labels: Optional[list[str]] = None,
-    with_annotations: bool = True,
-) -> dict:
-    """予測結果 JSON 群を CVAT の新規タスクとして作成する"""
-    items, labels = _collect_prediction_items(json_paths)
-    for lb in (extra_labels or []):
-        if lb and lb not in labels:
-            labels.append(lb)
-    return push_items_to_cvat(items, labels, task_name, with_annotations)
-
-
-# ---------------------------------------------------------------------------
-# CVAT 自動アノテーション (Nuclio serverless) 連携
-#
-#   models/<run>/weights/best.pt
-#     → serverless/custom/<slug>/{function.yaml, function-gpu.yaml, model.env} を自動生成
-#     → serverless/deploy.sh を実行
-#     → CVAT の「Actions → Automatic annotation」に出現
-#
-#   ラベル定義 (annotations.spec) はモデルのクラス名から生成するため、
-#   「モデルのクラス名 = 関数のラベル名」が機械的に保証される。
-#   （CVAT タスク側のラベル名との一致だけは利用者が担保する必要がある）
-# ---------------------------------------------------------------------------
-NUCTL_BIN = SERVERLESS_DIR / "bin" / "nuctl"
-
-
-def serverless_status() -> dict:
-    """UI から Nuclio デプロイが実行可能かどうかを判定する"""
-    import shutil as _sh
-
-    return {
-        "deploy_sh":   (SERVERLESS_DIR / "deploy.sh").exists(),
-        "nuctl":       NUCTL_BIN.exists(),
-        "docker_sock": Path("/var/run/docker.sock").exists(),
-        "docker_cli":  _sh.which("docker") is not None,
-        "network":     CVAT_NETWORK,
-    }
-
-
-def serverless_ready() -> bool:
-    s = serverless_status()
-    return all([s["deploy_sh"], s["nuctl"], s["docker_sock"], s["docker_cli"]])
-
-
-def _nuctl(*args: str, timeout: int = 60):
-    """nuctl をサブプロセス実行して CompletedProcess を返す"""
-    import subprocess
-
-    return subprocess.run(
-        [str(NUCTL_BIN), *args, "--platform", "local"],
-        capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def list_nuclio_functions() -> list[dict]:
-    """デプロイ済み Nuclio 関数の一覧（= CVAT の Automatic annotation に出るモデル）"""
-    if not NUCTL_BIN.exists():
-        return []
-    try:
-        proc = _nuctl("get", "function", "-o", "json")
-        if proc.returncode != 0:
-            return []
-        raw = json.loads(proc.stdout or "[]")
-    except Exception:
-        return []
-
-    out = []
-    for fn in raw if isinstance(raw, list) else [raw]:
-        meta   = fn.get("metadata", {}) or {}
-        spec   = fn.get("spec", {}) or {}
-        status = fn.get("status", {}) or {}
-        ann    = meta.get("annotations", {}) or {}
-
-        labels = []
-        try:
-            labels = [l.get("name", "") for l in json.loads(ann.get("spec") or "[]")]
-        except Exception:
-            pass
-
-        res = spec.get("resources", {}) or {}
-        out.append({
-            "name":    meta.get("name", ""),
-            "display": ann.get("name", "") or meta.get("name", ""),
-            "type":    ann.get("type", ""),
-            "labels":  labels,
-            "image":   spec.get("image", ""),
-            "gpu":     "nvidia.com/gpu" in json.dumps(res.get("limits", {}) or {}),
-            "state":   status.get("state", ""),
-            "port":    (status.get("httpPort") or ""),
-        })
-    return sorted(out, key=lambda d: d["name"])
-
-
-@st.cache_data(ttl=10, show_spinner=False)
-def cached_nuclio_functions() -> list[dict]:
-    """関数一覧の短期キャッシュ。毎 rerun で nuctl を起動しないための薄いラッパ。
-    デプロイ・削除の直後は呼び出し側で .clear() すること。
-    """
-    return list_nuclio_functions()
-
-
-def list_serverless_defs() -> list[dict]:
-    """serverless/custom/ 配下の関数定義（未デプロイのものも含む）"""
-    defs = []
-    cdir = SERVERLESS_DIR / "custom"
-    if not cdir.exists():
-        return defs
-
-    for d in sorted(p for p in cdir.iterdir() if p.is_dir()):
-        model_run = ""
-        env_f = d / "model.env"
-        if env_f.exists():
-            for line in env_f.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("MODEL_RUN="):
-                    model_run = line.split("=", 1)[1].strip().strip('"').strip("'")
-
-        fn_name, fn_display = "", ""
-        y = d / "function.yaml"
-        if y.exists():
-            try:
-                import yaml as _yml
-                _meta = ((_yml.safe_load(y.read_text()) or {}).get("metadata") or {})
-                fn_name    = _meta.get("name", "")
-                fn_display = (_meta.get("annotations") or {}).get("name", "")
-            except Exception:
-                pass
-
-        defs.append({
-            "dir": d.name,
-            "model_run": model_run,
-            "function_name": fn_name,
-            "display": fn_display,
-            "has_gpu_yaml": (d / "function-gpu.yaml").exists(),
-            "model_exists": bool(model_run)
-                            and (MODELS_DIR / model_run / "weights" / "best.pt").exists(),
-        })
-    return defs
-
-
-def slugify_function_name(run_name: str) -> str:
-    """モデル run 名を Nuclio 関数名に使える形（英小文字・数字・ハイフン）へ整える"""
-    import re
-
-    s = re.sub(r"[^a-z0-9]+", "-", str(run_name).lower()).strip("-")
-    return s or "model"
-
-
-def generate_function_files(
-    fn_dir: str,
-    model_run: str,
-    class_names: list[str],
-    display_name: str = "",
-    description: str = "",
-    task: str = "detect",
-) -> tuple[Path, str]:
-    """serverless/custom/<fn_dir>/ に関数定義一式を生成し、(ディレクトリ, 関数名) を返す。
-
-    CPU 版 (function.yaml) と GPU 版 (function-gpu.yaml) の両方を出力する。
-    deploy.sh がどちらを使うかを選ぶ。
-    """
-    slug     = slugify_function_name(fn_dir)
-    fn_name  = f"custom-{slug}"
-    image    = f"cvat.custom.{slug}"
-    disp     = display_name or f"{model_run} (custom)"
-    desc     = description or f"自作 YOLO 検出器 ({model_run} / Ultralytics)"
-
-    # ラベル定義はモデルのクラス名から生成（json.dumps でエスケープを担保）。
-    # セグメンテーションモデルは polygon を返すため、ラベル種別も合わせる。
-    shape_type = "polygon" if str(task) == "segment" else "rectangle"
-    items = [{"id": i, "name": n, "type": shape_type} for i, n in enumerate(class_names)]
-    spec_block = "\n".join(
-        "      " + line for line in json.dumps(items, ensure_ascii=False, indent=2).splitlines()
-    )
-
-    def _yaml(gpu: bool) -> str:
-        if gpu:
-            base_image = "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04"
-            torch_url  = "https://download.pytorch.org/whl/cu128"
-            tag        = ":latest-gpu"
-            suffix     = "GPU cu128"
-            resources  = (
-                "\n  # GPU を割り当てる。有効化には Docker daemon の default-runtime=nvidia が必要\n"
-                "  resources:\n"
-                "    limits:\n"
-                "      nvidia.com/gpu: 1\n"
-            )
-        else:
-            base_image = "ubuntu:22.04"
-            torch_url  = "https://download.pytorch.org/whl/cpu"
-            tag        = ""
-            suffix     = "CPU"
-            resources  = ""
-
-        return f"""# =============================================================================
-# このファイルは Streamlit UI (データ管理タブ) が自動生成しました。
-#   生成元モデル: models/{model_run}/weights/best.pt
-#   annotations.spec のラベルはモデルのクラス名から生成されています。
-#   CVAT タスク側のラベル名と一致していることを確認してください。
-# =============================================================================
-metadata:
-  name: {fn_name}
-  namespace: cvat
-  annotations:
-    name: {json.dumps(f"{disp} / {suffix}", ensure_ascii=False)}
-    type: detector
-    spec: |
-{spec_block}
-
-spec:
-  description: {json.dumps(f"{desc} / {suffix}", ensure_ascii=False)}
-  runtime: "python:3.10"
-  handler: main:handler
-  eventTimeout: 60s
-
-  env:
-    - name: YOLO_CONFIG_DIR
-      value: /tmp/Ultralytics
-    - name: MPLCONFIGDIR
-      value: /tmp/matplotlib
-
-  build:
-    image: {image}{tag}
-    baseImage: {base_image}
-    directives:
-      preCopy:
-        - kind: RUN
-          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
-        - kind: RUN
-          value: pip install --no-cache-dir torch torchvision --index-url {torch_url}
-        - kind: RUN
-          value: pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml
-        - kind: WORKDIR
-          value: /opt/nuclio
-
-  triggers:
-    myHttpTrigger:
-      numWorkers: 1
-      kind: "http"
-      workerAvailabilityTimeoutMilliseconds: 10000
-      attributes:
-        maxRequestBodySize: 33554432 # 32MB
-{resources}
-  platform:
-    attributes:
-      restartPolicy:
-        name: always
-        maximumRetryCount: 3
-      mountMode: volume
-"""
-
-    out_dir = SERVERLESS_DIR / "custom" / fn_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "function.yaml").write_text(_yaml(gpu=False))
-    (out_dir / "function-gpu.yaml").write_text(_yaml(gpu=True))
-    (out_dir / "model.env").write_text(
-        "# この関数が使う学習済みモデル (models/<MODEL_RUN>/weights/best.pt)\n"
-        "# serverless/deploy.sh がこの値を読み、best.pt をビルドコンテキストへコピーする\n"
-        f"MODEL_RUN={model_run}\n"
-    )
-    return out_dir, fn_name
-
-
-def _deploy_worker(fn_dir: str, use_gpu: bool) -> None:
-    """deploy.sh をサブプロセス実行し、出力を共有ログへ流す（バックグラウンドスレッド）"""
-    import subprocess
-
-    state, lock = _get_deploy_shared()
-
-    def _log(msg: str) -> None:
-        with lock:
-            state["log"].append(msg)
-
-    try:
-        env = os.environ.copy()
-        if CVAT_NETWORK:
-            env["CVAT_NETWORK"] = CVAT_NETWORK
-
-        cmd = ["bash", str(SERVERLESS_DIR / "deploy.sh"),
-               "--gpu" if use_gpu else "--cpu", fn_dir]
-        _log(f"$ {' '.join(cmd)}")
-        _log(f"(network={env.get('CVAT_NETWORK', '自動判定')})")
-
-        proc = subprocess.Popen(
-            cmd, cwd=str(SERVERLESS_DIR), env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
-        for line in proc.stdout:            # type: ignore[union-attr]
-            _log(line.rstrip())
-        proc.wait()
-
-        if proc.returncode != 0:
-            with lock:
-                state["error"] = f"deploy.sh が終了コード {proc.returncode} で失敗しました"
-        else:
-            _log("")
-            _log("✅ デプロイ完了。CVAT の Actions → Automatic annotation に反映されます"
-                 "（反映まで十数秒かかる場合があります）")
-    except Exception as e:
-        with lock:
-            state["error"] = f"{type(e).__name__}: {e}"
-    finally:
-        with lock:
-            state["running"] = False
-            state["finished"] = True
-
-
-def start_deploy(fn_dir: str, use_gpu: bool) -> None:
-    """デプロイをバックグラウンドで開始する"""
-    state, lock = _get_deploy_shared()
-    with lock:
-        if state["running"]:
-            return
-        state["log"] = []
-        state["error"] = None
-        state["running"] = True
-        state["finished"] = False
-        state["target"] = fn_dir
-
-    threading.Thread(target=_deploy_worker, args=(fn_dir, use_gpu), daemon=True).start()
-
-
-def delete_nuclio_function(fn_name: str) -> tuple[bool, str]:
-    """デプロイ済み関数を削除する（CVAT の選択肢からも消える）"""
-    if not NUCTL_BIN.exists():
-        return False, "nuctl が見つかりません"
-    try:
-        proc = _nuctl("delete", "function", fn_name, timeout=120)
-        if proc.returncode == 0:
-            return True, proc.stdout.strip() or "削除しました"
-        return False, (proc.stderr or proc.stdout).strip()
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
-
-
-# ---------------------------------------------------------------------------
-# モデル評価 (model.val)
-#
-#   学習時の results.csv は「そのモデルが自分の val で出した値」でしかないため、
-#   別環境で学習したモデルとは比較できない。ここでは任意のデータセットに対して
-#   同一条件で val を回し、モデル同士を同じ土俵で比べられるようにする。
-# ---------------------------------------------------------------------------
-def model_eval_path(model_path: Path) -> Path:
-    """評価結果の保存先（rglob('*.pt') に載らないドット始まりの名前）"""
-    return model_path.parent / f".{model_path.name}.eval.json"
-
-
-def read_model_evals(model_path: Path) -> dict:
-    """{データセットキー: 評価結果} を返す"""
-    p = model_eval_path(model_path)
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text())
-    except Exception:
-        return {}
-
-
-def save_model_eval(model_path: Path, dataset_key: str, result: dict) -> None:
-    evals = read_model_evals(model_path)
-    evals[dataset_key] = result
-    try:
-        model_eval_path(model_path).write_text(
-            json.dumps(evals, ensure_ascii=False, indent=2))
-    except Exception:
-        pass
-
-
-def evaluate_model(
-    model_path: Path,
-    data_yaml: str,
-    split: str = "val",
-    imgsz: int = 640,
-    batch: int = 8,
-    conf: float = 0.001,
-    iou: float = 0.6,
-    plots: bool = True,
-) -> dict:
-    """1モデルを1データセットで評価する。
-
-    conf の既定 0.001 は Ultralytics の val と同じ。mAP は全信頼度域の
-    Precision-Recall 曲線から計算するため、低い値を使うのが正しい。
-    """
-    res: dict = {
-        "ok": False, "error": None,
-        "model": str(model_path), "data_yaml": data_yaml, "split": split,
-        "imgsz": imgsz, "conf": conf, "iou": iou,
-        "task": None,
-        "map50": None, "map50_95": None, "precision": None, "recall": None,
-        "mask_map50": None, "mask_map50_95": None,   # セグメンテーションモデルのみ
-        "fitness": None, "per_class": [], "speed_ms": None, "n_images": None,
-        "plots_dir": None,
-        "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    try:
-        from ultralytics import YOLO
-
-        # 成果物（PR曲線・混同行列）はモデルの隣に置く
-        plots_root = model_path.parent / ".eval_plots"
-        run_name = slugify_function_name(f"{Path(data_yaml).parent.name}-{split}")
-        out_dir = plots_root / run_name
-
-        model = YOLO(str(model_path))
-        r = model.val(
-            data=data_yaml, split=split, imgsz=imgsz, batch=batch,
-            conf=conf, iou=iou, plots=plots, verbose=False,
-            project=str(plots_root), name=run_name, exist_ok=True,
-        )
-
-        box = r.box
-        # セグメンテーションモデルでは r.seg にマスク基準の指標が入る
-        seg = getattr(r, "seg", None)
-        names = r.names if isinstance(r.names, dict) else dict(enumerate(r.names or []))
-
-        per_class = []
-        try:
-            for i, c in enumerate(box.ap_class_index):
-                cid = int(c)
-                row = {
-                    "class": names.get(cid, f"id={cid}"),
-                    "ap50":    float(box.ap50[i]),
-                    "ap50_95": float(box.ap[i].mean()),
-                    "precision": float(box.p[i]),
-                    "recall":    float(box.r[i]),
-                }
-                if seg is not None:
-                    try:
-                        row["mask_ap50"]    = float(seg.ap50[i])
-                        row["mask_ap50_95"] = float(seg.ap[i].mean())
-                    except Exception:
-                        pass
-                per_class.append(row)
-        except Exception:
-            pass
-
-        speed = getattr(r, "speed", {}) or {}
-        res.update({
-            "ok": True,
-            "task": getattr(model, "task", None),
-            "map50":    float(box.map50),
-            "map50_95": float(box.map),
-            "precision": float(box.mp),
-            "recall":    float(box.mr),
-            "fitness":   float(getattr(r, "fitness", 0.0) or 0.0),
-            "per_class": per_class,
-            "speed_ms":  {k: round(float(v), 2) for k, v in speed.items()},
-            "plots_dir": str(out_dir) if out_dir.exists() else None,
-        })
-        if seg is not None:
-            try:
-                res["mask_map50"]    = float(seg.map50)
-                res["mask_map50_95"] = float(seg.map)
-            except Exception:
-                pass
-    except Exception as e:
-        res["error"] = f"{type(e).__name__}: {e}"
-    return res
-
-
-def collect_model_evals(dataset_key: Optional[str] = None) -> list[dict]:
-    """全モデルの保存済み評価結果を集める（モデル横断の比較表に使う）"""
-    rows = []
-    if not MODELS_DIR.exists():
-        return rows
-    for mp in MODELS_DIR.rglob("*.pt"):
-        for key, r in read_model_evals(mp).items():
-            if dataset_key and key != dataset_key:
-                continue
-            if not r.get("ok"):
-                continue
-            rows.append({"model_path": mp, "dataset_key": key, **r})
-    return rows
-
-
-def _eval_worker(model_paths: list[str], data_yaml: str, split: str,
-                 imgsz: int, batch: int, conf: float, iou: float) -> None:
-    """複数モデルを順に評価する（バックグラウンドスレッド）"""
-    state, lock = _get_eval_shared()
-
-    def _log(msg: str) -> None:
-        with lock:
-            state["log"].append(msg)
-
-    dataset_key = f"{Path(data_yaml).parent.name}:{split}"
-    try:
-        for i, mp_str in enumerate(model_paths):
-            mp = Path(mp_str)
-            with lock:
-                state["current"] = mp.name
-                state["done"] = i
-            _log(f"[{i + 1}/{len(model_paths)}] 評価中: {mp.relative_to(MODELS_DIR)}")
-
-            r = evaluate_model(mp, data_yaml, split=split, imgsz=imgsz,
-                               batch=batch, conf=conf, iou=iou)
-            if r["ok"]:
-                save_model_eval(mp, dataset_key, r)
-                _log(f"    mAP50={r['map50']:.4f}  mAP50-95={r['map50_95']:.4f}  "
-                     f"P={r['precision']:.3f}  R={r['recall']:.3f}")
-            else:
-                _log(f"    ❌ 失敗: {r['error']}")
-
-            with lock:
-                state["results"].append({"model": str(mp), **r})
-                state["done"] = i + 1
-        _log("")
-        _log("✅ 評価が完了しました")
-    except Exception as e:
-        with lock:
-            state["error"] = f"{type(e).__name__}: {e}"
-    finally:
-        with lock:
-            state["running"] = False
-            state["finished"] = True
-            state["current"] = ""
-
-
-def start_evaluation(model_paths: list[str], data_yaml: str, split: str,
-                     imgsz: int, batch: int, conf: float, iou: float) -> None:
-    state, lock = _get_eval_shared()
-    with lock:
-        if state["running"]:
-            return
-        state.update({"log": [], "running": True, "error": None, "finished": False,
-                      "total": len(model_paths), "done": 0, "current": "", "results": []})
-    threading.Thread(
-        target=_eval_worker,
-        args=(model_paths, data_yaml, split, imgsz, batch, conf, iou),
-        daemon=True,
-    ).start()
-
-
-# ---------------------------------------------------------------------------
-# YOLO 推論
-# ---------------------------------------------------------------------------
-def run_inference(
-    model_path: str,
-    image_dir: Path,
-    out_dir: Path,
-    conf_threshold: float = 0.25,
-) -> list[Path]:
-    """指定モデルで画像フォルダを推論し、結果JSONを out_dir に保存して返す"""
-    try:
-        from ultralytics import YOLO
-
-        model = YOLO(model_path)
-        _task = getattr(model, "task", "detect") or "detect"
-        results_list = model.predict(
-            source=str(image_dir),
-            conf=conf_threshold,
-            save=False,
-        )
-        saved_jsons = []
-        for res in results_list:
-            img_path = res.path
-            _h, _w = res.orig_shape
-            # セグメンテーションモデルならインスタンスごとの輪郭が入る
-            _masks = getattr(res, "masks", None)
-            _mask_xy  = list(getattr(_masks, "xy", []) or [])  if _masks is not None else []
-            _mask_xyn = list(getattr(_masks, "xyn", []) or []) if _masks is not None else []
-
-            boxes = []
-            if res.boxes:
-                for _bi, box in enumerate(res.boxes):
-                    xyxy   = box.xyxy[0].tolist()
-                    xywhn  = box.xywhn[0].tolist()
-                    cls_id = int(box.cls[0])
-                    conf   = float(box.conf[0])
-                    label  = res.names[cls_id]
-                    item = {
-                        "label": label,
-                        "confidence": round(conf, 4),
-                        "bbox_xyxy": [round(v, 2) for v in xyxy],
-                        "bbox_xywhn": [round(v, 6) for v in xywhn],
-                    }
-                    # マスクは輪郭ポリゴンとして保存する（絶対座標と正規化の両方）
-                    if _bi < len(_mask_xy):
-                        item["mask_xy"] = [[round(float(x), 2), round(float(y), 2)]
-                                           for x, y in _mask_xy[_bi]]
-                    if _bi < len(_mask_xyn):
-                        item["mask_xyn"] = [[round(float(x), 6), round(float(y), 6)]
-                                            for x, y in _mask_xyn[_bi]]
-                    boxes.append(item)
-
-            out_json = out_dir / (Path(img_path).stem + ".json")
-            with open(out_json, "w") as f:
-                json.dump({
-                    "image_path": img_path,
-                    "task": _task,                 # detect / segment / pose
-                    "image_size": [int(_w), int(_h)],
-                    "boxes": boxes,
-                }, f, indent=2, ensure_ascii=False)
-            saved_jsons.append(out_json)
-
-        return saved_jsons
-    except Exception as e:
-        st.error(f"推論エラー: {e}")
-        return []
-
-
-# ---------------------------------------------------------------------------
-# 動画推論
-# ---------------------------------------------------------------------------
-def _box_iou(a: list, b: list) -> float:
-    """2つのxyxy形式ボックスのIoUを計算する。"""
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-    if inter == 0:
-        return 0.0
-    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
-    return inter / union if union > 0 else 0.0
-
-
-def run_video_inference(
-    model_path: str,
-    video_path: Path,
-    out_dir: Path,
-    conf_threshold: float = 0.25,
-    enable_tracking: bool = False,
-    tracker: str = "bytetrack.yaml",
-    temporal_smoothing: bool = False,
-    smooth_frames: int = 5,
-    progress_cb=None,
-) -> Optional[dict]:
-    """動画ファイルをフレームごとに推論し、アノテーション済み動画とサマリーJSONを保存する。
-    enable_tracking=True のとき model.track() でオブジェクトトラッキングを行う。
-    temporal_smoothing=True のとき直近 smooth_frames フレームの検出を補完描画する。
-    progress_cb(frame_idx, total_frames) を渡すと進捗通知に使われる。
-    Returns: {"video_path": Path, "json_path": Path, "total_frames": int, "frame_stats": list} or None
-    """
-    import cv2
-    import subprocess
-    from ultralytics import YOLO
-
-    # ゴーストボックス描画色（グレー）
-    _GHOST_COLOR = (160, 160, 160)
-
-    def _draw_ghost(frame, xyxy, label, conf, tid):
-        x1, y1, x2, y2 = [int(v) for v in xyxy]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), _GHOST_COLOR, 1)
-        text = f"{label} {conf:.2f}"
-        if tid is not None:
-            text += f" #{tid}"
-        cv2.putText(frame, text, (x1 + 2, max(y1 - 4, 12)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _GHOST_COLOR, 1)
-
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        model = YOLO(model_path)
-
-        cap = cv2.VideoCapture(str(video_path))
-        fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-
-        # OpenCV で一時ファイルに書き出し → ffmpeg で H.264 に再エンコード
-        tmp_path       = out_dir / f"{video_path.stem}_tmp.mp4"
-        out_video_path = out_dir / f"{video_path.stem}_annotated.mp4"
-        out_json_path  = out_dir / f"{video_path.stem}_summary.json"
-
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(tmp_path), fourcc, fps, (width, height))
-
-        frame_stats: list[dict] = []
-
-        # テンポラル平滑化用メモリ
-        # track ON  → {track_id: {xyxy, label, conf, tid, last_frame}}
-        # track OFF → [{xyxy, label, conf, tid, last_frame}, ...]
-        _track_mem: dict[int, dict] = {}
-        _spatial_mem: list[dict] = []
-
-        common_kwargs = dict(
-            source=str(video_path),
-            conf=conf_threshold,
-            save=False,
-            stream=True,
-            verbose=False,
-        )
-        if enable_tracking:
-            results = model.track(persist=True, tracker=tracker, **common_kwargs)
-        else:
-            results = model.predict(**common_kwargs)
-
-        for frame_idx, res in enumerate(results):
-            ids = res.boxes.id if (res.boxes is not None) else None
-
-            # ── 現フレームの検出結果を収集 ──────────────────────────
-            current_boxes = []
-            if res.boxes is not None:
-                for i, box in enumerate(res.boxes):
-                    tid = int(ids[i]) if ids is not None else None
-                    current_boxes.append({
-                        "xyxy":  box.xyxy[0].tolist(),
-                        "label": res.names[int(box.cls[0])],
-                        "conf":  float(box.conf[0]),
-                        "tid":   tid,
-                    })
-
-            # ── テンポラル平滑化: メモリ更新 ─────────────────────────
-            if temporal_smoothing:
-                if enable_tracking:
-                    for b in current_boxes:
-                        if b["tid"] is not None:
-                            _track_mem[b["tid"]] = {**b, "last_frame": frame_idx}
-                else:
-                    used = set()
-                    for b in current_boxes:
-                        best_i, best_iou = -1, 0.3
-                        for mi, m in enumerate(_spatial_mem):
-                            if mi in used or m["label"] != b["label"]:
-                                continue
-                            iou = _box_iou(b["xyxy"], m["xyxy"])
-                            if iou > best_iou:
-                                best_iou, best_i = iou, mi
-                        if best_i >= 0:
-                            _spatial_mem[best_i] = {**b, "last_frame": frame_idx}
-                            used.add(best_i)
-                        else:
-                            _spatial_mem.append({**b, "last_frame": frame_idx})
-                    # 古いエントリを削除
-                    _spatial_mem[:] = [
-                        m for m in _spatial_mem
-                        if frame_idx - m["last_frame"] <= smooth_frames
-                    ]
-
-            # ── ゴーストボックスを決定 ───────────────────────────────
-            ghost_boxes: list[dict] = []
-            if temporal_smoothing and smooth_frames > 0:
-                if enable_tracking:
-                    cur_tids = {b["tid"] for b in current_boxes if b["tid"] is not None}
-                    for tid, mem in _track_mem.items():
-                        age = frame_idx - mem["last_frame"]
-                        if 0 < age <= smooth_frames and tid not in cur_tids:
-                            ghost_boxes.append(mem)
-                else:
-                    for m in _spatial_mem:
-                        age = frame_idx - m["last_frame"]
-                        if 0 < age <= smooth_frames:
-                            ghost_boxes.append(m)
-
-            # ── 描画 ─────────────────────────────────────────────────
-            annotated = res.plot()  # 現フレームの検出 + トラックID を自動描画
-            for g in ghost_boxes:
-                _draw_ghost(annotated, g["xyxy"], g["label"], g["conf"], g["tid"])
-            writer.write(annotated)
-
-            # ── JSON 用データ収集 ────────────────────────────────────
-            boxes = []
-            for b in current_boxes:
-                entry = {
-                    "label":      b["label"],
-                    "confidence": round(b["conf"], 4),
-                    "bbox_xyxy":  [round(v, 2) for v in b["xyxy"]],
-                }
-                if b["tid"] is not None:
-                    entry["track_id"] = b["tid"]
-                boxes.append(entry)
-            frame_stats.append({"frame": frame_idx, "detections": len(boxes), "boxes": boxes})
-
-            if progress_cb:
-                progress_cb(frame_idx, total_frames)
-
-        writer.release()
-
-        # ffmpeg で H.264 / AAC に再エンコードしてブラウザ互換 MP4 を生成
-        subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-i", str(tmp_path),
-                "-vcodec", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",   # Streamlit / ブラウザ互換
-                "-movflags", "+faststart",
-                "-an",                   # 入力動画に音声がない場合のエラー回避
-                str(out_video_path),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        tmp_path.unlink(missing_ok=True)
-
-        summary = {
-            "video_path": str(video_path),
-            "output_video": str(out_video_path),
-            "fps": fps,
-            "total_frames": total_frames,
-            "frame_stats": frame_stats,
-        }
-        with open(out_json_path, "w") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-
-        return {
-            "video_path": out_video_path,
-            "json_path": out_json_path,
-            "total_frames": total_frames,
-            "frame_stats": frame_stats,
-        }
-    except Exception as e:
-        st.error(f"動画推論エラー: {e}")
-        return None
-
-
-# ===========================================================================
-# UI ヘルパー：ポップオーバー付きウィジェット
-# ===========================================================================
-_DOC_TRAIN = "https://docs.ultralytics.com/modes/train/#train-settings"
-_DOC_AUG   = "https://docs.ultralytics.com/modes/train/#augmentation-settings-and-hyperparameters"
-
-
 def _ph(name: str, desc: str, url: str) -> None:
     """ポップオーバー形式のパラメータヘルプボタン（❓）を描画する。"""
     with st.popover("❓", use_container_width=True):
@@ -3115,16 +523,6 @@ _BUILTIN_PRESETS: dict[str, dict] = {
         "mosaic": 1.0, "mixup": 0.15, "erasing": 0.2, "close_mosaic": 30,
     },
 }
-
-_MODEL_OPTS = [
-    "yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x",
-    "yolo11n-seg", "yolo11s-seg", "yolo11m-seg", "yolo11l-seg", "yolo11x-seg",
-    "yolo11n-pose", "yolo11s-pose", "yolo11m-pose", "yolo11l-pose", "yolo11x-pose",
-    "yolo26n", "yolo26s", "yolo26m", "yolo26l", "yolo26x",
-    "その他",
-]
-
-
 def _load_user_presets() -> dict:
     try:
         if _USER_PRESETS_FILE.exists():
@@ -3407,6 +805,173 @@ with st.sidebar:
             f'</div>',
             unsafe_allow_html=True,
         )
+
+    # ── はじめかた / 環境セットアップ ────────────────────────────────────────
+    st.markdown("---")
+    st.checkbox(
+        "📖 はじめかたガイドを表示",
+        key="show_onboarding",
+        help="初めて使うとき、別の PC に環境を移すときの手順を画面上部に表示します。"
+             "いつでもここで切り替えられます。",
+    )
+    if not st.session_state.get("show_onboarding"):
+        st.caption("困ったときはここから表示できます")
+
+# ---------------------------------------------------------------------------
+# はじめかたガイド（サイドバーのチェックで表示を切り替える）
+# ---------------------------------------------------------------------------
+if st.session_state.get("show_onboarding"):
+    with st.container(border=True):
+        st.markdown("### 📖 はじめかた")
+
+        _ob_t1, _ob_t2, _ob_t3 = st.tabs([
+            "① まず何をするか", "② 別のPCで環境を作る", "③ 用語とタスクの選び方",
+        ])
+
+        # ── ① 現在の状態と次にやること ──────────────────────────────────
+        with _ob_t1:
+            _ob_ds     = len(list(DATA_DIR.rglob("data.yaml"))) if DATA_DIR.exists() else 0
+            _ob_raw    = len([d for d in DATA_DIR.iterdir() if d.is_dir()]) if DATA_DIR.exists() else 0
+            _ob_models = len(list(MODELS_DIR.rglob("*.pt"))) if MODELS_DIR.exists() else 0
+            _ob_preds  = len(list(PREDICTIONS_DIR.glob("*.json"))) if PREDICTIONS_DIR.exists() else 0
+            # CVAT の疎通はサイドバーに出しているので、ここでは
+            # 「取り込むものが既にあるか」で判定する（表示のたびに通信しない）
+            _ob_cvat   = bool(st.session_state.get("cvat_tasks")) or _ob_raw > 0
+
+            st.markdown(
+                "このツールは **アノテーション → データ取込 → 学習 → 評価** の4ステップで"
+                "画像認識モデルを作ります。上のタブがそのまま順番になっています。"
+            )
+
+            _ob_steps = [
+                ("① CVAT でアノテーション",
+                 _ob_cvat,
+                 f"CVAT ({CVAT_WEB}) で画像に印を付けます",
+                 "🏷 Step1 タブで進捗を確認できます"),
+                ("② データセットを作る",
+                 _ob_ds > 0,
+                 f"CVAT から取り込んで YOLO 形式に変換します（現在 {_ob_ds} 件）",
+                 "📤 Step2 タブ。CVAT を使わず ZIP や画像を直接入れることもできます"),
+                ("③ 学習する",
+                 _ob_models > 0,
+                 f"モデルサイズとパラメータを選んで学習します（現在 {_ob_models} 件）",
+                 "🚀 Step3 タブ。他の PC で作った .pt を持ち込むこともできます"),
+                ("④ 評価・推論する",
+                 _ob_preds > 0,
+                 f"精度を測り、推論結果を確認します（推論結果 {_ob_preds} 件）",
+                 "🔭 Step4 タブ。mAP 比較や正解ラベルとの差分も見られます"),
+            ]
+            for _title, _done, _desc, _where in _ob_steps:
+                _icon = "✅" if _done else "⬜"
+                st.markdown(f"**{_icon} {_title}** — {_desc}")
+                st.caption(f"　　{_where}")
+
+            st.markdown("---")
+            if _ob_ds == 0 and _ob_raw == 0:
+                st.info(
+                    "**まだデータがありません。** まず CVAT でアノテーションするか、"
+                    "「📤 Step2: データ取込」の「📁 ローカルからデータを直接追加」から"
+                    "手元の画像や YOLO 形式の ZIP を入れてください。"
+                )
+            elif _ob_ds == 0:
+                st.info(
+                    "**データはありますが data.yaml がまだありません。** "
+                    "「📤 Step2: データ取込」でデータセットを生成してください。"
+                )
+            elif _ob_models == 0:
+                st.info(
+                    "**データセットができています。** 次は「🚀 Step3: モデル学習」で学習します。"
+                    "まずは小さいモデル（yolo11n / yolo11s）と少なめのエポックで"
+                    "一周させてみるのがおすすめです。"
+                )
+            else:
+                st.success(
+                    "**ひととおり揃っています。** 「🔭 Step4: 推論・評価」でモデルの精度を測り、"
+                    "「🏷 Step1」でそのモデルを CVAT の自動アノテーションに載せると、"
+                    "次のアノテーションが楽になります。"
+                )
+
+        # ── ② 別PCへの移行手順 ────────────────────────────────────────
+        with _ob_t2:
+            st.markdown(
+                "**別の PC で同じ環境を作るとき**の手順です。"
+                "詳細は README.md に記載しています。"
+            )
+            st.markdown(
+                "**1. 前提を揃える**\n"
+                "- Docker / docker compose\n"
+                "- GPU を使う場合は nvidia-container-toolkit\n"
+            )
+            st.code(
+                "git clone <このリポジトリ>\n"
+                "cd detection_dev_ui", language="bash")
+            st.markdown("**2. `.env` を作る**（リポジトリには含まれません）")
+            st.code(
+                "CVAT_USERNAME=admin\n"
+                "CVAT_PASSWORD=<任意のパスワード>\n"
+                "CVAT_DB_PASSWORD=<任意>\n"
+                "CVAT_IAM_DB_PASSWORD=<任意>\n"
+                "NVIDIA_VISIBLE_DEVICES=all\n"
+                "COMPOSE_PROJECT_NAME=mlops_workspace", language="bash")
+            st.markdown("**3. データベースを初期化する**（初回のみ）")
+            st.code(
+                "docker compose up -d cvat_db cvat_redis cvat_redis_inmem "
+                "cvat_redis_ondisk cvat_iam_db\n"
+                "sleep 30\n"
+                "docker compose run --rm cvat_server init\n"
+                "docker compose run --rm cvat_server bash -c \\\n"
+                '  "~/manage.py createsuperuser --username admin --email admin@local.com"',
+                language="bash")
+            st.markdown("**4. 全サービスを起動する**")
+            st.code("docker compose up -d\ndocker compose ps", language="bash")
+
+            st.markdown("---")
+            st.markdown("**作業内容を持っていくには**")
+            st.markdown(
+                "- **データセット** … 「📁 データ管理」の `⬇ 持ち出す` から ZIP で書き出せます"
+                "（画像を含めない「ラベルのみ」も選べます）\n"
+                "- **モデル** … 同じくデータ管理タブから `.pt` 単体、または"
+                "学習ログ・評価結果込みの「一式ZIP」で書き出せます\n"
+                "- **持ち込み** … 移行先では「📤 学習済みモデルをアップロード」と"
+                "「📁 ローカルからデータを直接追加」から取り込めます\n"
+                "- **CVAT のアノテーション** … CVAT 側でタスクをバックアップするか、"
+                "「🏷 Step1」でラベル定義を書き出して共有できます"
+            )
+            st.info(
+                "`data/` `models/` `predictions/` はホスト側のディレクトリを"
+                "そのままマウントしています。ディレクトリごとコピーしても移行できます。"
+            )
+
+        # ── ③ 用語とタスク種別 ────────────────────────────────────────
+        with _ob_t3:
+            st.markdown("**どのタスク種別を選べばよいか**")
+            st.markdown(
+                "| やりたいこと | タスク種別 | CVAT で付けるもの |\n"
+                "|---|---|---|\n"
+                "| 物体の位置を四角で囲みたい | `detect` | 矩形 (box) |\n"
+                "| 物体の形を正確に取りたい | `segment` | ポリゴン |\n"
+                "| 傾いた物体を囲みたい | `obb` | 回転付き矩形 / 4点ポリゴン |\n"
+                "| 画像全体を仕分けたい | `classify` | タグ |\n"
+                "| 関節や特徴点を取りたい | `pose` | ポイント |\n"
+            )
+            st.caption("まず迷ったら `detect` から始めるのが無難です。"
+                       "後から別の種別のデータセットを作り直すこともできます。")
+
+            st.markdown("---")
+            st.markdown("**最低限おさえる指標**")
+            st.markdown(
+                "- **Precision（適合率）** … 検出したもののうち、正しかった割合。"
+                "低い＝誤検出が多い\n"
+                "- **Recall（再現率）** … 実際にあるもののうち、見つけられた割合。"
+                "低い＝見逃しが多い\n"
+                "- **mAP50** … ざっくりした位置が合っていれば正解とする精度。まずこれを見ます\n"
+                "- **mAP50-95** … 位置の正確さまで厳しく見る精度。実用ではこちらが効きます\n"
+                "- **top1 accuracy** … 画像分類での正答率\n"
+            )
+            st.caption("詳しい解説と失敗したときの対処は「📚 トピックス」タブにあります。")
+
+        st.caption("このガイドはサイドバー最下部の「📖 はじめかたガイドを表示」で"
+                   "いつでも開閉できます。")
 
 # ---------------------------------------------------------------------------
 # タブ構成
@@ -3824,6 +1389,11 @@ with tab1:
                         st.success(f"✅ {len(all_raw_dirs)} タスクを統合: `{merged_raw}`")
 
                     st.session_state.cvat_raw_dir = str(merged_raw)
+                    # 来歴に残すため、どの CVAT タスクから取り込んだかを覚えておく
+                    st.session_state["cvat_export_tasks"] = [
+                        {"id": t["id"], "name": t["name"], "size": t.get("size")}
+                        for t in tasks if t["id"] in selected_ids
+                    ]
                     st.session_state.cvat_xml_info = None
                     xml_info = parse_cvat_xml(merged_raw)
                     if xml_info:
@@ -3856,13 +1426,24 @@ with tab1:
                 task_type_options.append("segment")
             if "points" in ann_types:
                 task_type_options.append("pose")
+            if "tag" in ann_types:
+                task_type_options.append("classify")
+            if "box" in ann_types or "polygon" in ann_types:
+                task_type_options.append("obb")
 
             col_task, col_val = st.columns(2)
             with col_task:
                 task_type = st.selectbox(
                     "タスク種別",
                     task_type_options,
-                    help="detect: バウンディングボックス / segment: ポリゴン（box→矩形ポリゴンに変換） / pose: キーポイント",
+                    help="detect: バウンディングボックス / segment: ポリゴン（box→矩形ポリゴンに変換） / "
+                         "pose: キーポイント / classify: 画像分類（CVAT の「タグ」から生成） / "
+                         "obb: 回転バウンディングボックス（回転付き box・4点ポリゴンから生成）",
+                )
+            if "tag" not in ann_types:
+                st.caption(
+                    "💡 画像分類 (classify) を作るには、CVAT で矩形ではなく"
+                    "「タグ（画像単位のラベル）」を付けてエクスポートしてください。"
                 )
             with col_val:
                 val_ratio = st.slider("バリデーション割合", 0.05, 0.40, 0.20, step=0.05)
@@ -3891,6 +1472,7 @@ with tab1:
                             task_type=task_type,
                             out_dir=gen_dir,
                             val_ratio=val_ratio,
+                            cvat_tasks=st.session_state.get("cvat_export_tasks"),
                         )
                     if result:
                         yaml_path = result / "data.yaml"
@@ -3951,6 +1533,11 @@ with tab1:
                     with zipfile.ZipFile(_io_ul.BytesIO(_ul_zip.read()), "r") as _zf:
                         _zf.extractall(_ul_out)
                     st.success(f"✅ 展開完了: `{_ul_out}`")
+                    record_dataset_provenance(
+                        _ul_out, source="upload_zip",
+                        extra={"zip_name": _ul_zip.name,
+                               "note": "外部から持ち込んだ YOLO データセット ZIP"},
+                    )
                     _ul_yamls = list(_ul_out.rglob("data.yaml"))
                     if _ul_yamls:
                         st.info(f"🗂 data.yaml: `{_ul_yamls[0]}`")
@@ -3976,6 +1563,10 @@ with tab1:
                     for _f in _ul_imgs:
                         (_ul_out / _f.name).write_bytes(_f.getbuffer())
                     st.success(f"✅ {len(_ul_imgs)} ファイルを保存: `{_ul_out}`")
+                    record_dataset_provenance(
+                        DATA_DIR / _ul_dir_name, source="upload_images",
+                        extra={"note": f"{_ul_split} に画像 {len(_ul_imgs)} 枚を直接アップロード"},
+                    )
                     st.info("アノテーションを付与する場合は CVATにアップロード後、Step2からエクスポートしてください。")
 
 
@@ -4595,6 +2186,74 @@ with tab2:
 
     st.markdown("---")
 
+    # ── 中断した学習の再開 ───────────────────────────────────────────────────
+    # last.pt があり、results.csv のエポック数が設定より少ない run を候補にする
+    _resume_cands = []
+    if MODELS_DIR.exists():
+        for _last in sorted(MODELS_DIR.glob("*/weights/last.pt"),
+                            key=lambda p: p.stat().st_mtime, reverse=True):
+            _run_dir = _last.parent.parent
+            _done_ep, _total_ep = None, None
+            _rcsv = _run_dir / "results.csv"
+            if _rcsv.exists():
+                try:
+                    import pandas as _pd_rs
+                    _done_ep = len(_pd_rs.read_csv(_rcsv))
+                except Exception:
+                    pass
+            _args_y = _run_dir / "args.yaml"
+            if _args_y.exists():
+                try:
+                    import yaml as _yml_rs
+                    _total_ep = (_yml_rs.safe_load(_args_y.read_text()) or {}).get("epochs")
+                except Exception:
+                    pass
+            # 完走していれば候補から外す（判定できない場合は候補に残す）
+            if _done_ep is not None and _total_ep is not None and _done_ep >= int(_total_ep):
+                continue
+            _resume_cands.append({
+                "run": _run_dir.name, "last": _last,
+                "done": _done_ep, "total": _total_ep,
+            })
+
+    if _resume_cands:
+        with st.expander(f"⏯ 中断した学習を再開する（候補 {len(_resume_cands)} 件）"):
+            st.caption(
+                "停止・クラッシュなどで途中終了した学習を `last.pt` から続きから再開します。"
+                "エポック数や学習率などの設定は中断時のものが引き継がれます"
+                "（上で設定した値は使われません）。"
+            )
+            _rs_labels = [
+                f"{c['run']}　"
+                + (f"({c['done']}/{c['total']} エポック完了)"
+                   if c["done"] is not None and c["total"] is not None
+                   else f"({c['done']} エポック完了)" if c["done"] is not None else "")
+                for c in _resume_cands
+            ]
+            _rs_sel = st.selectbox("再開する学習", _rs_labels, key="resume_sel")
+            _rs_target = _resume_cands[_rs_labels.index(_rs_sel)]
+            st.caption(f"再開元: `{_rs_target['last']}`")
+
+            if st.button("⏯ この学習を再開する", type="primary", use_container_width=True,
+                         disabled=st.session_state.training_running, key="resume_btn"):
+                with _train_log_lock:
+                    _train_state["log"] = []
+                    _train_state["progress"] = 0
+                    _train_state["running"] = True
+                    _train_state["error"] = None
+                    _train_state["model_path"] = None
+                    _train_state["metrics_history"] = []
+                    _train_state["stop_requested"] = False
+                threading.Thread(
+                    target=_train_worker,
+                    # resume=True のとき data / epochs 等は last.pt 側の設定が使われる
+                    args=(data_yaml_path, str(_rs_target["last"]), 0, 0,
+                          mlflow_project, _rs_target["run"], {"resume": True}),
+                    daemon=True,
+                ).start()
+                st.session_state.training_notified = False
+                st.rerun()
+
     # ── 学習ボタン ───────────────────────────────────────────────────────────
     btn_col1, btn_col2 = st.columns([2, 1])
     with btn_col1:
@@ -4710,6 +2369,23 @@ with tab2:
         # ── 学習中: プログレスバー＋リアルタイムグラフ＋自動スクロールログ ──
         prog = st.session_state.training_progress
         st.progress(prog / 100, text=f"進捗: {prog}%")
+
+        # ── 停止（エポック末で安全に打ち切る）──
+        with _train_log_lock:
+            _stop_pending = _train_state.get("stop_requested", False)
+        _stop_c1, _stop_c2 = st.columns([1, 3])
+        with _stop_c1:
+            if st.button("⏹ 学習を停止", type="secondary", use_container_width=True,
+                         disabled=_stop_pending, key="train_stop_btn"):
+                with _train_log_lock:
+                    _train_state["stop_requested"] = True
+                st.rerun()
+        with _stop_c2:
+            if _stop_pending:
+                st.warning("⏳ 停止要求を受け付けました。現在のエポックが終わり次第停止します。")
+            else:
+                st.caption("停止してもその時点までの `best.pt` / `last.pt` は保存されます。"
+                           "`last.pt` があれば下の「中断した学習を再開」から続きから再開できます。")
 
         _mh = st.session_state.training_metrics_history
         if _mh:
@@ -4943,9 +2619,21 @@ with tab3:
 
                 _ev_tbl = []
                 _has_mask_metric = any(_r.get("mask_map50") is not None for _r in _ev_rows)
+                _is_cls_eval = all(_r.get("task") == "classify" for _r in _ev_rows)
                 for _r in _ev_rows:
                     _mp = _r["model_path"]
                     _spd = (_r.get("speed_ms") or {}).get("inference")
+                    if _is_cls_eval:
+                        # 画像分類は mAP ではなく accuracy で比較する
+                        _ev_tbl.append({
+                            "モデル": str(_mp.relative_to(MODELS_DIR)),
+                            "top1 accuracy": round(_r.get("top1") or 0.0, 4),
+                            "top5 accuracy": round(_r.get("top5") or 0.0, 4),
+                            "推論(ms)": _spd,
+                            "サイズ(MB)": round(_mp.stat().st_size / 1024 / 1024, 1),
+                            "評価日時": _r.get("evaluated_at", ""),
+                        })
+                        continue
                     _row = {
                         "モデル": str(_mp.relative_to(MODELS_DIR)),
                         "mAP50": round(_r["map50"], 4),
@@ -4965,14 +2653,22 @@ with tab3:
                         "評価日時": _r.get("evaluated_at", ""),
                     })
                     _ev_tbl.append(_row)
-                _df_ev = _pd_ev.DataFrame(_ev_tbl).sort_values("mAP50-95", ascending=False)
+                _sort_key = "top1 accuracy" if _is_cls_eval else "mAP50-95"
+                _df_ev = _pd_ev.DataFrame(_ev_tbl).sort_values(_sort_key, ascending=False)
                 st.dataframe(_df_ev, use_container_width=True, hide_index=True)
 
                 _best = _df_ev.iloc[0]
-                st.success(
-                    f"🏆 このデータセットで最も精度が高いのは **{_best['モデル']}** "
-                    f"（mAP50-95 = {_best['mAP50-95']:.4f} / mAP50 = {_best['mAP50']:.4f}）"
-                )
+                if _is_cls_eval:
+                    st.success(
+                        f"🏆 このデータセットで最も精度が高いのは **{_best['モデル']}** "
+                        f"（top1 = {_best['top1 accuracy']:.4f} / "
+                        f"top5 = {_best['top5 accuracy']:.4f}）"
+                    )
+                else:
+                    st.success(
+                        f"🏆 このデータセットで最も精度が高いのは **{_best['モデル']}** "
+                        f"（mAP50-95 = {_best['mAP50-95']:.4f} / mAP50 = {_best['mAP50']:.4f}）"
+                    )
 
                 # クラス別 AP と成果物プロット
                 _ev_detail_sel = st.selectbox(
@@ -5927,6 +3623,24 @@ with tab4:
                     shutil.rmtree(ds)
                     st.success(f"{ds.name} を削除しました")
                     st.rerun()
+            _ds_prov = read_provenance(ds)
+            if _ds_prov:
+                _src_label = {
+                    "cvat": "CVAT から生成", "upload_zip": "ZIP を取込",
+                    "upload_images": "画像を直接アップロード", "merge": "データセット統合",
+                }.get(_ds_prov.get("source", ""), _ds_prov.get("source", "不明"))
+                _tasks_txt = ", ".join(
+                    f"[{t.get('id')}] {t.get('name')}" for t in (_ds_prov.get("cvat_tasks") or [])
+                )
+                st.caption(
+                    f"📚 {_src_label}"
+                    + (f"（{_ds_prov.get('task_type')}）" if _ds_prov.get("task_type") else "")
+                    + f"　作成: {_ds_prov.get('created_at', '不明')}"
+                    + (f"　元タスク: {_tasks_txt}" if _tasks_txt else "")
+                )
+            else:
+                st.caption("📚 来歴の記録なし（この機能を入れる前に作られたデータセットです）")
+
             with st.expander(f"⬇ {ds.name} を持ち出す（ZIP エクスポート）"):
                 st.caption(
                     "他の PC で学習させる場合などに、データセットを ZIP で書き出します。"
@@ -6310,6 +4024,19 @@ with tab4:
                                 inspect_model_file(mp)
                             st.rerun()
 
+                    # 来歴（何で学習したモデルか）
+                    _prov = read_provenance(mp.parent.parent) if mp.parent.name == "weights" else None
+                    if _prov:
+                        _pds = _prov.get("dataset", {}) or {}
+                        _pc = _pds.get("counts_at_train", {}) or {}
+                        _cnt_txt = " / ".join(f"{k} {v}枚" for k, v in _pc.items())
+                        st.caption(
+                            f"📚 学習データ: `{_pds.get('name') or '不明'}`"
+                            + (f"（{_cnt_txt}）" if _cnt_txt else "")
+                            + f"　ベース: `{Path(_prov.get('base_model', '')).name or '不明'}`"
+                            + ("　※再開あり" if _prov.get("resumed") else "")
+                        )
+
                     # 評価済みなら最新の mAP を出す（results.csv とは別に、
                     # 任意データセットで測り直した値）
                     _evs = read_model_evals(mp)
@@ -6391,6 +4118,101 @@ with tab4:
 
     st.markdown("---")
 
+    # --- モデルの系譜（何から何が作られたか）---
+    with st.expander("📚 モデルの系譜を追跡する"):
+        st.caption(
+            "モデルがどのデータセットから作られたかを一覧します。"
+            "データを足しながら学習を重ねると対応が分からなくなるため、"
+            "学習開始時点の情報を記録しています。"
+        )
+        _lin_rows = []
+        for _run in sorted([p for p in MODELS_DIR.iterdir() if p.is_dir()],
+                           key=lambda p: p.stat().st_mtime, reverse=True) \
+                if MODELS_DIR.exists() else []:
+            _pv = read_provenance(_run)
+            if not _pv:
+                _lin_rows.append({
+                    "モデル": _run.name, "学習日時": "—", "学習データ": "（記録なし）",
+                    "枚数": "—", "ベースモデル": "—", "クラス": "—",
+                })
+                continue
+            _d = _pv.get("dataset", {}) or {}
+            _cnts = _d.get("counts_at_train", {}) or {}
+            _lin_rows.append({
+                "モデル": _run.name,
+                "学習日時": _pv.get("trained_at", "—"),
+                "学習データ": _d.get("name") or "—",
+                "枚数": " / ".join(f"{k}:{v}" for k, v in _cnts.items()) or "—",
+                "ベースモデル": Path(_pv.get("base_model", "")).name or "—",
+                "クラス": ", ".join(_d.get("classes") or []) or "—",
+            })
+
+        if _lin_rows:
+            import pandas as _pd_lin
+            st.dataframe(_pd_lin.DataFrame(_lin_rows),
+                         use_container_width=True, hide_index=True)
+
+            # 1件を選んで詳細（データセット側の来歴まで辿る）
+            _lin_names = [r["モデル"] for r in _lin_rows]
+            _lin_sel = st.selectbox("詳細を見るモデル", _lin_names, key="lineage_sel")
+            _lin_pv = read_provenance(MODELS_DIR / _lin_sel)
+            if not _lin_pv:
+                st.info("このモデルには来歴の記録がありません。"
+                        "この機能を入れる前に学習されたモデルです。")
+            else:
+                _ld = _lin_pv.get("dataset", {}) or {}
+                _dsp = _ld.get("provenance") or {}
+                st.markdown("**系譜**")
+                _chain = []
+                if _dsp.get("cvat_tasks"):
+                    _chain.append("CVAT タスク " + ", ".join(
+                        f"[{t.get('id')}] {t.get('name')}" for t in _dsp["cvat_tasks"]))
+                elif _dsp.get("source"):
+                    _chain.append({"upload_zip": "外部 ZIP の取込",
+                                   "upload_images": "画像の直接アップロード",
+                                   "merge": "データセット統合"}.get(_dsp["source"], _dsp["source"]))
+                if _ld.get("name"):
+                    _chain.append(f"データセット `{_ld['name']}`")
+                _chain.append(f"モデル `{_lin_sel}`")
+                st.markdown("　→　".join(_chain))
+
+                _lc1, _lc2 = st.columns(2)
+                with _lc1:
+                    st.markdown("**学習時の情報**")
+                    st.caption(f"学習日時: {_lin_pv.get('trained_at', '—')}")
+                    st.caption(f"ベースモデル: `{_lin_pv.get('base_model', '—')}`")
+                    st.caption(f"再開: {'あり' if _lin_pv.get('resumed') else 'なし'}")
+                    _pp = _lin_pv.get("params", {}) or {}
+                    st.caption("主なパラメータ: " + ", ".join(
+                        f"{k}={_pp[k]}" for k in ("epochs", "batch", "imgsz", "optimizer")
+                        if k in _pp) or "—")
+                with _lc2:
+                    st.markdown("**学習に使ったデータ**")
+                    st.caption(f"データセット: `{_ld.get('name') or '—'}`")
+                    st.caption(f"クラス: {', '.join(_ld.get('classes') or []) or '—'}")
+                    _cnts2 = _ld.get("counts_at_train", {}) or {}
+                    st.caption("学習時の枚数: " + (
+                        " / ".join(f"{k} {v}枚" for k, v in _cnts2.items()) or "—"))
+                    # 現在のデータセットと比べて増減があれば知らせる
+                    _cur_ds = Path(_ld.get("data_yaml", "")).parent if _ld.get("data_yaml") else None
+                    if _cur_ds and _cur_ds.exists():
+                        _now = count_dataset_items(_cur_ds)
+                        if _now != _cnts2 and _cnts2:
+                            st.warning(
+                                "⚠ 学習後にデータセットが変わっています（現在: "
+                                + " / ".join(f"{k} {v}枚" for k, v in _now.items())
+                                + "）。再学習すると結果が変わります。"
+                            )
+                    elif _ld.get("data_yaml"):
+                        st.warning("⚠ 学習に使ったデータセットは現在見つかりません。")
+
+                with st.expander("生の来歴データ (JSON)"):
+                    st.json(_lin_pv)
+        else:
+            st.info("models/ に学習 run がありません。")
+
+    st.markdown("---")
+
     # --- predictions/ 一括クリア ---
     st.markdown("#### 推論結果 (`predictions/`)")
     pred_files = list(PREDICTIONS_DIR.glob("*.json")) if PREDICTIONS_DIR.exists() else []
@@ -6464,6 +4286,214 @@ with tab5:
         "<p style='color:#6a8aaa;font-size:.85rem;'>物体検出 MLOps の概念・操作ガイドです。GitHub の詳細ドキュメントを参照してください。</p>",
         unsafe_allow_html=True,
     )
+
+    _tp1, _tp2, _tp3, _tp4, _tp5 = st.tabs([
+        "🧭 タスクの選び方", "📐 指標の読み方", "🩺 うまくいかないとき",
+        "🗂 データセットの作り方", "🛣 今後の方針",
+    ])
+
+    # ── タスク種別の選び方 ────────────────────────────────────────────
+    with _tp1:
+        st.markdown("#### どのタスク種別を選ぶか")
+        st.markdown(
+            "| やりたいこと | タスク種別 | CVAT で付けるもの | 出力 |\n"
+            "|---|---|---|---|\n"
+            "| 物体の位置を四角で囲む | `detect` | 矩形 (box) | 位置とクラス |\n"
+            "| 物体の形を正確に取る | `segment` | ポリゴン | 輪郭マスク |\n"
+            "| 傾いた物体を囲む | `obb` | 回転付き矩形 / 4点ポリゴン | 回転した四角 |\n"
+            "| 画像全体を仕分ける | `classify` | タグ | 画像ごとのクラス |\n"
+            "| 関節・特徴点を取る | `pose` | ポイント | キーポイント座標 |\n"
+        )
+        st.info(
+            "**迷ったら `detect` から。** アノテーションが最も速く、"
+            "必要な情報が足りないと分かってから `segment` に移っても、"
+            "矩形は自動でポリゴンに変換できます（逆はできません）。"
+        )
+
+        st.markdown("#### モデルサイズの選び方")
+        st.markdown(
+            "`n` → `s` → `m` → `l` → `x` の順に大きく、精度が上がり、遅く重くなります。"
+        )
+        st.markdown(
+            "- **まず `n` か `s` で一周する** … データやラベルの問題は小さいモデルでも分かります\n"
+            "- **精度が頭打ちなら大きくする** … ただし伸びは小さいことが多く、"
+            "データを増やす方が効くケースが大半です\n"
+            "- **実機に載せるなら速度も測る** … 「🔭 Step4」の評価で推論時間(ms)が出ます\n"
+        )
+        st.caption(
+            "参考: 同一データセットでの実測では、大きいモデルが必ず勝つとは限りません。"
+            "mAP50 がほぼ同じでも推論時間が2倍以上違うことがあるので、"
+            "評価タブで両方を比べてから決めてください。"
+        )
+
+        st.markdown("#### 画像サイズ (imgsz)")
+        st.markdown(
+            "- 推論時間はおおむね imgsz の**2乗に比例**します（640→1280 で約4倍）\n"
+            "- 小さく写る対象が多いなら上げる価値があります\n"
+            "- 学習と推論で同じ値を使うのが基本です\n"
+        )
+
+    # ── 指標の読み方 ──────────────────────────────────────────────
+    with _tp2:
+        st.markdown("#### 検出・セグメンテーションの指標")
+        st.markdown(
+            "- **Precision（適合率）** … 検出したもののうち正しかった割合。"
+            "低い = **誤検出が多い**\n"
+            "- **Recall（再現率）** … 実際にあるもののうち見つけられた割合。"
+            "低い = **見逃しが多い**\n"
+            "- **IoU** … 予測と正解の重なり具合。1.0 で完全一致\n"
+            "- **mAP50** … IoU 0.5 以上を正解とみなした精度。"
+            "「だいたい合っている」かを見る\n"
+            "- **mAP50-95** … IoU 0.5〜0.95 で平均した精度。"
+            "**位置の正確さまで含めた実力**。実用ではこちらが効く\n"
+            "- **top1 / top5 accuracy** … 画像分類の正答率\n"
+        )
+        st.info(
+            "**mAP50 が高いのに mAP50-95 が低い**場合、「物体は見つけられているが"
+            "枠の位置が甘い」状態です。アノテーションの枠が雑になっていないか、"
+            "imgsz が小さすぎないかを疑ってください。"
+        )
+
+        st.markdown("#### Precision と Recall はトレードオフ")
+        st.markdown(
+            "推論時の `conf`（信頼度しきい値）を上げると Precision が上がり Recall が下がります。"
+            "下げるとその逆です。用途で決めてください。"
+        )
+        st.markdown(
+            "- **見逃したくない**（検査・安全）… conf を下げて Recall を優先\n"
+            "- **誤検出を出したくない**（自動処理）… conf を上げて Precision を優先\n"
+            "- **自動アノテーションの下書き** … 少し低めが便利（消す方が描くより速い）\n"
+        )
+        st.caption(
+            "なお mAP を測るときの conf は 0.001 が正しい値です（全信頼度域の"
+            "PR 曲線から計算するため）。実運用のしきい値とは別物です。"
+        )
+
+    # ── トラブルシューティング ────────────────────────────────────
+    with _tp3:
+        st.markdown("#### mAP が上がらない")
+        st.markdown(
+            "**まずデータを疑ってください。** モデルやパラメータより効きます。\n\n"
+            "1. 「📁 データ管理」の **品質チェック**を実行する"
+            "（幅0の枠、画像とラベルの対応漏れ、クラス分布の偏りが出ます）\n"
+            "2. 「🔭 Step4」の **正解ラベルとの差分分析**で FN が多い画像を見る"
+            "— アノテーション漏れが見つかることが多いです\n"
+            "3. 学習枚数が足りているか（目安: 1クラスあたり最低 100〜200 枚、"
+            "実用なら 1000 枚以上）\n"
+            "4. train と val で撮影条件が違いすぎないか\n"
+        )
+
+        st.markdown("#### 過学習している（train は良いのに val が悪い）")
+        st.markdown(
+            "- データを増やす / データ拡張を強める（mosaic, mixup, hsv 系）\n"
+            "- モデルを小さくする\n"
+            "- `patience` を設定して早期終了させる\n"
+            "- エポックを減らす\n"
+        )
+        st.caption("学習曲線で val の loss が下げ止まって上がり始めたら過学習のサインです。")
+
+        st.markdown("#### 特定のクラスだけ精度が低い")
+        st.markdown(
+            "- **クラス別 AP** を評価タブで確認（どのクラスが悪いか特定する）\n"
+            "- そのクラスの枚数が少なければ追加する（クラス分布の偏りは品質チェックで検出できます）\n"
+            "- 似たクラスと混同しているなら、混同行列を確認してクラス定義自体を見直す\n"
+        )
+
+        st.markdown("#### 学習が途中で止まってしまった / 止めたい")
+        st.markdown(
+            "- 学習中の **⏹ 学習を停止** でエポック末に安全に止められます\n"
+            "- 止めた学習は **⏯ 中断した学習を再開する** から `last.pt` の続きから再開できます\n"
+            "- GPU メモリ不足で落ちる場合は `batch` か `imgsz` を下げてください\n"
+        )
+
+        st.markdown("#### 他の PC で学習した .pt が読み込めない")
+        st.markdown(
+            "学習元の ultralytics のバージョンがこの環境（8.4.48）と離れていると起きます。"
+            "「📁 データ管理」からアップロードすると読み込み検証まで行うので、"
+            "エラー内容を確認してください。"
+        )
+
+    # ── データセットの作り方 ──────────────────────────────────────
+    with _tp4:
+        st.markdown("#### 枚数の目安")
+        st.markdown(
+            "| 段階 | 枚数の目安 | 何が分かるか |\n"
+            "|---|---|---|\n"
+            "| お試し | 50〜100 枚 | パイプラインが通るか |\n"
+            "| 最低限 | 1クラス 100〜200 枚 | 実用になるかの当たり |\n"
+            "| 実用 | 1クラス 1000 枚以上 | 安定した精度 |\n"
+        )
+
+        st.markdown("#### アノテーションの質")
+        st.markdown(
+            "- **枠は対象にぴったり合わせる** … 甘い枠は mAP50-95 を直接下げます\n"
+            "- **基準を統一する** … 隠れている部分を含めるか、どこまでを1つと数えるか。"
+            "複数人で作業するなら特に重要です\n"
+            "- **迷う対象のルールを決めておく** … 後から直すコストは大きいです\n"
+        )
+        st.info(
+            "**自動アノテーションを活用してください。** 一度モデルを作れば、"
+            "「🏷 Step1」から CVAT にデプロイして下書きを自動生成できます。"
+            "ゼロから描くより、間違いを直す方が圧倒的に速いです。"
+        )
+
+        st.markdown("#### 学習を回す順序")
+        st.markdown(
+            "1. 少ないデータ・小さいモデル・少ないエポックで**一周させる**\n"
+            "2. 品質チェックと差分分析で**データの問題を潰す**\n"
+            "3. データを追加する（自動アノテーションで効率化）\n"
+            "4. モデルサイズ・エポック・パラメータを調整する\n"
+        )
+        st.caption("1〜3 を回すのが最も効きます。4 は最後で構いません。")
+
+        st.markdown("#### 途中からデータを足したいとき")
+        st.markdown(
+            "- 「📁 データ管理」の各データセットから**画像を追加**できます\n"
+            "- 複数のデータセットを**統合**することもできます\n"
+            "- 既存モデルを初期重みにして**追加学習**できます"
+            "（Step3 のモデル名に `models/<run>/weights/best.pt` を指定）\n"
+        )
+
+    # ── 今後の方針 ────────────────────────────────────────────────
+    with _tp5:
+        st.markdown("#### このリポジトリの目的")
+        st.markdown(
+            "画像系の学習モデルを作るために必要な作業を、"
+            "**1つの環境で完結**させることを目指しています。"
+            "アノテーション・データ整備・学習・評価・モデル管理を"
+            "同じ UI から扱えるようにしています。"
+        )
+        st.markdown("#### 設計の方針")
+        st.markdown(
+            "- **どの段階からでもデータを入れられる** … CVAT 経由でも、ZIP でも、"
+            "画像単体でも、他 PC で作った `.pt` でも受け入れる\n"
+            "- **持ち出せる** … データセットもモデルも ZIP で書き出せる\n"
+            "- **壊れたデータを検出して直せる** … 品質チェックと自動修正\n"
+            "- **判断材料を UI 内に出す** … 同一条件での mAP 比較、推論速度、"
+            "正解ラベルとの差分\n"
+        )
+        st.markdown("#### 実装予定・検討中")
+        st.markdown(
+            "- ハイパーパラメータ探索 / k-fold 交差検証\n"
+            "- train/val の再分割、クラス名の編集・統合\n"
+            "- 学習に使ったデータの来歴を記録する仕組み\n"
+            "- MLflow の実験比較を UI 内に埋め込む\n"
+            "- `app/main.py` の分割（機能追加を続けやすくするため）\n"
+        )
+        st.markdown(
+            "**[→ docs/overview.md をGitHubで開く]"
+            "(https://github.com/ryotaema/detection_dev_ui/blob/main/docs/overview.md)**"
+        )
+        st.caption(
+            "実装済みの機能・コード構成・設計方針・実装上の落とし穴をまとめています。"
+            "新しく参加する人はまずこれを読んでください。"
+        )
+        st.caption(
+            "※ 今後の実装予定と既知の不具合は、この環境の `docs/roadmap.md` にあります"
+            "（開発方針のため Git 管理外。`SPEC.md` / `CLAUDE.md` と同じ扱い）。"
+        )
+
+    st.markdown("---")
 
     # ── ガイドへのリンク ──────────────────────────────────────────
     st.markdown("""
