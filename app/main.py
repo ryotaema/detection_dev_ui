@@ -18,6 +18,15 @@ import streamlit.components.v1 as components
 
 
 @st.cache_resource
+def _get_deploy_shared() -> tuple[dict, threading.Lock]:
+    """Nuclio デプロイのバックグラウンド実行状態（学習と同じく rerun をまたいで保持する）"""
+    return (
+        {"log": [], "running": False, "error": None, "target": None, "finished": False},
+        threading.Lock(),
+    )
+
+
+@st.cache_resource
 def _get_train_shared() -> tuple[dict, threading.Lock]:
     """st.rerun() をまたいで同一オブジェクトを保持する共有状態。
     Streamlit はスクリプトを再実行するたびにモジュール変数を再初期化するため、
@@ -35,6 +44,9 @@ DATA_DIR       = Path(os.getenv("DATA_DIR",       "/workspace/data"))
 MODELS_DIR     = Path(os.getenv("MODELS_DIR",     "/workspace/models"))
 PREDICTIONS_DIR      = Path(os.getenv("PREDICTIONS_DIR","/workspace/predictions"))
 PREDICTIONS_VIDEOS_DIR = PREDICTIONS_DIR / "videos"
+SERVERLESS_DIR = Path(os.getenv("SERVERLESS_DIR", "/workspace/serverless"))
+CVAT_NETWORK   = os.getenv("CVAT_NETWORK", "")                          # Nuclio 関数を載せる網
+NUCLIO_WEB     = os.getenv("NUCLIO_DASHBOARD", "http://localhost:8070") # ブラウザ表示用
 CVAT_HOST      = os.getenv("CVAT_HOST",     "http://cvat-server:8080")  # コンテナ内通信用
 CVAT_WEB       = os.getenv("CVAT_WEB_HOST", "http://localhost:8080")    # ブラウザ表示用
 CVAT_USER      = os.getenv("CVAT_USERNAME","admin")
@@ -1278,6 +1290,328 @@ def inspect_model_file(model_path: Path, save: bool = True) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# CVAT 自動アノテーション (Nuclio serverless) 連携
+#
+#   models/<run>/weights/best.pt
+#     → serverless/custom/<slug>/{function.yaml, function-gpu.yaml, model.env} を自動生成
+#     → serverless/deploy.sh を実行
+#     → CVAT の「Actions → Automatic annotation」に出現
+#
+#   ラベル定義 (annotations.spec) はモデルのクラス名から生成するため、
+#   「モデルのクラス名 = 関数のラベル名」が機械的に保証される。
+#   （CVAT タスク側のラベル名との一致だけは利用者が担保する必要がある）
+# ---------------------------------------------------------------------------
+NUCTL_BIN = SERVERLESS_DIR / "bin" / "nuctl"
+
+
+def serverless_status() -> dict:
+    """UI から Nuclio デプロイが実行可能かどうかを判定する"""
+    import shutil as _sh
+
+    return {
+        "deploy_sh":   (SERVERLESS_DIR / "deploy.sh").exists(),
+        "nuctl":       NUCTL_BIN.exists(),
+        "docker_sock": Path("/var/run/docker.sock").exists(),
+        "docker_cli":  _sh.which("docker") is not None,
+        "network":     CVAT_NETWORK,
+    }
+
+
+def serverless_ready() -> bool:
+    s = serverless_status()
+    return all([s["deploy_sh"], s["nuctl"], s["docker_sock"], s["docker_cli"]])
+
+
+def _nuctl(*args: str, timeout: int = 60):
+    """nuctl をサブプロセス実行して CompletedProcess を返す"""
+    import subprocess
+
+    return subprocess.run(
+        [str(NUCTL_BIN), *args, "--platform", "local"],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def list_nuclio_functions() -> list[dict]:
+    """デプロイ済み Nuclio 関数の一覧（= CVAT の Automatic annotation に出るモデル）"""
+    if not NUCTL_BIN.exists():
+        return []
+    try:
+        proc = _nuctl("get", "function", "-o", "json")
+        if proc.returncode != 0:
+            return []
+        raw = json.loads(proc.stdout or "[]")
+    except Exception:
+        return []
+
+    out = []
+    for fn in raw if isinstance(raw, list) else [raw]:
+        meta   = fn.get("metadata", {}) or {}
+        spec   = fn.get("spec", {}) or {}
+        status = fn.get("status", {}) or {}
+        ann    = meta.get("annotations", {}) or {}
+
+        labels = []
+        try:
+            labels = [l.get("name", "") for l in json.loads(ann.get("spec") or "[]")]
+        except Exception:
+            pass
+
+        res = spec.get("resources", {}) or {}
+        out.append({
+            "name":    meta.get("name", ""),
+            "display": ann.get("name", "") or meta.get("name", ""),
+            "type":    ann.get("type", ""),
+            "labels":  labels,
+            "image":   spec.get("image", ""),
+            "gpu":     "nvidia.com/gpu" in json.dumps(res.get("limits", {}) or {}),
+            "state":   status.get("state", ""),
+            "port":    (status.get("httpPort") or ""),
+        })
+    return sorted(out, key=lambda d: d["name"])
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def cached_nuclio_functions() -> list[dict]:
+    """関数一覧の短期キャッシュ。毎 rerun で nuctl を起動しないための薄いラッパ。
+    デプロイ・削除の直後は呼び出し側で .clear() すること。
+    """
+    return list_nuclio_functions()
+
+
+def list_serverless_defs() -> list[dict]:
+    """serverless/custom/ 配下の関数定義（未デプロイのものも含む）"""
+    defs = []
+    cdir = SERVERLESS_DIR / "custom"
+    if not cdir.exists():
+        return defs
+
+    for d in sorted(p for p in cdir.iterdir() if p.is_dir()):
+        model_run = ""
+        env_f = d / "model.env"
+        if env_f.exists():
+            for line in env_f.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("MODEL_RUN="):
+                    model_run = line.split("=", 1)[1].strip().strip('"').strip("'")
+
+        fn_name, fn_display = "", ""
+        y = d / "function.yaml"
+        if y.exists():
+            try:
+                import yaml as _yml
+                _meta = ((_yml.safe_load(y.read_text()) or {}).get("metadata") or {})
+                fn_name    = _meta.get("name", "")
+                fn_display = (_meta.get("annotations") or {}).get("name", "")
+            except Exception:
+                pass
+
+        defs.append({
+            "dir": d.name,
+            "model_run": model_run,
+            "function_name": fn_name,
+            "display": fn_display,
+            "has_gpu_yaml": (d / "function-gpu.yaml").exists(),
+            "model_exists": bool(model_run)
+                            and (MODELS_DIR / model_run / "weights" / "best.pt").exists(),
+        })
+    return defs
+
+
+def slugify_function_name(run_name: str) -> str:
+    """モデル run 名を Nuclio 関数名に使える形（英小文字・数字・ハイフン）へ整える"""
+    import re
+
+    s = re.sub(r"[^a-z0-9]+", "-", str(run_name).lower()).strip("-")
+    return s or "model"
+
+
+def generate_function_files(
+    fn_dir: str,
+    model_run: str,
+    class_names: list[str],
+    display_name: str = "",
+    description: str = "",
+) -> tuple[Path, str]:
+    """serverless/custom/<fn_dir>/ に関数定義一式を生成し、(ディレクトリ, 関数名) を返す。
+
+    CPU 版 (function.yaml) と GPU 版 (function-gpu.yaml) の両方を出力する。
+    deploy.sh がどちらを使うかを選ぶ。
+    """
+    slug     = slugify_function_name(fn_dir)
+    fn_name  = f"custom-{slug}"
+    image    = f"cvat.custom.{slug}"
+    disp     = display_name or f"{model_run} (custom)"
+    desc     = description or f"自作 YOLO 検出器 ({model_run} / Ultralytics)"
+
+    # ラベル定義はモデルのクラス名から生成（json.dumps でエスケープを担保）
+    items = [{"id": i, "name": n, "type": "rectangle"} for i, n in enumerate(class_names)]
+    spec_block = "\n".join(
+        "      " + line for line in json.dumps(items, ensure_ascii=False, indent=2).splitlines()
+    )
+
+    def _yaml(gpu: bool) -> str:
+        if gpu:
+            base_image = "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04"
+            torch_url  = "https://download.pytorch.org/whl/cu128"
+            tag        = ":latest-gpu"
+            suffix     = "GPU cu128"
+            resources  = (
+                "\n  # GPU を割り当てる。有効化には Docker daemon の default-runtime=nvidia が必要\n"
+                "  resources:\n"
+                "    limits:\n"
+                "      nvidia.com/gpu: 1\n"
+            )
+        else:
+            base_image = "ubuntu:22.04"
+            torch_url  = "https://download.pytorch.org/whl/cpu"
+            tag        = ""
+            suffix     = "CPU"
+            resources  = ""
+
+        return f"""# =============================================================================
+# このファイルは Streamlit UI (データ管理タブ) が自動生成しました。
+#   生成元モデル: models/{model_run}/weights/best.pt
+#   annotations.spec のラベルはモデルのクラス名から生成されています。
+#   CVAT タスク側のラベル名と一致していることを確認してください。
+# =============================================================================
+metadata:
+  name: {fn_name}
+  namespace: cvat
+  annotations:
+    name: {json.dumps(f"{disp} / {suffix}", ensure_ascii=False)}
+    type: detector
+    spec: |
+{spec_block}
+
+spec:
+  description: {json.dumps(f"{desc} / {suffix}", ensure_ascii=False)}
+  runtime: "python:3.10"
+  handler: main:handler
+  eventTimeout: 60s
+
+  env:
+    - name: YOLO_CONFIG_DIR
+      value: /tmp/Ultralytics
+    - name: MPLCONFIGDIR
+      value: /tmp/matplotlib
+
+  build:
+    image: {image}{tag}
+    baseImage: {base_image}
+    directives:
+      preCopy:
+        - kind: RUN
+          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: pip install --no-cache-dir torch torchvision --index-url {torch_url}
+        - kind: RUN
+          value: pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml
+        - kind: WORKDIR
+          value: /opt/nuclio
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: "http"
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+{resources}
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
+"""
+
+    out_dir = SERVERLESS_DIR / "custom" / fn_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "function.yaml").write_text(_yaml(gpu=False))
+    (out_dir / "function-gpu.yaml").write_text(_yaml(gpu=True))
+    (out_dir / "model.env").write_text(
+        "# この関数が使う学習済みモデル (models/<MODEL_RUN>/weights/best.pt)\n"
+        "# serverless/deploy.sh がこの値を読み、best.pt をビルドコンテキストへコピーする\n"
+        f"MODEL_RUN={model_run}\n"
+    )
+    return out_dir, fn_name
+
+
+def _deploy_worker(fn_dir: str, use_gpu: bool) -> None:
+    """deploy.sh をサブプロセス実行し、出力を共有ログへ流す（バックグラウンドスレッド）"""
+    import subprocess
+
+    state, lock = _get_deploy_shared()
+
+    def _log(msg: str) -> None:
+        with lock:
+            state["log"].append(msg)
+
+    try:
+        env = os.environ.copy()
+        if CVAT_NETWORK:
+            env["CVAT_NETWORK"] = CVAT_NETWORK
+
+        cmd = ["bash", str(SERVERLESS_DIR / "deploy.sh"),
+               "--gpu" if use_gpu else "--cpu", fn_dir]
+        _log(f"$ {' '.join(cmd)}")
+        _log(f"(network={env.get('CVAT_NETWORK', '自動判定')})")
+
+        proc = subprocess.Popen(
+            cmd, cwd=str(SERVERLESS_DIR), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        for line in proc.stdout:            # type: ignore[union-attr]
+            _log(line.rstrip())
+        proc.wait()
+
+        if proc.returncode != 0:
+            with lock:
+                state["error"] = f"deploy.sh が終了コード {proc.returncode} で失敗しました"
+        else:
+            _log("")
+            _log("✅ デプロイ完了。CVAT の Actions → Automatic annotation に反映されます"
+                 "（反映まで十数秒かかる場合があります）")
+    except Exception as e:
+        with lock:
+            state["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with lock:
+            state["running"] = False
+            state["finished"] = True
+
+
+def start_deploy(fn_dir: str, use_gpu: bool) -> None:
+    """デプロイをバックグラウンドで開始する"""
+    state, lock = _get_deploy_shared()
+    with lock:
+        if state["running"]:
+            return
+        state["log"] = []
+        state["error"] = None
+        state["running"] = True
+        state["finished"] = False
+        state["target"] = fn_dir
+
+    threading.Thread(target=_deploy_worker, args=(fn_dir, use_gpu), daemon=True).start()
+
+
+def delete_nuclio_function(fn_name: str) -> tuple[bool, str]:
+    """デプロイ済み関数を削除する（CVAT の選択肢からも消える）"""
+    if not NUCTL_BIN.exists():
+        return False, "nuctl が見つかりません"
+    try:
+        proc = _nuctl("delete", "function", fn_name, timeout=120)
+        if proc.returncode == 0:
+            return True, proc.stdout.strip() or "削除しました"
+        return False, (proc.stderr or proc.stdout).strip()
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+# ---------------------------------------------------------------------------
 # YOLO 推論
 # ---------------------------------------------------------------------------
 def run_inference(
@@ -1938,13 +2272,272 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # タブ構成
 # ---------------------------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🏷 アノテーション",
     "📤 Step1: データ取込",
     "🚀 Step2: モデル学習",
     "🔭 Step3: 推論・評価",
     "📁 データ管理",
     "📚 トピックス",
 ])
+
+# ===========================================================================
+# タブ0: アノテーション（CVAT 自動アノテーション運用 + 進捗）
+# ===========================================================================
+with tab0:
+    st.markdown(f"""
+<div class="step-banner">
+  <div class="sb-title">🏷 STEP 0: アノテーション</div>
+  <div class="sb-prev">← 作業場所: CVAT ({CVAT_WEB}) — ここはその作業を支援する管理画面です</div>
+  <div class="sb-desc">→ ここでやること: 学習済みモデルを自動アノテーションに載せる / チームの進捗を把握する</div>
+</div>""", unsafe_allow_html=True)
+
+    # ── 自動アノテーションモデル (Nuclio) ──────────────────────────────────
+    st.markdown('<div class="pipeline-card"><h3>🤖 自動アノテーションモデル (Nuclio)</h3>',
+                unsafe_allow_html=True)
+    st.caption(
+        "ここにデプロイしたモデルが、CVAT の「Actions → Automatic annotation」の選択肢に現れます。"
+        "手作業のアノテーションを、モデルの推論結果を修正する作業に置き換えられます。"
+    )
+
+    _sl = serverless_status()
+    if not serverless_ready():
+        _sl_miss = []
+        if not _sl["deploy_sh"]:   _sl_miss.append("`serverless/deploy.sh` が見つかりません")
+        if not _sl["nuctl"]:       _sl_miss.append("`serverless/bin/nuctl` が見つかりません")
+        if not _sl["docker_sock"]: _sl_miss.append("`/var/run/docker.sock` がマウントされていません")
+        if not _sl["docker_cli"]:  _sl_miss.append("コンテナ内に `docker` コマンドがありません")
+        st.warning(
+            "⚠ このコンテナからは Nuclio へデプロイできません。\n\n"
+            + "\n".join(f"- {m}" for m in _sl_miss)
+            + "\n\n`docker-compose.yml` の `streamlit_app` に serverless / docker.sock の"
+              "マウントを追加し、`docker compose up -d streamlit_app` を実行してください。"
+        )
+    else:
+        _dep_state, _dep_lock = _get_deploy_shared()
+        with _dep_lock:
+            _dep_running  = _dep_state["running"]
+            _dep_log      = list(_dep_state["log"])
+            _dep_error    = _dep_state["error"]
+            _dep_target   = _dep_state["target"]
+            _dep_finished = _dep_state["finished"]
+
+        # --- デプロイ実行中 / 直後のログ表示 ---
+        if _dep_running or _dep_finished:
+            if _dep_running:
+                st.info(f"⏳ デプロイ実行中: `{_dep_target}`  "
+                        "（初回はイメージのビルドに数分〜十数分かかります）")
+            elif _dep_error:
+                st.error(f"❌ デプロイ失敗: {_dep_error}")
+            else:
+                st.success(f"✅ デプロイ完了: `{_dep_target}`")
+
+            st.code("\n".join(_dep_log[-40:]) or "(出力待ち)", language="bash")
+
+            if not _dep_running:
+                if st.button("ログを閉じる", key="dep_clear_log"):
+                    with _dep_lock:
+                        _dep_state["finished"] = False
+                        _dep_state["log"] = []
+                        _dep_state["error"] = None
+                    st.rerun()
+
+        # --- デプロイ済み関数の一覧 ---
+        _fns  = cached_nuclio_functions()
+        _defs = list_serverless_defs()
+        _def_by_fn = {d["function_name"]: d for d in _defs if d["function_name"]}
+
+        st.markdown(f"**デプロイ済み: {len(_fns)} 件**")
+        if not _fns:
+            st.info("まだ関数がデプロイされていません。下の「新しいモデルをデプロイ」から追加してください。")
+        else:
+            for _fn in _fns:
+                _d = _def_by_fn.get(_fn["name"], {})
+                with st.container(border=True):
+                    _fc1, _fc2, _fc3, _fc4 = st.columns([5, 2, 2, 2])
+                    with _fc1:
+                        _badge = {"ready": "🟢", "error": "🔴", "building": "🟡"}.get(
+                            _fn["state"], "⚪")
+                        st.markdown(f"{_badge} **{_fn['display']}**")
+                        st.caption(f"`{_fn['name']}`")
+                        st.caption("🏷 ラベル: " + (", ".join(_fn["labels"]) or "—"))
+                        if _d.get("model_run"):
+                            _mr_ok = "✅" if _d.get("model_exists") else "⚠ 見つかりません"
+                            st.caption(f"📦 モデル: `models/{_d['model_run']}` {_mr_ok}")
+                    with _fc2:
+                        st.metric("状態", _fn["state"] or "—")
+                    with _fc3:
+                        st.metric("実行", "GPU" if _fn["gpu"] else "CPU")
+                    with _fc4:
+                        if _d.get("dir"):
+                            if st.button("🔄 再デプロイ", key=f"redeploy_{_fn['name']}",
+                                         use_container_width=True, disabled=_dep_running,
+                                         help="モデルを差し替えた後に実行すると最新の best.pt が反映されます"):
+                                start_deploy(_d["dir"], use_gpu=_fn["gpu"])
+                                cached_nuclio_functions.clear()
+                                st.rerun()
+                        if st.button("🗑 削除", key=f"delfn_{_fn['name']}",
+                                     use_container_width=True, disabled=_dep_running):
+                            _ok, _msg = delete_nuclio_function(_fn["name"])
+                            cached_nuclio_functions.clear()
+                            if _ok:
+                                st.success(f"削除しました: {_fn['name']}")
+                            else:
+                                st.error(f"削除に失敗: {_msg}")
+                            st.rerun()
+
+        # --- 新規デプロイ ---
+        st.markdown("---")
+        st.markdown("**➕ 新しいモデルをデプロイ**")
+
+        _dep_models = sorted(MODELS_DIR.rglob("*.pt"), key=lambda p: p.stat().st_mtime,
+                             reverse=True) if MODELS_DIR.exists() else []
+        if not _dep_models:
+            st.info("models/ に .pt がありません。Step2で学習するか、データ管理タブから取り込んでください。")
+        else:
+            _dep_map = {str(p.relative_to(MODELS_DIR)): p for p in _dep_models}
+            _dep_sel = st.selectbox("デプロイするモデル", list(_dep_map.keys()), key="dep_model_sel")
+            _dep_path = _dep_map[_dep_sel]
+            # models/<run>/weights/best.pt の <run> を取り出す（deploy.sh がこの構造を前提とする）
+            _dep_run = _dep_path.parent.parent.name if _dep_path.parent.name == "weights" else ""
+
+            if not _dep_run or _dep_path.name != "best.pt":
+                st.warning(
+                    "⚠ デプロイできるのは `models/<モデル名>/weights/best.pt` の形式のみです"
+                    "（`serverless/deploy.sh` がこのパスから重みを読み込みます）。\n\n"
+                    f"選択中: `{_dep_sel}`"
+                )
+            else:
+                # クラス名はモデルから取得する（= CVAT に出るラベル定義になる）
+                _dep_meta = read_model_meta(_dep_path)
+                if _dep_meta is None:
+                    with st.spinner("モデルのクラス名を読み込み中…"):
+                        _dep_meta = inspect_model_file(_dep_path)
+                _dep_classes = _dep_meta.get("names") or []
+
+                if not _dep_meta.get("ok") or not _dep_classes:
+                    st.error(
+                        "❌ このモデルからクラス名を取得できませんでした。"
+                        "ラベル定義を作れないためデプロイできません。\n\n"
+                        f"{_dep_meta.get('error') or 'クラス名が空です'}"
+                    )
+                else:
+                    st.success(f"🏷 ラベル定義（モデルのクラス名から自動生成）: "
+                               f"**{', '.join(_dep_classes)}**")
+                    st.caption(
+                        "⚠ CVAT タスク側のラベル名がこれと一致していないと、"
+                        "自動アノテーションの結果が反映されません。"
+                    )
+
+                    _dc1, _dc2 = st.columns(2)
+                    with _dc1:
+                        _dep_dir = st.text_input(
+                            "関数ディレクトリ名 (`serverless/custom/` 以下)",
+                            value=slugify_function_name(_dep_run),
+                            key="dep_fn_dir",
+                        ).strip()
+                    with _dc2:
+                        _dep_disp = st.text_input(
+                            "CVAT に表示する名前",
+                            value=f"{_dep_run} (custom)",
+                            key="dep_fn_disp",
+                        ).strip()
+
+                    _dep_gpu = st.radio(
+                        "実行モード", ["GPU", "CPU"], horizontal=True, key="dep_gpu_mode",
+                        help="GPU 実行には Docker daemon の default-runtime=nvidia が必要です"
+                             "（serverless/README.md 参照）。CPU なら前提なしで動きます。",
+                    ) == "GPU"
+
+                    _dep_slug = slugify_function_name(_dep_dir) if _dep_dir else ""
+                    if _dep_slug:
+                        _exists_def = (SERVERLESS_DIR / "custom" / _dep_dir).exists()
+                        st.caption(f"Nuclio 関数名: `custom-{_dep_slug}`"
+                                   + ("　⚠ 同名の定義が既にあります（上書きされます）" if _exists_def else ""))
+
+                    if st.button("🚀 CVAT にデプロイ", type="primary", use_container_width=True,
+                                 disabled=_dep_running or not _dep_dir, key="dep_run_btn"):
+                        _out_dir, _fn_name = generate_function_files(
+                            fn_dir=_dep_dir,
+                            model_run=_dep_run,
+                            class_names=_dep_classes,
+                            display_name=_dep_disp,
+                        )
+                        start_deploy(_dep_dir, use_gpu=_dep_gpu)
+                        cached_nuclio_functions.clear()
+                        st.rerun()
+
+        if _dep_running:
+            time.sleep(2)
+            st.rerun()
+
+    st.markdown(
+        f'<div style="margin-top:8px"><a href="{NUCLIO_WEB}" target="_blank">'
+        f'🔗 Nuclio ダッシュボードで詳細を見る</a></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── アノテーション進捗 ────────────────────────────────────────────────
+    st.markdown('<div class="pipeline-card"><h3>📊 アノテーション進捗</h3>', unsafe_allow_html=True)
+
+    _pc1, _pc2 = st.columns([3, 1])
+    with _pc2:
+        if st.button("🔄 CVATから進捗を取得", use_container_width=True, key="anno_fetch_tasks"):
+            with st.spinner("CVATからタスクを取得中…"):
+                st.session_state.cvat_tasks = fetch_cvat_tasks()
+
+    _anno_tasks = st.session_state.cvat_tasks
+    if not _anno_tasks:
+        st.info("「CVATから進捗を取得」を押すと、タスクの進捗と担当者別の状況を表示します。")
+    else:
+        import pandas as _pd_anno
+
+        _df_a = _pd_anno.DataFrame(_anno_tasks)
+        _total_imgs = int(_df_a["size"].fillna(0).sum())
+        _done_mask  = _df_a["status"] == "completed"
+        _done_imgs  = int(_df_a.loc[_done_mask, "size"].fillna(0).sum())
+        _rate = (_done_imgs / _total_imgs * 100) if _total_imgs else 0.0
+
+        _sm1, _sm2, _sm3, _sm4 = st.columns(4)
+        _sm1.metric("タスク数", len(_df_a))
+        _sm2.metric("総画像数", f"{_total_imgs:,}")
+        _sm3.metric("完了画像数", f"{_done_imgs:,}")
+        _sm4.metric("完了率", f"{_rate:.1f}%")
+        st.progress(min(_rate / 100, 1.0), text=f"全体進捗 {_rate:.1f}%")
+
+        # 担当者別の集計（未割当は「（未割当）」に寄せる）
+        st.markdown("**👥 担当者別**")
+        _df_a["担当者"] = _df_a["assignee"].replace("", None).fillna("（未割当）")
+        _by_user = _df_a.groupby("担当者").agg(
+            タスク数=("id", "count"),
+            画像数=("size", "sum"),
+            完了タスク数=("status", lambda s: int((s == "completed").sum())),
+        ).reset_index()
+        _by_user["完了率"] = (
+            _by_user["完了タスク数"] / _by_user["タスク数"] * 100
+        ).round(1).astype(str) + "%"
+        st.dataframe(_by_user, use_container_width=True, hide_index=True)
+
+        # ステータス別の内訳
+        st.markdown("**📋 タスク一覧**")
+        _status_filter = st.multiselect(
+            "ステータスで絞り込み",
+            options=sorted(_df_a["status"].dropna().unique().tolist()),
+            default=[],
+            key="anno_status_filter",
+        )
+        _df_show = _df_a[_df_a["status"].isin(_status_filter)] if _status_filter else _df_a
+        _df_show = _df_show[["id", "name", "status", "担当者", "size"]].copy()
+        _df_show.columns = ["ID", "タスク名", "ステータス", "担当者", "画像数"]
+        st.dataframe(_df_show, use_container_width=True, hide_index=True)
+
+        st.caption(
+            f"CVAT で作業する → [{CVAT_WEB}]({CVAT_WEB})　"
+            "／ アノテーションが終わったタスクは「📤 Step1: データ取込」でエクスポートします。"
+        )
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ===========================================================================
 # タブ1: CVAT エクスポート
@@ -3874,6 +4467,12 @@ with tab4:
         st.info("models/ に .pt ファイルがありません。")
     else:
         import pandas as pd
+
+        # どのモデルが CVAT の自動アノテーションに載っているかを引くための対応表
+        # （models/<run> ←→ serverless/custom/<dir> ←→ Nuclio 関数）
+        _fn_states = {f["name"]: f for f in cached_nuclio_functions()} if serverless_ready() else {}
+        _def_by_run = {d["model_run"]: d for d in list_serverless_defs() if d["model_run"]}
+
         for mp in model_files:
             size_mb  = mp.stat().st_size / (1024 * 1024)
             mod_time = datetime.fromtimestamp(mp.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
@@ -3914,6 +4513,18 @@ with tab4:
                             with st.spinner(f"{mp.name} を読み込み中…"):
                                 inspect_model_file(mp)
                             st.rerun()
+
+                    # CVAT 自動アノテーションへのデプロイ状態
+                    _run_name = (mp.parent.parent.name
+                                 if mp.parent.name == "weights" else "")
+                    _def = _def_by_run.get(_run_name)
+                    _fn_st = _fn_states.get(_def["function_name"]) if _def else None
+                    if _fn_st:
+                        _bdg = {"ready": "🟢", "error": "🔴"}.get(_fn_st["state"], "🟡")
+                        st.caption(f"{_bdg} CVAT自動アノテーションに使用中 "
+                                   f"(`{_fn_st['name']}` / {'GPU' if _fn_st['gpu'] else 'CPU'})")
+                    elif mp.name == "best.pt":
+                        st.caption("○ 自動アノテーション未デプロイ — 「🏷 アノテーション」タブから追加できます")
                 with _size_col:
                     st.metric("サイズ", f"{size_mb:.1f} MB")
                 with _map_col:
