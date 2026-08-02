@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import _ckw, _nw, _ph, _selw, _sw, empty_state, show_error
+from .widgets import _ckw, _nw, _ph, _selw, _sw, empty_state, metric_row, show_error
 from .presets import (_apply_preset, _BUILTIN_PRESETS, _collect_current_params,
                       _load_user_presets, _save_user_presets, _USER_PRESETS_FILE)
 from .theme import active_theme
@@ -751,18 +751,18 @@ def render_train() -> None:
     # ── 学習設定サマリー ──────────────────────────────────────────────────────
     _ds_disp = Path(data_yaml_path).parent.name if data_yaml_path else "—"
     st.markdown("##### 📋 学習設定サマリー")
-    _sma, _smb, _smc, _smd, _sme = st.columns(5)
-    _sma.metric("モデル", model_name)
-    _smb.metric("エポック数", str(epochs))
-    _smc.metric("バッチ", str(batch_size) if batch_size != -1 else "Auto")
-    _smd.metric("imgsz", str(imgsz))
-    _sme.metric("patience", str(patience) if patience > 0 else "OFF")
-    _smf, _smg, _smh, _smi, _smj = st.columns(5)
-    _smf.metric("optimizer", optimizer)
-    _smg.metric("lr0", str(lr0))
-    _smh.metric("warmup", str(warmup_epochs))
-    _smi.metric("dropout", str(dropout))
-    _smj.metric("AMP", "ON" if amp else "OFF")
+    metric_row([
+        ("モデル",     model_name),
+        ("エポック数", epochs),
+        ("バッチ",     batch_size if batch_size != -1 else "Auto"),
+        ("imgsz",      imgsz),
+        ("patience",   patience if patience > 0 else "OFF"),
+        ("optimizer",  optimizer),
+        ("lr0",        lr0),
+        ("warmup",     warmup_epochs),
+        ("dropout",    dropout),
+        ("AMP",        "ON" if amp else "OFF"),
+    ])
     st.markdown(
         f'<div style="background:var(--bg-card-inner);border:1px solid var(--border);border-radius:6px;'
         f'padding:8px 14px;margin:8px 0 16px;font-size:.82rem;color:var(--text-secondary);">'

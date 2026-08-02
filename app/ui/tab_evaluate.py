@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import empty_state, show_error
+from .widgets import empty_state, metric_row, show_error
 
 
 
@@ -376,10 +376,27 @@ def render_evaluate() -> None:
                         f'🚩 再アノテーション: <b>{_reanno_count}</b> 件</div>',
                         unsafe_allow_html=True,
                     )
-            _preview_jsons = _pred_jsons[:9]
-            for _row_start in range(0, len(_preview_jsons), 3):
-                _row_files = _preview_jsons[_row_start:_row_start + 3]
-                _row_cols = st.columns(3)
+            # 列数と枚数を選べるようにする。画像を大きく見たいとき（2列）と、
+            # ざっと全体を眺めたいとき（5列）で見たい形が違うため
+            _pv_c1, _pv_c2, _pv_c3 = st.columns([1, 1, 3])
+            with _pv_c1:
+                _pv_cols = st.select_slider(
+                    "列数", options=[2, 3, 4, 5], value=3, key="pv_cols")
+            with _pv_c2:
+                _pv_n = st.select_slider(
+                    "表示枚数", options=[6, 9, 12, 24, 48], value=9, key="pv_n",
+                    help="増やすと描画に時間がかかります")
+            with _pv_c3:
+                st.markdown(
+                    f'<div style="padding-top:28px; color:var(--text-muted); font-size:.82rem;">'
+                    f'全 {len(_pred_jsons)} 件</div>',
+                    unsafe_allow_html=True,
+                )
+
+            _preview_jsons = _pred_jsons[:int(_pv_n)]
+            for _row_start in range(0, len(_preview_jsons), int(_pv_cols)):
+                _row_files = _preview_jsons[_row_start:_row_start + int(_pv_cols)]
+                _row_cols = st.columns(int(_pv_cols))
                 for _col, _jf in zip(_row_cols, _row_files):
                     _res = _draw_predictions(_jf)
                     with _col:
@@ -399,8 +416,9 @@ def render_evaluate() -> None:
                             else:
                                 st.session_state.reanno_set.add(_jf.name)
                             st.rerun()
-            if len(_pred_jsons) > 9:
-                st.caption(f"（他 {len(_pred_jsons) - 9} 件は省略。全件エクスポートの選択グリッドからフラグ付け可能）")
+            if len(_pred_jsons) > int(_pv_n):
+                st.caption(f"（他 {len(_pred_jsons) - int(_pv_n)} 件は省略。"
+                           "表示枚数を増やすか、「④ 書き出す」の選択グリッドからフラグ付けできます）")
 
         st.markdown("#### ④ 書き出す")
         # --- 推論結果 画像エクスポート ---
@@ -414,7 +432,14 @@ def render_evaluate() -> None:
 
             _exp_target_files: Optional[list[Path]] = None
             if _exp_mode == "選択して書き出す":
-                _SEL_PAGE_SIZE = 12
+                _sg_c1, _sg_c2, _sg_c3 = st.columns([1, 1, 3])
+                with _sg_c1:
+                    _SEL_GRID_COLS = int(st.select_slider(
+                        "列数", options=[2, 3, 4, 5], value=3, key="exp_grid_cols"))
+                with _sg_c2:
+                    _SEL_PAGE_SIZE = int(st.select_slider(
+                        "1ページの枚数", options=[6, 12, 24, 48], value=12,
+                        key="exp_page_size"))
 
                 # 選択状態はウィジェットキーではなく set で管理（ページ切替後も保持）
                 if "exp_sel_set" not in st.session_state:
@@ -450,10 +475,9 @@ def render_evaluate() -> None:
                     )
 
                 # ── 画像グリッド + チェックボックス + フラグ ──
-                _GRID_COLS = 3
-                for _row_start in range(0, len(_page_jsons), _GRID_COLS):
-                    _row_files = _page_jsons[_row_start : _row_start + _GRID_COLS]
-                    _row_cols  = st.columns(_GRID_COLS)
+                for _row_start in range(0, len(_page_jsons), _SEL_GRID_COLS):
+                    _row_files = _page_jsons[_row_start : _row_start + _SEL_GRID_COLS]
+                    _row_cols  = st.columns(_SEL_GRID_COLS)
                     for _col, _jf in zip(_row_cols, _row_files):
                         with _col:
                             _res = _draw_predictions(_jf)
@@ -1157,12 +1181,13 @@ def render_evaluate() -> None:
                     _gd_imgs = _gd["per_image"]
                     _n_clean = sum(1 for p in _gd_imgs if p["fp"] == 0 and p["fn"] == 0)
 
-                    _gm = st.columns(5)
-                    _gm[0].metric("画像数", _gd["n_images"])
-                    _gm[1].metric("TP（一致）", _gd["tp"])
-                    _gm[2].metric("FN（取りこぼし）", _gd["fn"])
-                    _gm[3].metric("FP（余計な検出）", _gd["fp"])
-                    _gm[4].metric("完全一致", f"{_n_clean}/{_gd['n_images']}")
+                    metric_row([
+                        ("画像数",           _gd["n_images"]),
+                        ("TP（一致）",       _gd["tp"]),
+                        ("FN（取りこぼし）", _gd["fn"]),
+                        ("FP（余計な検出）", _gd["fp"]),
+                        ("完全一致",         f"{_n_clean}/{_gd['n_images']}"),
+                    ])
                     if _gd["precision"] is not None:
                         st.caption(f"Precision {_gd['precision']:.3f} / "
                                    f"Recall {_gd['recall']:.3f}"

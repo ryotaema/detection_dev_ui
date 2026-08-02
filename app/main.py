@@ -195,6 +195,38 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
 .step-banner .sb-prev  { color: var(--success);        font-size: .78rem; margin-top:4px; }
 .step-banner .sb-desc  { color: var(--text-secondary); font-size: .78rem; margin-top:2px; }
 
+/* 指標の並び（幅に応じて折り返す）
+   st.columns(5) は画面が狭くても 5 等分のままで、
+   「FN（取りこぼし）」のような長いラベルが潰れる。
+   flex-wrap なら幅が足りないぶんだけ段が増える。 */
+.metric-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 8px 0 12px;
+}
+.metric-grid .mg-item {
+    background: var(--bg-card-inner);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    flex: 1 1 116px;
+    min-width: 116px;
+}
+.metric-grid .mg-label {
+    color: var(--text-muted);
+    font-size: .7rem;
+    letter-spacing: .03em;
+    margin-bottom: 2px;
+}
+.metric-grid .mg-value {
+    color: var(--text-primary);
+    font-size: .95rem;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    word-break: break-all;
+}
+
 /* サイドバー サマリー */
 .sidebar-stat {
     display: flex;

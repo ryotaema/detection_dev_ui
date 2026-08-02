@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import empty_state, show_error
+from .widgets import empty_state, metric_row, show_error
 
 
 
@@ -363,11 +363,12 @@ def render_annotate() -> None:
         _done_f  = int(_df_j.loc[_df_j["state"] == "completed", "frames"].fillna(0).sum())
         _rate    = (_done_f / _total_f * 100) if _total_f else 0.0
 
-        _sm1, _sm2, _sm3, _sm4 = st.columns(4)
-        _sm1.metric("タスク数", len(_anno_tasks) or _df_j["task_id"].nunique())
-        _sm2.metric("ジョブ数", len(_df_j))
-        _sm3.metric("総フレーム数", f"{_total_f:,}")
-        _sm4.metric("完了率", f"{_rate:.1f}%")
+        metric_row([
+            ("タスク数",     len(_anno_tasks) or _df_j["task_id"].nunique()),
+            ("ジョブ数",     len(_df_j)),
+            ("総フレーム数", f"{_total_f:,}"),
+            ("完了率",       f"{_rate:.1f}%"),
+        ])
         st.progress(min(_rate / 100, 1.0),
                     text=f"完了 {_done_f:,} / {_total_f:,} フレーム（{_rate:.1f}%）")
 

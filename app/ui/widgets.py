@@ -6,6 +6,8 @@
 # =============================================================================
 from __future__ import annotations
 
+import html
+
 import streamlit as st
 
 from core import explain_error
@@ -85,6 +87,26 @@ def show_error(message: str, prefix: str = "") -> None:
     hint = explain_error(str(message))
     if hint:
         st.warning(f"**{hint['title']}**\n\n{hint['hint']}")
+
+
+def metric_row(items: list[tuple[str, object]]) -> None:
+    """指標を「幅に応じて折り返す」形で並べる。
+
+    `st.columns(5)` は画面が狭くても 5 等分のままなので、
+    ラベルの長い指標（「FN（取りこぼし）」など）が潰れて読めなくなる。
+    ここでは flex-wrap の HTML にして、入りきらない分は次の段に送る。
+
+    値を編集させたい場合はウィジェットが必要なので使えない。
+    表示するだけの指標に使うこと。
+    """
+    cells = "".join(
+        f'<div class="mg-item">'
+        f'<div class="mg-label">{html.escape(str(label))}</div>'
+        f'<div class="mg-value">{html.escape(str(value))}</div>'
+        f'</div>'
+        for label, value in items
+    )
+    st.markdown(f'<div class="metric-grid">{cells}</div>', unsafe_allow_html=True)
 
 
 def empty_state(what: str, next_step: str, hint: str = "") -> None:
