@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import show_error
+from .widgets import empty_state, show_error
 
 
 
@@ -264,7 +264,10 @@ def render_annotate() -> None:
     else:
         _nt_dirs = _find_image_dirs(DATA_DIR) if DATA_DIR.exists() else []
         if not _nt_dirs:
-            st.info("data/ に画像が見つかりません。")
+            empty_state(
+                "CVAT に送れる画像が data/ にありません",
+                "「📤 Step2: データ取込」の「📁 ローカルからデータを直接追加」で画像を入れてください。",
+            )
         else:
             _nt_dir_sel = st.selectbox(
                 "画像ディレクトリ",

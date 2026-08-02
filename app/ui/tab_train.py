@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import _ckw, _nw, _ph, _selw, _sw, show_error
+from .widgets import _ckw, _nw, _ph, _selw, _sw, empty_state, show_error
 from .presets import (_apply_preset, _BUILTIN_PRESETS, _collect_current_params,
                       _load_user_presets, _save_user_presets, _USER_PRESETS_FILE)
 from .theme import active_theme
@@ -44,13 +44,166 @@ def render_train() -> None:
     </div>""", unsafe_allow_html=True)
     st.markdown('<div class="section-head"><h3>🚀 YOLO 学習設定</h3></div>', unsafe_allow_html=True)
 
+    # ── いまの学習の状態 ─────────────────────────────────────────────────────
+    #   学習が走っている間は「進捗とログ」が主役。設定より前に出す。
+    #   設定ウィジェットは下に残す（描画をやめると Streamlit が
+    #   ウィジェットの状態を破棄してしまい、学習後に設定が初期値へ戻るため）。
+    # --- _train_state → st.session_state に同期 ---
+    with _train_log_lock:
+        st.session_state.training_log = list(_train_state["log"])
+        st.session_state.training_progress = _train_state["progress"]
+        st.session_state.training_running = _train_state["running"]
+        st.session_state.training_metrics_history = list(_train_state["metrics_history"])
+        if _train_state["error"]:
+            st.session_state.training_error = _train_state["error"]
+        if _train_state["model_path"]:
+            st.session_state.last_model_path = _train_state["model_path"]
+
+    # --- 学習完了トースト（1回だけ） ---
+    if (st.session_state.training_progress == 100
+            and not st.session_state.training_running
+            and not st.session_state.training_notified):
+        st.toast("🎉 学習が完了しました！", icon="✅")
+        st.balloons()
+        st.session_state.training_notified = True
+
+    # --- 進捗表示 ---
+    if st.session_state.training_running:
+        # ── 学習中: プログレスバー＋リアルタイムグラフ＋自動スクロールログ ──
+        prog = st.session_state.training_progress
+        st.progress(prog / 100, text=f"進捗: {prog}%")
+
+        # ── 停止（エポック末で安全に打ち切る）──
+        with _train_log_lock:
+            _stop_pending = _train_state.get("stop_requested", False)
+        _stop_c1, _stop_c2 = st.columns([1, 3])
+        with _stop_c1:
+            if st.button("⏹ 学習を停止", type="secondary", use_container_width=True,
+                         disabled=_stop_pending, key="train_stop_btn"):
+                with _train_log_lock:
+                    _train_state["stop_requested"] = True
+                st.rerun()
+        with _stop_c2:
+            if _stop_pending:
+                st.warning("⏳ 停止要求を受け付けました。現在のエポックが終わり次第停止します。")
+            else:
+                st.caption("停止してもその時点までの `best.pt` / `last.pt` は保存されます。"
+                           "`last.pt` があれば下の「中断した学習を再開」から続きから再開できます。")
+
+        _mh = st.session_state.training_metrics_history
+        if _mh:
+            import pandas as pd
+            df_live = pd.DataFrame(_mh)
+            if "epoch" in df_live.columns:
+                df_live = df_live.set_index("epoch")
+                _live_cols = [c for c in df_live.columns
+                              if any(k in c.lower() for k in ["map50", "loss"])
+                              and "95" not in c.lower()]
+                if _live_cols:
+                    st.markdown("**📊 学習進捗グラフ（リアルタイム）**")
+                    st.line_chart(df_live[_live_cols])
+
+        log_lines = st.session_state.training_log[-500:]
+        log_text_escaped = "\n".join(log_lines).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        # iframe の中は親ドキュメントの CSS 変数を継承しないため、
+        # ここだけはテーマから実際の色を取り出して埋め込む
+        _th = active_theme()
+        components.html(f"""
+    <style>
+      body{{margin:0;background:{_th['bg_log']};}}
+      #log-box{{
+    background:{_th['bg_log']};color:{_th['text_secondary']};
+    font-family:'JetBrains Mono',monospace;font-size:12px;
+    height:380px;overflow-y:auto;
+    padding:12px;border:1px solid {_th['border']};border-radius:8px;
+    white-space:pre-wrap;word-break:break-all;
+      }}
+    </style>
+    <div id="log-box">{log_text_escaped}</div>
+    <script>
+      var box = document.getElementById('log-box');
+      var dist = 0;
+      try {{ dist = parseInt(window.parent.localStorage.getItem('log_dist_bottom') || '0'); }} catch(e) {{}}
+      setTimeout(function() {{
+    if (dist > 100) {{
+      box.scrollTop = box.scrollHeight - box.clientHeight - dist;
+    }} else {{
+      box.scrollTop = box.scrollHeight;
+    }}
+      }}, 0);
+      var t = null;
+      box.addEventListener('scroll', function() {{
+    clearTimeout(t);
+    t = setTimeout(function() {{
+      var d = Math.max(0, box.scrollHeight - box.scrollTop - box.clientHeight);
+      try {{ window.parent.localStorage.setItem('log_dist_bottom', d); }} catch(e) {{}}
+    }}, 100);
+      }}, {{passive:true}});
+    </script>
+    """, height=400)
+
+        # ここで st.rerun() すると以降のタブが描画されないため予約だけする
+        request_rerun_poll()
+
+    elif st.session_state.training_progress == 100:
+        # ── 学習完了: プログレスバー＋ログ（expander / 静的表示） ──
+        st.progress(1.0, text="進捗: 100% — 完了")
+        if st.session_state.training_log:
+            with st.expander("📋 学習ログ（完了）", expanded=False):
+                st.text("\n".join(st.session_state.training_log[-500:]))
+
+    elif st.session_state.training_progress > 0:
+        # ── 途中停止: 止まった時点のプログレスバー＋ログ ──
+        prog = st.session_state.training_progress
+        st.progress(prog / 100, text=f"進捗: {prog}% — 停止")
+        if st.session_state.training_log:
+            with st.expander("📋 学習ログ（停止時点）", expanded=False):
+                st.text("\n".join(st.session_state.training_log[-500:]))
+
+    if st.session_state.training_error:
+        show_error(st.session_state.training_error, prefix="学習エラー: ")
+
+    # --- 完了後: モデル選択 ---
+    if st.session_state.last_model_path:
+        st.success(f"✅ 最新モデル: `{st.session_state.last_model_path}`")
+
+    # results.csv の可視化
+    if st.session_state.last_model_path:
+        results_csv = Path(st.session_state.last_model_path).parent.parent / "results.csv"
+        if results_csv.exists():
+            import pandas as pd
+            st.markdown("#### 📈 学習メトリクス")
+            df_r = pd.read_csv(results_csv)
+            df_r.columns = [c.strip() for c in df_r.columns]
+            metric_cols = [c for c in df_r.columns
+                           if any(k in c.lower() for k in ["map","precision","recall","loss"])]
+            _last = df_r.iloc[-1]
+            _map_col  = next((c for c in df_r.columns if "map50" in c.lower() and "95" not in c.lower()), None)
+            _loss_col = next((c for c in df_r.columns if "val" in c.lower() and "loss" in c.lower()), None)
+            _mc = st.columns(3)
+            if _map_col:  _mc[0].metric("mAP50 (最終)", f"{_last[_map_col]:.4f}")
+            if _loss_col: _mc[1].metric("Val Loss (最終)", f"{_last[_loss_col]:.4f}")
+            _mc[2].metric("エポック数", len(df_r))
+            if metric_cols:
+                st.line_chart(df_r[metric_cols])
+            with st.expander("📄 生データ（末尾5行）"):
+                st.dataframe(df_r.tail(5), use_container_width=True)
+
+    # ── 学習の設定 ───────────────────────────────────────────────────────────
+    if st.session_state.training_running:
+        st.info(
+            "⏳ 学習を実行中です。以下の設定を変えても、いま走っている学習には反映されません"
+            "（次に「▶ 学習開始」を押したときから有効になります）。"
+        )
+
+    st.markdown("#### ① 学習プリセットを選ぶ（任意）")
+    st.caption("よく使う設定の組み合わせです。迷ったらここから選んで、必要なら②③で微調整します。")
     # ── プリセット ───────────────────────────────────────────────────────────
     _user_presets  = _load_user_presets()
     _all_presets   = {**_BUILTIN_PRESETS,
                       **{f"👤 {k}": v for k, v in _user_presets.items()}}
     _PRESET_NONE   = "（選択してください）"
 
-    st.markdown("##### 📋 学習プリセット")
     _pr1, _pr2, _pr3 = st.columns([4, 1, 2])
     with _pr1:
         _preset_sel = st.selectbox(
@@ -194,6 +347,7 @@ def render_train() -> None:
 
     st.markdown("---")
 
+    st.markdown("#### ② モデルとデータセットを選ぶ")
     # ── 基本設定 ────────────────────────────────────────────────────────────
     col_a, col_b, col_c = st.columns(3)
     with col_a:
@@ -243,6 +397,13 @@ def render_train() -> None:
     _yaml_labels = [str(p.relative_to(DATA_DIR)) for p in _yaml_candidates]
     _YAML_MANUAL = "（手動入力）"
     _yaml_options = _yaml_labels + [_YAML_MANUAL]
+    if not _yaml_labels:
+        empty_state(
+            "学習に使える data.yaml がまだありません",
+            "「📤 Step2: データ取込」でデータセットを生成してください。",
+            "すでに YOLO 形式のデータが手元にあるなら、"
+            "同タブの「📁 ローカルからデータを直接追加」から ZIP で取り込めます。",
+        )
 
     _yc1, _yc2 = st.columns([10, 1])
     with _yc1:
@@ -332,6 +493,9 @@ def render_train() -> None:
             value=f"{_model_preset.replace('その他','custom')}_ep{epochs}_{datetime.now():%H%M}",
         )
 
+    st.markdown("---")
+    st.markdown("#### ③ 詳細を調整する（任意）")
+    st.caption("既定値のままでも学習できます。精度が伸び悩んだときに開いてください。")
     # ── 学習設定（最適化・正則化）────────────────────────────────────────────
     with st.expander("⚙️ 学習設定（最適化・正則化）", expanded=False):
         _oc1, _oc2, _oc3, _oc4 = st.columns(4)
@@ -582,9 +746,11 @@ def render_train() -> None:
                         "見え方の傾向を掴むための近似表示です。"
                     )
 
+    st.markdown("---")
+    st.markdown("#### ④ 設定を確認して学習を開始する")
     # ── 学習設定サマリー ──────────────────────────────────────────────────────
     _ds_disp = Path(data_yaml_path).parent.name if data_yaml_path else "—"
-    st.markdown("#### 📋 学習設定サマリー")
+    st.markdown("##### 📋 学習設定サマリー")
     _sma, _smb, _smc, _smd, _sme = st.columns(5)
     _sma.metric("モデル", model_name)
     _smb.metric("エポック数", str(epochs))
@@ -767,147 +933,6 @@ def render_train() -> None:
             st.session_state.training_notified = False   # 新規学習開始 → 通知リセット
             st.rerun()
 
-    # --- _train_state → st.session_state に同期 ---
-    with _train_log_lock:
-        st.session_state.training_log = list(_train_state["log"])
-        st.session_state.training_progress = _train_state["progress"]
-        st.session_state.training_running = _train_state["running"]
-        st.session_state.training_metrics_history = list(_train_state["metrics_history"])
-        if _train_state["error"]:
-            st.session_state.training_error = _train_state["error"]
-        if _train_state["model_path"]:
-            st.session_state.last_model_path = _train_state["model_path"]
-
-    # --- 学習完了トースト（1回だけ） ---
-    if (st.session_state.training_progress == 100
-            and not st.session_state.training_running
-            and not st.session_state.training_notified):
-        st.toast("🎉 学習が完了しました！", icon="✅")
-        st.balloons()
-        st.session_state.training_notified = True
-
-    # --- 進捗表示 ---
-    if st.session_state.training_running:
-        # ── 学習中: プログレスバー＋リアルタイムグラフ＋自動スクロールログ ──
-        prog = st.session_state.training_progress
-        st.progress(prog / 100, text=f"進捗: {prog}%")
-
-        # ── 停止（エポック末で安全に打ち切る）──
-        with _train_log_lock:
-            _stop_pending = _train_state.get("stop_requested", False)
-        _stop_c1, _stop_c2 = st.columns([1, 3])
-        with _stop_c1:
-            if st.button("⏹ 学習を停止", type="secondary", use_container_width=True,
-                         disabled=_stop_pending, key="train_stop_btn"):
-                with _train_log_lock:
-                    _train_state["stop_requested"] = True
-                st.rerun()
-        with _stop_c2:
-            if _stop_pending:
-                st.warning("⏳ 停止要求を受け付けました。現在のエポックが終わり次第停止します。")
-            else:
-                st.caption("停止してもその時点までの `best.pt` / `last.pt` は保存されます。"
-                           "`last.pt` があれば下の「中断した学習を再開」から続きから再開できます。")
-
-        _mh = st.session_state.training_metrics_history
-        if _mh:
-            import pandas as pd
-            df_live = pd.DataFrame(_mh)
-            if "epoch" in df_live.columns:
-                df_live = df_live.set_index("epoch")
-                _live_cols = [c for c in df_live.columns
-                              if any(k in c.lower() for k in ["map50", "loss"])
-                              and "95" not in c.lower()]
-                if _live_cols:
-                    st.markdown("**📊 学習進捗グラフ（リアルタイム）**")
-                    st.line_chart(df_live[_live_cols])
-
-        log_lines = st.session_state.training_log[-500:]
-        log_text_escaped = "\n".join(log_lines).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        # iframe の中は親ドキュメントの CSS 変数を継承しないため、
-        # ここだけはテーマから実際の色を取り出して埋め込む
-        _th = active_theme()
-        components.html(f"""
-    <style>
-      body{{margin:0;background:{_th['bg_log']};}}
-      #log-box{{
-    background:{_th['bg_log']};color:{_th['text_secondary']};
-    font-family:'JetBrains Mono',monospace;font-size:12px;
-    height:380px;overflow-y:auto;
-    padding:12px;border:1px solid {_th['border']};border-radius:8px;
-    white-space:pre-wrap;word-break:break-all;
-      }}
-    </style>
-    <div id="log-box">{log_text_escaped}</div>
-    <script>
-      var box = document.getElementById('log-box');
-      var dist = 0;
-      try {{ dist = parseInt(window.parent.localStorage.getItem('log_dist_bottom') || '0'); }} catch(e) {{}}
-      setTimeout(function() {{
-    if (dist > 100) {{
-      box.scrollTop = box.scrollHeight - box.clientHeight - dist;
-    }} else {{
-      box.scrollTop = box.scrollHeight;
-    }}
-      }}, 0);
-      var t = null;
-      box.addEventListener('scroll', function() {{
-    clearTimeout(t);
-    t = setTimeout(function() {{
-      var d = Math.max(0, box.scrollHeight - box.scrollTop - box.clientHeight);
-      try {{ window.parent.localStorage.setItem('log_dist_bottom', d); }} catch(e) {{}}
-    }}, 100);
-      }}, {{passive:true}});
-    </script>
-    """, height=400)
-
-        # ここで st.rerun() すると以降のタブが描画されないため予約だけする
-        request_rerun_poll()
-
-    elif st.session_state.training_progress == 100:
-        # ── 学習完了: プログレスバー＋ログ（expander / 静的表示） ──
-        st.progress(1.0, text="進捗: 100% — 完了")
-        if st.session_state.training_log:
-            with st.expander("📋 学習ログ（完了）", expanded=False):
-                st.text("\n".join(st.session_state.training_log[-500:]))
-
-    elif st.session_state.training_progress > 0:
-        # ── 途中停止: 止まった時点のプログレスバー＋ログ ──
-        prog = st.session_state.training_progress
-        st.progress(prog / 100, text=f"進捗: {prog}% — 停止")
-        if st.session_state.training_log:
-            with st.expander("📋 学習ログ（停止時点）", expanded=False):
-                st.text("\n".join(st.session_state.training_log[-500:]))
-
-    if st.session_state.training_error:
-        show_error(st.session_state.training_error, prefix="学習エラー: ")
-
-    # --- 完了後: モデル選択 ---
-    if st.session_state.last_model_path:
-        st.success(f"✅ 最新モデル: `{st.session_state.last_model_path}`")
-
-    # results.csv の可視化
-    if st.session_state.last_model_path:
-        results_csv = Path(st.session_state.last_model_path).parent.parent / "results.csv"
-        if results_csv.exists():
-            import pandas as pd
-            st.markdown("#### 📈 学習メトリクス")
-            df_r = pd.read_csv(results_csv)
-            df_r.columns = [c.strip() for c in df_r.columns]
-            metric_cols = [c for c in df_r.columns
-                           if any(k in c.lower() for k in ["map","precision","recall","loss"])]
-            _last = df_r.iloc[-1]
-            _map_col  = next((c for c in df_r.columns if "map50" in c.lower() and "95" not in c.lower()), None)
-            _loss_col = next((c for c in df_r.columns if "val" in c.lower() and "loss" in c.lower()), None)
-            _mc = st.columns(3)
-            if _map_col:  _mc[0].metric("mAP50 (最終)", f"{_last[_map_col]:.4f}")
-            if _loss_col: _mc[1].metric("Val Loss (最終)", f"{_last[_loss_col]:.4f}")
-            _mc[2].metric("エポック数", len(df_r))
-            if metric_cols:
-                st.line_chart(df_r[metric_cols])
-            with st.expander("📄 生データ（末尾5行）"):
-                st.dataframe(df_r.tail(5), use_container_width=True)
-
 
     # --- 既存モデル選択 ---
     # ── 学習履歴の比較（MLflow）────────────────────────────────────────────
@@ -1051,4 +1076,7 @@ def render_train() -> None:
                 st.session_state.last_model_path = str(MODELS_DIR / sel_model)
                 st.success(f"モデルを設定: {st.session_state.last_model_path}")
         else:
-            st.info("models/ ディレクトリに .pt ファイルが見つかりません。")
+            empty_state(
+                "選べる学習済みモデルがありません",
+                "上の「④ 設定を確認して学習を開始する」から学習すると、ここで選べるようになります。",
+            )

@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import show_error
+from .widgets import empty_state, show_error
 
 
 
@@ -37,7 +37,11 @@ def render_manage() -> None:
     datasets = sorted(DATA_DIR.iterdir()) if DATA_DIR.exists() else []
     datasets = [d for d in datasets if d.is_dir()]
     if not datasets:
-        st.info("data/ にデータセットがありません。")
+        empty_state(
+            "まだデータセットがありません",
+            "「📤 Step2: データ取込」で CVAT のタスクを取り込むか、"
+            "同タブの「📁 ローカルからデータを直接追加」で手元の画像・ZIP を入れてください。",
+        )
     else:
         for ds in datasets:
             # モデル一覧と同じくカードで囲む。
@@ -504,7 +508,11 @@ def render_manage() -> None:
         reverse=True,
     ) if MODELS_DIR.exists() else []
     if not model_files:
-        st.info("models/ に .pt ファイルがありません。")
+        empty_state(
+            "まだ学習済みモデルがありません",
+            "「🚀 Step3: モデル学習」で学習すると、ここに一覧が出ます。",
+            "他の PC で学習した `.pt` があれば、上の「📤 学習済みモデルをアップロード」から取り込めます。",
+        )
     else:
         import pandas as pd
 
@@ -748,7 +756,10 @@ def render_manage() -> None:
     st.markdown("#### 推論結果 (`predictions/`)")
     pred_files = list(PREDICTIONS_DIR.glob("*.json")) if PREDICTIONS_DIR.exists() else []
     if not pred_files:
-        st.info("predictions/ に結果 JSON がありません。")
+        empty_state(
+            "まだ推論結果がありません",
+            "「🔭 Step4: 推論・評価」の「▶ ① 推論する」で推論すると、ここに溜まります。",
+        )
     else:
         st.text(f"{len(pred_files)} 件の結果ファイル")
         if st.button("🗑 predictions/ をすべてクリア", type="secondary",

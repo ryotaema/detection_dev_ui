@@ -79,17 +79,25 @@ def _ckw(label: str, val: bool,
     return v
 
 
-# ===========================================================================
-# 学習プリセット
-# ===========================================================================
-
-
 def show_error(message: str, prefix: str = "") -> None:
     """エラーを表示し、よくある原因に当てはまれば対処も添える"""
     st.error(f"{prefix}{message}" if prefix else str(message))
     hint = explain_error(str(message))
     if hint:
         st.warning(f"**{hint['title']}**\n\n{hint['hint']}")
+
+
+def empty_state(what: str, next_step: str, hint: str = "") -> None:
+    """まだ何も無いときの表示。
+
+    「無い」で終わらせず、次にどのタブで何をすればよいかまで書く。
+    初めて触る人がここで手が止まらないようにするのが目的。
+
+    what      … 何が無いのか
+    next_step … 次にどこで何をするか（👉 付きで出る）
+    hint      … 代替手段など、あれば
+    """
+    st.info(f"**{what}**\n\n👉 {next_step}" + (f"\n\n{hint}" if hint else ""))
 
 
 # ---------------------------------------------------------------------------

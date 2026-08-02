@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import show_error
+from .widgets import empty_state, show_error
 
 
 
@@ -58,8 +58,14 @@ def render_evaluate() -> None:
         st.markdown('<div class="section-head"><h3>▶ 推論して結果を見る</h3></div>',
                     unsafe_allow_html=True)
 
-        model_display = current_model if current_model else "（未設定）"
-        st.info(f"メインモデル: `{model_display}`")
+        if current_model:
+            st.info(f"メインモデル: `{current_model}`")
+        else:
+            empty_state(
+                "推論に使うモデルが選ばれていません",
+                "「🚀 Step3: モデル学習」で学習するか、"
+                "「📁 データ管理」のモデルカードの「使用する」で選んでください。",
+            )
 
         st.markdown("#### ① 推論する対象を選ぶ")
         compare_mode = st.checkbox("🔀 複数モデル比較モード", value=False, key="cmp_mode")
@@ -653,7 +659,11 @@ def render_evaluate() -> None:
         if not _ev_yamls:
             st.info("評価に使える data.yaml がありません。Step2 でデータセットを作成してください。")
         elif not _model_map:
-            st.info("models/ に .pt がありません。")
+            empty_state(
+                "評価できるモデルがありません",
+                "「🚀 Step3: モデル学習」で学習するか、"
+                "「📁 データ管理」から学習済みの `.pt` を取り込んでください。",
+            )
         else:
             _ev_c1, _ev_c2, _ev_c3 = st.columns([3, 1, 1])
             with _ev_c1:
