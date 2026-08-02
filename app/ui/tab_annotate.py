@@ -218,8 +218,8 @@ def render_annotate() -> None:
                         st.rerun()
 
         if _dep_running:
-            time.sleep(2)
-            st.rerun()
+            # ここで st.rerun() すると以降のタブが描画されないため予約だけする
+            request_rerun_poll()
 
     st.markdown(
         f'<div style="margin-top:8px"><a href="{NUCLIO_WEB}" target="_blank">'

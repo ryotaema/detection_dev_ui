@@ -61,7 +61,11 @@ def render_train() -> None:
     with _pr2:
         if st.button("▶ 適用", key="preset_apply", use_container_width=True,
                      disabled=(_preset_sel == _PRESET_NONE)):
-            _apply_preset(_all_presets[_preset_sel])
+            _preset_target = _all_presets.get(_preset_sel)
+            if _preset_target:
+                _apply_preset(_preset_target)
+            else:
+                st.warning("適用するプリセットを選んでください。")
     with _pr3:
         if st.button("💾 現在の設定を保存", key="preset_save_btn", use_container_width=True):
             st.session_state["preset_save_mode"] = True
@@ -678,6 +682,7 @@ def render_train() -> None:
             type="primary",
             disabled=st.session_state.training_running,
             use_container_width=True,
+            key="train_start",
         )
     with btn_col2:
         if st.session_state.training_running:
@@ -852,8 +857,8 @@ def render_train() -> None:
     </script>
     """, height=400)
 
-        time.sleep(2)
-        st.rerun()
+        # ここで st.rerun() すると以降のタブが描画されないため予約だけする
+        request_rerun_poll()
 
     elif st.session_state.training_progress == 100:
         # ── 学習完了: プログレスバー＋ログ（expander / 静的表示） ──
@@ -1039,7 +1044,7 @@ def render_train() -> None:
         if existing_models:
             model_labels = [str(p.relative_to(MODELS_DIR)) for p in existing_models]
             sel_model = st.selectbox("モデルファイル", model_labels)
-            if st.button("このモデルを使用"):
+            if st.button("このモデルを使用", key="use_existing_model"):
                 st.session_state.last_model_path = str(MODELS_DIR / sel_model)
                 st.success(f"モデルを設定: {st.session_state.last_model_path}")
         else:

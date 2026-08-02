@@ -619,165 +619,175 @@ with st.sidebar:
     )
     if not st.session_state.get("show_onboarding"):
         st.caption("困ったときはここから表示できます")
-
 # ---------------------------------------------------------------------------
 # はじめかたガイド（サイドバーのチェックで表示を切り替える）
+#
+#   表示/非表示でトップレベルの要素数が変わると、直後にある st.tabs の
+#   識別がずれて画面が真っ白になることがある。
+#   常にコンテナを1つ置き、その中身だけを出し入れして要素数を一定に保つ。
 # ---------------------------------------------------------------------------
-if st.session_state.get("show_onboarding"):
-    with st.container(border=True):
-        st.markdown("### 📖 はじめかた")
+_onboarding_slot = st.container()
+with _onboarding_slot:
+    if st.session_state.get("show_onboarding"):
+        with st.container(border=True):
+            st.markdown("### 📖 はじめかた")
 
-        _ob_t1, _ob_t2, _ob_t3 = st.tabs([
-            "① まず何をするか", "② 別のPCで環境を作る", "③ 用語とタスクの選び方",
-        ])
-
-        # ── ① 現在の状態と次にやること ──────────────────────────────────
-        with _ob_t1:
-            _ob_ds     = len(list(DATA_DIR.rglob("data.yaml"))) if DATA_DIR.exists() else 0
-            _ob_raw    = len([d for d in DATA_DIR.iterdir() if d.is_dir()]) if DATA_DIR.exists() else 0
-            _ob_models = len(list(MODELS_DIR.rglob("*.pt"))) if MODELS_DIR.exists() else 0
-            _ob_preds  = len(list(PREDICTIONS_DIR.glob("*.json"))) if PREDICTIONS_DIR.exists() else 0
-            # CVAT の疎通はサイドバーに出しているので、ここでは
-            # 「取り込むものが既にあるか」で判定する（表示のたびに通信しない）
-            _ob_cvat   = bool(st.session_state.get("cvat_tasks")) or _ob_raw > 0
-
-            st.markdown(
-                "このツールは **アノテーション → データ取込 → 学習 → 評価** の4ステップで"
-                "画像認識モデルを作ります。上のタブがそのまま順番になっています。"
+            # メインのタブ群の直前に別のタブを置くと表示が壊れることがあるため、
+            # ここはラジオで切り替える
+            _ob_page = st.radio(
+                "表示する内容",
+                ["① まず何をするか", "② 別のPCで環境を作る", "③ 用語とタスクの選び方"],
+                horizontal=True, key="ob_page", label_visibility="collapsed",
             )
 
-            _ob_steps = [
-                ("① CVAT でアノテーション",
-                 _ob_cvat,
-                 f"CVAT ({CVAT_WEB}) で画像に印を付けます",
-                 "🏷 Step1 タブで進捗を確認できます"),
-                ("② データセットを作る",
-                 _ob_ds > 0,
-                 f"CVAT から取り込んで YOLO 形式に変換します（現在 {_ob_ds} 件）",
-                 "📤 Step2 タブ。CVAT を使わず ZIP や画像を直接入れることもできます"),
-                ("③ 学習する",
-                 _ob_models > 0,
-                 f"モデルサイズとパラメータを選んで学習します（現在 {_ob_models} 件）",
-                 "🚀 Step3 タブ。他の PC で作った .pt を持ち込むこともできます"),
-                ("④ 評価・推論する",
-                 _ob_preds > 0,
-                 f"精度を測り、推論結果を確認します（推論結果 {_ob_preds} 件）",
-                 "🔭 Step4 タブ。mAP 比較や正解ラベルとの差分も見られます"),
-            ]
-            for _title, _done, _desc, _where in _ob_steps:
-                _icon = "✅" if _done else "⬜"
-                st.markdown(f"**{_icon} {_title}** — {_desc}")
-                st.caption(f"　　{_where}")
+            # ── ① 現在の状態と次にやること ──────────────────────────────────
+            if _ob_page.startswith("①"):
+                _ob_ds     = len(list(DATA_DIR.rglob("data.yaml"))) if DATA_DIR.exists() else 0
+                _ob_raw    = len([d for d in DATA_DIR.iterdir() if d.is_dir()]) if DATA_DIR.exists() else 0
+                _ob_models = len(list(MODELS_DIR.rglob("*.pt"))) if MODELS_DIR.exists() else 0
+                _ob_preds  = len(list(PREDICTIONS_DIR.glob("*.json"))) if PREDICTIONS_DIR.exists() else 0
+                # CVAT の疎通はサイドバーに出しているので、ここでは
+                # 「取り込むものが既にあるか」で判定する（表示のたびに通信しない）
+                _ob_cvat   = bool(st.session_state.get("cvat_tasks")) or _ob_raw > 0
 
-            st.markdown("---")
-            if _ob_ds == 0 and _ob_raw == 0:
+                st.markdown(
+                    "このツールは **アノテーション → データ取込 → 学習 → 評価** の4ステップで"
+                    "画像認識モデルを作ります。上のタブがそのまま順番になっています。"
+                )
+
+                _ob_steps = [
+                    ("① CVAT でアノテーション",
+                     _ob_cvat,
+                     f"CVAT ({CVAT_WEB}) で画像に印を付けます",
+                     "🏷 Step1 タブで進捗を確認できます"),
+                    ("② データセットを作る",
+                     _ob_ds > 0,
+                     f"CVAT から取り込んで YOLO 形式に変換します（現在 {_ob_ds} 件）",
+                     "📤 Step2 タブ。CVAT を使わず ZIP や画像を直接入れることもできます"),
+                    ("③ 学習する",
+                     _ob_models > 0,
+                     f"モデルサイズとパラメータを選んで学習します（現在 {_ob_models} 件）",
+                     "🚀 Step3 タブ。他の PC で作った .pt を持ち込むこともできます"),
+                    ("④ 評価・推論する",
+                     _ob_preds > 0,
+                     f"精度を測り、推論結果を確認します（推論結果 {_ob_preds} 件）",
+                     "🔭 Step4 タブ。mAP 比較や正解ラベルとの差分も見られます"),
+                ]
+                for _title, _done, _desc, _where in _ob_steps:
+                    _icon = "✅" if _done else "⬜"
+                    st.markdown(f"**{_icon} {_title}** — {_desc}")
+                    st.caption(f"　　{_where}")
+
+                st.markdown("---")
+                if _ob_ds == 0 and _ob_raw == 0:
+                    st.info(
+                        "**まだデータがありません。** まず CVAT でアノテーションするか、"
+                        "「📤 Step2: データ取込」の「📁 ローカルからデータを直接追加」から"
+                        "手元の画像や YOLO 形式の ZIP を入れてください。"
+                    )
+                elif _ob_ds == 0:
+                    st.info(
+                        "**データはありますが data.yaml がまだありません。** "
+                        "「📤 Step2: データ取込」でデータセットを生成してください。"
+                    )
+                elif _ob_models == 0:
+                    st.info(
+                        "**データセットができています。** 次は「🚀 Step3: モデル学習」で学習します。"
+                        "まずは小さいモデル（yolo11n / yolo11s）と少なめのエポックで"
+                        "一周させてみるのがおすすめです。"
+                    )
+                else:
+                    st.success(
+                        "**ひととおり揃っています。** 「🔭 Step4: 推論・評価」でモデルの精度を測り、"
+                        "「🏷 Step1」でそのモデルを CVAT の自動アノテーションに載せると、"
+                        "次のアノテーションが楽になります。"
+                    )
+
+            # ── ② 別PCへの移行手順 ────────────────────────────────────────
+            if _ob_page.startswith("②"):
+                st.markdown(
+                    "**別の PC で同じ環境を作るとき**の手順です。"
+                    "詳細は README.md に記載しています。"
+                )
+                st.markdown(
+                    "**1. 前提を揃える**\n"
+                    "- Docker / docker compose\n"
+                    "- GPU を使う場合は nvidia-container-toolkit\n"
+                )
+                st.code(
+                    "git clone <このリポジトリ>\n"
+                    "cd detection_dev_ui", language="bash")
+                st.markdown("**2. `.env` を作る**（リポジトリには含まれません）")
+                st.code(
+                    "CVAT_USERNAME=admin\n"
+                    "CVAT_PASSWORD=<任意のパスワード>\n"
+                    "CVAT_DB_PASSWORD=<任意>\n"
+                    "CVAT_IAM_DB_PASSWORD=<任意>\n"
+                    "NVIDIA_VISIBLE_DEVICES=all\n"
+                    "COMPOSE_PROJECT_NAME=mlops_workspace", language="bash")
+                st.markdown("**3. データベースを初期化する**（初回のみ）")
+                st.code(
+                    "docker compose up -d cvat_db cvat_redis cvat_redis_inmem "
+                    "cvat_redis_ondisk cvat_iam_db\n"
+                    "sleep 30\n"
+                    "docker compose run --rm cvat_server init\n"
+                    "docker compose run --rm cvat_server bash -c \\\n"
+                    '  "~/manage.py createsuperuser --username admin --email admin@local.com"',
+                    language="bash")
+                st.markdown("**4. 全サービスを起動する**")
+                st.code("docker compose up -d\ndocker compose ps", language="bash")
+
+                st.markdown("---")
+                st.markdown("**作業内容を持っていくには**")
+                st.markdown(
+                    "- **データセット** … 「📁 データ管理」の `⬇ 持ち出す` から ZIP で書き出せます"
+                    "（画像を含めない「ラベルのみ」も選べます）\n"
+                    "- **モデル** … 同じくデータ管理タブから `.pt` 単体、または"
+                    "学習ログ・評価結果込みの「一式ZIP」で書き出せます\n"
+                    "- **持ち込み** … 移行先では「📤 学習済みモデルをアップロード」と"
+                    "「📁 ローカルからデータを直接追加」から取り込めます\n"
+                    "- **CVAT のアノテーション** … CVAT 側でタスクをバックアップするか、"
+                    "「🏷 Step1」でラベル定義を書き出して共有できます"
+                )
                 st.info(
-                    "**まだデータがありません。** まず CVAT でアノテーションするか、"
-                    "「📤 Step2: データ取込」の「📁 ローカルからデータを直接追加」から"
-                    "手元の画像や YOLO 形式の ZIP を入れてください。"
-                )
-            elif _ob_ds == 0:
-                st.info(
-                    "**データはありますが data.yaml がまだありません。** "
-                    "「📤 Step2: データ取込」でデータセットを生成してください。"
-                )
-            elif _ob_models == 0:
-                st.info(
-                    "**データセットができています。** 次は「🚀 Step3: モデル学習」で学習します。"
-                    "まずは小さいモデル（yolo11n / yolo11s）と少なめのエポックで"
-                    "一周させてみるのがおすすめです。"
-                )
-            else:
-                st.success(
-                    "**ひととおり揃っています。** 「🔭 Step4: 推論・評価」でモデルの精度を測り、"
-                    "「🏷 Step1」でそのモデルを CVAT の自動アノテーションに載せると、"
-                    "次のアノテーションが楽になります。"
+                    "`data/` `models/` `predictions/` はホスト側のディレクトリを"
+                    "そのままマウントしています。ディレクトリごとコピーしても移行できます。"
                 )
 
-        # ── ② 別PCへの移行手順 ────────────────────────────────────────
-        with _ob_t2:
-            st.markdown(
-                "**別の PC で同じ環境を作るとき**の手順です。"
-                "詳細は README.md に記載しています。"
-            )
-            st.markdown(
-                "**1. 前提を揃える**\n"
-                "- Docker / docker compose\n"
-                "- GPU を使う場合は nvidia-container-toolkit\n"
-            )
-            st.code(
-                "git clone <このリポジトリ>\n"
-                "cd detection_dev_ui", language="bash")
-            st.markdown("**2. `.env` を作る**（リポジトリには含まれません）")
-            st.code(
-                "CVAT_USERNAME=admin\n"
-                "CVAT_PASSWORD=<任意のパスワード>\n"
-                "CVAT_DB_PASSWORD=<任意>\n"
-                "CVAT_IAM_DB_PASSWORD=<任意>\n"
-                "NVIDIA_VISIBLE_DEVICES=all\n"
-                "COMPOSE_PROJECT_NAME=mlops_workspace", language="bash")
-            st.markdown("**3. データベースを初期化する**（初回のみ）")
-            st.code(
-                "docker compose up -d cvat_db cvat_redis cvat_redis_inmem "
-                "cvat_redis_ondisk cvat_iam_db\n"
-                "sleep 30\n"
-                "docker compose run --rm cvat_server init\n"
-                "docker compose run --rm cvat_server bash -c \\\n"
-                '  "~/manage.py createsuperuser --username admin --email admin@local.com"',
-                language="bash")
-            st.markdown("**4. 全サービスを起動する**")
-            st.code("docker compose up -d\ndocker compose ps", language="bash")
+            # ── ③ 用語とタスク種別 ────────────────────────────────────────
+            if _ob_page.startswith("③"):
+                st.markdown("**どのタスク種別を選べばよいか**")
+                st.markdown(
+                    "| やりたいこと | タスク種別 | CVAT で付けるもの |\n"
+                    "|---|---|---|\n"
+                    "| 物体の位置を四角で囲みたい | `detect` | 矩形 (box) |\n"
+                    "| 物体の形を正確に取りたい | `segment` | ポリゴン |\n"
+                    "| 傾いた物体を囲みたい | `obb` | 回転付き矩形 / 4点ポリゴン |\n"
+                    "| 画像全体を仕分けたい | `classify` | タグ |\n"
+                    "| 関節や特徴点を取りたい | `pose` | ポイント |\n"
+                )
+                st.caption("まず迷ったら `detect` から始めるのが無難です。"
+                           "後から別の種別のデータセットを作り直すこともできます。")
 
-            st.markdown("---")
-            st.markdown("**作業内容を持っていくには**")
-            st.markdown(
-                "- **データセット** … 「📁 データ管理」の `⬇ 持ち出す` から ZIP で書き出せます"
-                "（画像を含めない「ラベルのみ」も選べます）\n"
-                "- **モデル** … 同じくデータ管理タブから `.pt` 単体、または"
-                "学習ログ・評価結果込みの「一式ZIP」で書き出せます\n"
-                "- **持ち込み** … 移行先では「📤 学習済みモデルをアップロード」と"
-                "「📁 ローカルからデータを直接追加」から取り込めます\n"
-                "- **CVAT のアノテーション** … CVAT 側でタスクをバックアップするか、"
-                "「🏷 Step1」でラベル定義を書き出して共有できます"
-            )
-            st.info(
-                "`data/` `models/` `predictions/` はホスト側のディレクトリを"
-                "そのままマウントしています。ディレクトリごとコピーしても移行できます。"
-            )
+                st.markdown("---")
+                st.markdown("**最低限おさえる指標**")
+                st.markdown(
+                    "- **Precision（適合率）** … 検出したもののうち、正しかった割合。"
+                    "低い＝誤検出が多い\n"
+                    "- **Recall（再現率）** … 実際にあるもののうち、見つけられた割合。"
+                    "低い＝見逃しが多い\n"
+                    "- **mAP50** … ざっくりした位置が合っていれば正解とする精度。まずこれを見ます\n"
+                    "- **mAP50-95** … 位置の正確さまで厳しく見る精度。実用ではこちらが効きます\n"
+                    "- **top1 accuracy** … 画像分類での正答率\n"
+                )
+                st.caption("詳しい解説と失敗したときの対処は「📚 トピックス」タブにあります。")
 
-        # ── ③ 用語とタスク種別 ────────────────────────────────────────
-        with _ob_t3:
-            st.markdown("**どのタスク種別を選べばよいか**")
-            st.markdown(
-                "| やりたいこと | タスク種別 | CVAT で付けるもの |\n"
-                "|---|---|---|\n"
-                "| 物体の位置を四角で囲みたい | `detect` | 矩形 (box) |\n"
-                "| 物体の形を正確に取りたい | `segment` | ポリゴン |\n"
-                "| 傾いた物体を囲みたい | `obb` | 回転付き矩形 / 4点ポリゴン |\n"
-                "| 画像全体を仕分けたい | `classify` | タグ |\n"
-                "| 関節や特徴点を取りたい | `pose` | ポイント |\n"
-            )
-            st.caption("まず迷ったら `detect` から始めるのが無難です。"
-                       "後から別の種別のデータセットを作り直すこともできます。")
+            st.caption("このガイドはサイドバー最下部の「📖 はじめかたガイドを表示」で"
+                       "いつでも開閉できます。")
 
-            st.markdown("---")
-            st.markdown("**最低限おさえる指標**")
-            st.markdown(
-                "- **Precision（適合率）** … 検出したもののうち、正しかった割合。"
-                "低い＝誤検出が多い\n"
-                "- **Recall（再現率）** … 実際にあるもののうち、見つけられた割合。"
-                "低い＝見逃しが多い\n"
-                "- **mAP50** … ざっくりした位置が合っていれば正解とする精度。まずこれを見ます\n"
-                "- **mAP50-95** … 位置の正確さまで厳しく見る精度。実用ではこちらが効きます\n"
-                "- **top1 accuracy** … 画像分類での正答率\n"
-            )
-            st.caption("詳しい解説と失敗したときの対処は「📚 トピックス」タブにあります。")
-
-        st.caption("このガイドはサイドバー最下部の「📖 はじめかたガイドを表示」で"
-                   "いつでも開閉できます。")
-
-# ---------------------------------------------------------------------------
-# タブ構成
+    # ---------------------------------------------------------------------------
+    # タブ構成
+    # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 from ui.presets import (_apply_preset, _collect_current_params,
                         _load_user_presets, _save_user_presets)
@@ -819,3 +829,15 @@ with tab4:
 with tab5:
     render_topics()
 
+
+# ---------------------------------------------------------------------------
+# 進捗ポーリング
+#
+#   学習・評価・デプロイの実行中は定期的に再実行して進捗を更新する。
+#   タブの描画途中で st.rerun() を呼ぶと、それ以降のタブが描画されず
+#   画面が欠けるため、すべて描き終えたここで一度だけ行う。
+# ---------------------------------------------------------------------------
+_poll_interval = consume_rerun_poll()
+if _poll_interval:
+    time.sleep(_poll_interval)
+    st.rerun()

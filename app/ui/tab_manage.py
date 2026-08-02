@@ -719,7 +719,8 @@ def render_manage() -> None:
                     elif _ld.get("data_yaml"):
                         st.warning("⚠ 学習に使ったデータセットは現在見つかりません。")
 
-                with st.expander("生の来歴データ (JSON)"):
+                # expander の入れ子は不可のためチェックボックスで開閉する
+                if st.checkbox("生の来歴データ (JSON) を表示", key="lineage_raw"):
                     st.json(_lin_pv)
         else:
             st.info("models/ に学習 run がありません。")
@@ -733,7 +734,8 @@ def render_manage() -> None:
         st.info("predictions/ に結果 JSON がありません。")
     else:
         st.text(f"{len(pred_files)} 件の結果ファイル")
-        if st.button("🗑 predictions/ をすべてクリア", type="secondary"):
+        if st.button("🗑 predictions/ をすべてクリア", type="secondary",
+                     key="pred_clear_all"):
             for jf in pred_files:
                 jf.unlink()
             st.success("predictions/ をクリアしました")
@@ -748,7 +750,8 @@ def render_manage() -> None:
     else:
         merge_targets = st.multiselect("統合するデータセットを選択（2つ以上）", _ds_names)
         merge_out_name = st.text_input("統合先ディレクトリ名", value=f"merged_{datetime.now():%Y%m%d_%H%M}")
-        if st.button("🔀 統合実行", disabled=len(merge_targets) < 2):
+        if st.button("🔀 統合実行", disabled=len(merge_targets) < 2,
+                     key="merge_datasets_run"):
             import yaml as pyyaml
             out_dir = DATA_DIR / merge_out_name
             all_labels: list[str] = []

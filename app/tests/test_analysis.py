@@ -225,3 +225,32 @@ def test_slugify_replaces_symbols():
 
 def test_slugify_falls_back_when_empty():
     assert slugify_function_name("日本語") == "model"
+
+
+# ── 進捗ポーリングの予約 ────────────────────────────────────────────────
+# タブの描画途中で st.rerun() を呼ぶと以降のタブが描画されないため、
+# 予約しておいて main.py の末尾でまとめて実行する仕組み。
+def test_poll_is_reserved_and_consumed(monkeypatch):
+    import core.state as state
+
+    store: dict = {}
+    monkeypatch.setattr(state.st, "session_state", store, raising=False)
+
+    assert state.consume_rerun_poll() is None      # 予約なし
+    state.request_rerun_poll(2.0)
+    assert store[state.POLL_KEY] == 2.0
+    assert state.consume_rerun_poll() == 2.0
+    assert state.consume_rerun_poll() is None      # 一度取り出したら消える
+
+
+def test_poll_uses_shortest_interval(monkeypatch):
+    """学習と評価が同時に動いていたら短い方に合わせる"""
+    import core.state as state
+
+    store: dict = {}
+    monkeypatch.setattr(state.st, "session_state", store, raising=False)
+
+    state.request_rerun_poll(5.0)
+    state.request_rerun_poll(2.0)
+    state.request_rerun_poll(8.0)
+    assert state.consume_rerun_poll() == 2.0

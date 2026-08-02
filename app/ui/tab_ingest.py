@@ -37,7 +37,7 @@ def render_ingest() -> None:
 
     col1, col2 = st.columns([3, 1])
     with col2:
-        if st.button("🔄 タスク一覧を取得", use_container_width=True):
+        if st.button("🔄 タスク一覧を取得", use_container_width=True, key="cvat_fetch_tasks"):
             with st.spinner("CVATからタスクを取得中…"):
                 st.session_state.cvat_tasks = fetch_cvat_tasks()
 
@@ -72,7 +72,7 @@ def render_ingest() -> None:
         # ─── 手順① CVAT for images 1.1 エクスポート ─────────────────────────
         st.markdown("#### ① CVATエクスポート")
         if st.button("⬇️ エクスポート実行 (CVAT for images 1.1)", type="primary",
-                     use_container_width=True,
+                     use_container_width=True, key="cvat_export_run",
                      disabled=len(selected_ids) == 0):
             if not selected_ids:
                 st.warning("エクスポートするタスクを選択してください。")
@@ -182,7 +182,8 @@ def render_ingest() -> None:
             if not selected_labels:
                 st.warning("少なくとも1つ以上のラベルを選択してください。")
             else:
-                if st.button("⚙️ データセット生成", type="primary", use_container_width=True):
+                if st.button("⚙️ データセット生成", type="primary", use_container_width=True,
+                             key="dataset_generate_run"):
                     raw_dir_path = Path(st.session_state.cvat_raw_dir)
                     gen_dir = DATA_DIR / gen_dir_name
                     gen_dir.mkdir(parents=True, exist_ok=True)
@@ -211,7 +212,8 @@ def render_ingest() -> None:
             "既存のraw_dirパス（コンテナ内）",
             placeholder="/workspace/data/dataset_11_20260512/raw",
         )
-        if st.button("🔍 XMLを解析", use_container_width=True) and manual_raw:
+        if st.button("🔍 XMLを解析", use_container_width=True,
+                     key="xml_parse_run") and manual_raw:
             raw_p = Path(manual_raw)
             if raw_p.exists():
                 xml_info = parse_cvat_xml(raw_p)

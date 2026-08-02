@@ -38,3 +38,29 @@ def _get_train_shared() -> tuple[dict, threading.Lock]:
          "metrics_history": [], "stop_requested": False},
         threading.Lock(),
     )
+
+
+# ---------------------------------------------------------------------------
+# 進捗ポーリングの予約
+#
+#   バックグラウンド処理（学習・評価・デプロイ）の進捗を追うには
+#   定期的な再実行が要る。ただしタブの描画途中で st.rerun() を呼ぶと
+#   スクリプトがそこで打ち切られ、**それ以降のタブが描画されない**。
+#   （データ管理やトピックスが真っ白になる、他の入力が操作できない）
+#
+#   そこで「予約」だけしておき、全タブを描画し終えた main.py の末尾で
+#   まとめて再実行する。
+# ---------------------------------------------------------------------------
+POLL_KEY = "_poll_rerun_after"
+
+
+def request_rerun_poll(interval: float = 2.0) -> None:
+    """描画が終わったあとに再実行するよう予約する（タブの中から呼ぶ）"""
+    prev = st.session_state.get(POLL_KEY)
+    # 複数の処理が同時に動いていたら短い方に合わせる
+    st.session_state[POLL_KEY] = interval if prev is None else min(prev, interval)
+
+
+def consume_rerun_poll() -> float | None:
+    """予約されていた再実行間隔を取り出す（main.py の末尾から呼ぶ）"""
+    return st.session_state.pop(POLL_KEY, None)

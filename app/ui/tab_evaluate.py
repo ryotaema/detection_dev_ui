@@ -47,12 +47,13 @@ def render_evaluate() -> None:
     # 複数モデル比較
     _all_models = list(MODELS_DIR.rglob("*.pt"))
     _model_map = {str(p.relative_to(MODELS_DIR)): str(p) for p in _all_models}
-    compare_mode = st.checkbox("🔀 複数モデル比較モード", value=False)
+    compare_mode = st.checkbox("🔀 複数モデル比較モード", value=False, key="cmp_mode")
     if compare_mode and _model_map:
         selected_compare_models = st.multiselect(
             "比較するモデルを選択",
             list(_model_map.keys()),
             default=list(_model_map.keys())[:min(2, len(_model_map))],
+            key="cmp_models",
         )
     else:
         selected_compare_models = []
@@ -230,8 +231,8 @@ def render_evaluate() -> None:
                 st.caption(f"`{_ev_key}` での評価結果はまだありません。")
 
         if _ev_running:
-            time.sleep(2)
-            st.rerun()
+            # ここで st.rerun() すると以降のタブが描画されないため予約だけする
+            request_rerun_poll()
 
     # --- GT との差分分析（ラベル漏れ・誤ラベルの発見）---
     # --- 実運用の conf を決める ---
@@ -570,7 +571,7 @@ def render_evaluate() -> None:
             (not current_model and not (compare_mode and selected_compare_models))
             or (not test_image_dir and not test_video_path)
         )
-        if st.button("▶ 推論実行", type="primary", use_container_width=True,
+        if st.button("▶ 推論実行", type="primary", use_container_width=True, key="infer_run",
                     disabled=_infer_disabled):
 
             # ── 動画推論 ──────────────────────────────────────────────
@@ -659,8 +660,8 @@ def render_evaluate() -> None:
 
     # --- FiftyOne 起動ボタン ---
     with col_vis:
-        fo_dataset_name = st.text_input("FiftyOneデータセット名", value="yolo_predictions")
-        if st.button("🔭 FiftyOne で可視化", use_container_width=True):
+        fo_dataset_name = st.text_input("FiftyOneデータセット名", value="yolo_predictions", key="fo_name")
+        if st.button("🔭 FiftyOne で可視化", use_container_width=True, key="fo_launch"):
             with st.spinner("FiftyOne App を起動中…"):
                 port = launch_fiftyone(fo_dataset_name, PREDICTIONS_DIR)
             if port:
@@ -705,6 +706,7 @@ def render_evaluate() -> None:
                 st.download_button(
                     "⬇ アノテーション済み動画をダウンロード",
                     _video_bytes,
+                    key="dl_video",
                     file_name=Path(_out_video).name,
                     mime="video/mp4",
                     use_container_width=True,
@@ -962,7 +964,7 @@ def render_evaluate() -> None:
         # ── 書き出しボタン ──────────────────────────────────────────────────────
         _btn_disabled = (_exp_mode == "選択して書き出す" and _exp_count == 0)
         if st.button(f"📥 {_exp_count} 件を書き出す", use_container_width=True,
-                     type="primary", disabled=_btn_disabled):
+                     type="primary", disabled=_btn_disabled, key="exp_images_run"):
             _exp_out = _exp_dest
             _prog_bar  = st.progress(0, text="書き出し準備中…")
             _prog_text = st.empty()
@@ -991,6 +993,7 @@ def render_evaluate() -> None:
                     st.download_button(
                         f"⬇️ ZIPでダウンロード ({_ok}件)",
                         _zip_buf.getvalue(),
+                        key="dl_exported_zip",
                         file_name=f"exports_{datetime.now():%Y%m%d_%H%M}.zip",
                         mime="application/zip",
                         use_container_width=True,
@@ -1170,13 +1173,15 @@ def render_evaluate() -> None:
             _ra_c1, _ra_c2 = st.columns(2)
             with _ra_c1:
                 if st.button("⬇ 再アノテーション用 ZIP を生成",
-                             type="primary", use_container_width=True):
+                             type="primary", use_container_width=True,
+                             key="reanno_zip"):
                     with st.spinner("ZIP を生成中…"):
                         _zip_bytes, _ok, _ng = build_reannotation_zip(_ra_jsons)
                     if _ok > 0:
                         st.download_button(
                             f"⬇ ダウンロード（{_ok} 件）",
                             _zip_bytes,
+                            key="dl_reanno_zip",
                             file_name=f"reannotation_{datetime.now():%Y%m%d_%H%M}.zip",
                             mime="application/zip",
                             use_container_width=True,
@@ -1184,7 +1189,7 @@ def render_evaluate() -> None:
                     if _ng > 0:
                         st.warning(f"⚠ {_ng} 件は元画像が見つからずスキップしました")
             with _ra_c2:
-                if st.button("🗑 フラグをすべてクリア", use_container_width=True):
+                if st.button("🗑 フラグをすべてクリア", use_container_width=True, key="reanno_clear"):
                     st.session_state.reanno_set = set()
                     st.rerun()
 
