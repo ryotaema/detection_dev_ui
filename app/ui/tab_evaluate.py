@@ -37,7 +37,7 @@ def render_evaluate() -> None:
       <div class="sb-prev">{_prev_info3}</div>
       <div class="sb-desc">→ ここでやること: 推論実行 → FiftyOneで結果を可視化・確認</div>
     </div>""", unsafe_allow_html=True)
-    st.markdown('<div class="pipeline-card"><h3>🔭 推論 & FiftyOne 可視化</h3>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><h3>🔭 推論 & FiftyOne 可視化</h3></div>', unsafe_allow_html=True)
 
     # --- モデル確認 ---
     current_model = st.session_state.last_model_path or ""
@@ -674,20 +674,19 @@ def render_evaluate() -> None:
         fo_url = f"http://localhost:{st.session_state.fiftyone_port}"
         st.markdown(f"""
     <div style="margin-top:16px;">
-    <p style="color:#4a6080; font-size:.85rem;">
+    <p style="color:var(--text-muted); font-size:.85rem;">
         FiftyOne App が別ポートで起動中。同一ホストの場合は以下から直接アクセスできます。
     </p>
-    <a href="{fo_url}" target="_blank" style="color:#7ecff4; font-family:'JetBrains Mono',monospace;">
+    <a href="{fo_url}" target="_blank" style="color:var(--accent); font-family:'JetBrains Mono',monospace;">
         🔗 FiftyOne App を開く → {fo_url}
     </a>
     </div>
     <iframe src="{fo_url}" width="100%" height="600px"
-    style="border:1px solid #1e2330; border-radius:8px; margin-top:12px;"
+    style="border:1px solid var(--border); border-radius:8px; margin-top:12px;"
     allow="fullscreen">
     </iframe>
     """, unsafe_allow_html=True)
 
-    st.markdown('</div>', unsafe_allow_html=True)
 
     # --- 動画推論結果 ---
     _vr = st.session_state.get("last_video_result")
@@ -756,7 +755,7 @@ def render_evaluate() -> None:
         with _prev_header_c2:
             if _reanno_count > 0:
                 st.markdown(
-                    f'<div style="padding-top:10px; color:#f4a84e; font-size:.85rem;">'
+                    f'<div style="padding-top:10px; color:var(--warning); font-size:.85rem;">'
                     f'🚩 再アノテーション: <b>{_reanno_count}</b> 件</div>',
                     unsafe_allow_html=True,
                 )
@@ -828,7 +827,7 @@ def render_evaluate() -> None:
                     st.rerun()
             with _tb4:
                 st.markdown(
-                    f'<div style="padding-top:8px; color:#7ecff4; font-size:.85rem;">'
+                    f'<div style="padding-top:8px; color:var(--accent); font-size:.85rem;">'
                     f'選択中: <b>{_sel_count}</b> / {len(_pred_jsons)} 件 &nbsp;|&nbsp; '
                     f'ページ {_cur_page + 1} / {_total_pages}</div>',
                     unsafe_allow_html=True,
@@ -876,7 +875,7 @@ def render_evaluate() -> None:
                     st.rerun()
             with _pn2:
                 st.markdown(
-                    f'<div style="text-align:center; padding-top:8px; color:#4a6080; font-size:.82rem;">'
+                    f'<div style="text-align:center; padding-top:8px; color:var(--text-muted); font-size:.82rem;">'
                     f'{_cur_page + 1} / {_total_pages}</div>',
                     unsafe_allow_html=True,
                 )
@@ -1094,7 +1093,7 @@ def render_evaluate() -> None:
             st.info("上の自動抽出、またはプレビューの 🚩 ボタンで画像にフラグを立てると、ここに表示されます。")
         else:
             st.markdown(
-                f'<div style="color:#f4a84e; font-size:.9rem; margin-bottom:8px;">'
+                f'<div style="color:var(--warning); font-size:.9rem; margin-bottom:8px;">'
                 f'🚩 フラグ済み: <b>{len(_ra_jsons)}</b> 件</div>',
                 unsafe_allow_html=True,
             )

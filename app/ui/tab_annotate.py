@@ -36,7 +36,7 @@ def render_annotate() -> None:
     </div>""", unsafe_allow_html=True)
 
     # ── 自動アノテーションモデル (Nuclio) ──────────────────────────────────
-    st.markdown('<div class="pipeline-card"><h3>🤖 自動アノテーションモデル (Nuclio)</h3>',
+    st.markdown('<div class="section-head"><h3>🤖 自動アノテーションモデル (Nuclio)</h3></div>',
                 unsafe_allow_html=True)
     st.caption(
         "ここにデプロイしたモデルが、CVAT の「Actions → Automatic annotation」の選択肢に現れます。"
@@ -226,10 +226,9 @@ def render_annotate() -> None:
         f'🔗 Nuclio ダッシュボードで詳細を見る</a></div>',
         unsafe_allow_html=True,
     )
-    st.markdown('</div>', unsafe_allow_html=True)
 
     # ── 新規タスク作成（アノテーションの入口）──────────────────────────────
-    st.markdown('<div class="pipeline-card"><h3>➕ CVAT に新しいタスクを作る</h3>',
+    st.markdown('<div class="section-head"><h3>➕ CVAT に新しいタスクを作る</h3></div>',
                 unsafe_allow_html=True)
     st.caption(
         "アノテーションしたい画像から CVAT のタスクを直接作ります。"
@@ -330,10 +329,9 @@ def render_annotate() -> None:
         else:
             show_error(_nt_res["error"], prefix="❌ 作成に失敗しました: ")
 
-    st.markdown('</div>', unsafe_allow_html=True)
 
     # ── アノテーション進捗 ────────────────────────────────────────────────
-    st.markdown('<div class="pipeline-card"><h3>📊 アノテーション進捗</h3>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><h3>📊 アノテーション進捗</h3></div>', unsafe_allow_html=True)
 
     st.caption(
         "進捗はジョブ単位で集計しています。CVAT はタスクを複数のジョブに分割し、"
@@ -442,4 +440,3 @@ def render_annotate() -> None:
             "／ アノテーションが終わったタスクは「📤 Step2: データ取込」でエクスポートします。"
         )
 
-    st.markdown('</div>', unsafe_allow_html=True)

@@ -27,9 +27,9 @@ from core import (  # noqa: F401
 
 
 def render_topics() -> None:
-    st.markdown('<div class="pipeline-card"><h3>📚 ガイド</h3>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><h3>📚 ガイド</h3></div>', unsafe_allow_html=True)
     st.markdown(
-        "<p style='color:#6a8aaa;font-size:.85rem;'>物体検出 MLOps の概念・操作ガイドです。GitHub の詳細ドキュメントを参照してください。</p>",
+        "<p style='color:var(--text-secondary);font-size:.85rem;'>物体検出 MLOps の概念・操作ガイドです。GitHub の詳細ドキュメントを参照してください。</p>",
         unsafe_allow_html=True,
     )
 
@@ -286,14 +286,13 @@ def render_topics() -> None:
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown('</div>', unsafe_allow_html=True)
 
     # ---------------------------------------------------------------------------
     # フッター
     # ---------------------------------------------------------------------------
     st.markdown("""
-    <div style="border-top:1px solid #1e2330; margin-top:40px; padding-top:12px;
-            text-align:center; color:#2a3a50; font-size:.75rem; font-family:'JetBrains Mono',monospace;">
+    <div style="border-top:1px solid var(--border); margin-top:40px; padding-top:12px;
+            text-align:center; color:var(--text-muted); font-size:.75rem; font-family:'JetBrains Mono',monospace;">
     detection_dev_ui v1.0 · CVAT · YOLO · MLflow · FiftyOne · Streamlit
     </div>
     """, unsafe_allow_html=True)

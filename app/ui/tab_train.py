@@ -25,6 +25,7 @@ from core import (  # noqa: F401
 from .widgets import _ckw, _nw, _ph, _selw, _sw, show_error
 from .presets import (_apply_preset, _BUILTIN_PRESETS, _collect_current_params,
                       _load_user_presets, _save_user_presets, _USER_PRESETS_FILE)
+from .theme import active_theme
 
 
 
@@ -41,7 +42,7 @@ def render_train() -> None:
       <div class="sb-prev">{_prev_info2}</div>
       <div class="sb-desc">→ ここでやること: モデルサイズ・学習パラメータを設定して学習開始</div>
     </div>""", unsafe_allow_html=True)
-    st.markdown('<div class="pipeline-card"><h3>🚀 YOLO 学習設定</h3>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><h3>🚀 YOLO 学習設定</h3></div>', unsafe_allow_html=True)
 
     # ── プリセット ───────────────────────────────────────────────────────────
     _user_presets  = _load_user_presets()
@@ -275,20 +276,20 @@ def render_train() -> None:
             _n_vl   = len(list(_vl_dir.glob("*.*"))) if _vl_dir.exists() else "—"
             _nm_str = ", ".join(str(n) for n in _names[:10]) + ("…" if len(_names) > 10 else "")
             st.markdown(f"""
-    <div style="background:#0e1520;border:1px solid #2d6b47;border-left:4px solid #4caf7d;
+    <div style="background:var(--bg-card-inner);border:1px solid var(--success-border);border-left:4px solid var(--success);
      border-radius:6px;padding:10px 16px;margin:6px 0 10px;">
-      <div style="color:#4caf7d;font-size:.87rem;font-weight:700;margin-bottom:6px;">
+      <div style="color:var(--success);font-size:.87rem;font-weight:700;margin-bottom:6px;">
     📁 {_ds_dir_path.name}
       </div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:4px;">
-    <span style="color:#6a8aaa;font-size:.82rem;">クラス数: <b style="color:#c8d8e8">{_nc}</b></span>
-    <span style="color:#6a8aaa;font-size:.82rem;">Train 画像: <b style="color:#c8d8e8">{_n_tr}</b></span>
-    <span style="color:#6a8aaa;font-size:.82rem;">Val 画像: <b style="color:#c8d8e8">{_n_vl}</b></span>
+    <span style="color:var(--text-secondary);font-size:.82rem;">クラス数: <b style="color:var(--text-primary)">{_nc}</b></span>
+    <span style="color:var(--text-secondary);font-size:.82rem;">Train 画像: <b style="color:var(--text-primary)">{_n_tr}</b></span>
+    <span style="color:var(--text-secondary);font-size:.82rem;">Val 画像: <b style="color:var(--text-primary)">{_n_vl}</b></span>
       </div>
-      <div style="color:#6a8aaa;font-size:.8rem;">
-    ラベル: <span style="color:#c8d8e8">{_nm_str if _nm_str else "—"}</span>
+      <div style="color:var(--text-secondary);font-size:.8rem;">
+    ラベル: <span style="color:var(--text-primary)">{_nm_str if _nm_str else "—"}</span>
       </div>
-      <div style="color:#4a6080;font-size:.75rem;margin-top:4px;">{data_yaml_path}</div>
+      <div style="color:var(--text-muted);font-size:.75rem;margin-top:4px;">{data_yaml_path}</div>
     </div>""", unsafe_allow_html=True)
         except Exception:
             st.code(data_yaml_path, language="text")
@@ -307,7 +308,7 @@ def render_train() -> None:
                             _sub_cnt = len(list(_e.iterdir()))
                             st.markdown(
                                 f"📁 **{_e.name}/**"
-                                f"<span style='color:#4a6080;font-size:.78rem'> ({_sub_cnt} 件)</span>",
+                                f"<span style='color:var(--text-muted);font-size:.78rem'> ({_sub_cnt} 件)</span>",
                                 unsafe_allow_html=True,
                             )
                         else:
@@ -316,7 +317,7 @@ def render_train() -> None:
                                      else f"{_sz/1048576:.1f} MB")
                             st.markdown(
                                 f"📄 {_e.name}"
-                                f"<span style='color:#4a6080;font-size:.78rem'> {_sz_s}</span>",
+                                f"<span style='color:var(--text-muted);font-size:.78rem'> {_sz_s}</span>",
                                 unsafe_allow_html=True,
                             )
                 except Exception as _dir_err:
@@ -597,10 +598,10 @@ def render_train() -> None:
     _smi.metric("dropout", str(dropout))
     _smj.metric("AMP", "ON" if amp else "OFF")
     st.markdown(
-        f'<div style="background:#0d1520;border:1px solid #1e2d40;border-radius:6px;'
-        f'padding:8px 14px;margin:8px 0 16px;font-size:.82rem;color:#6a8aaa;">'
-        f'📁 データセット: <b style="color:#c8d8e8">{_ds_disp}</b>'
-        f'<span style="color:#4a6080;font-size:.75rem"> &nbsp;—&nbsp; {data_yaml_path}</span></div>',
+        f'<div style="background:var(--bg-card-inner);border:1px solid var(--border);border-radius:6px;'
+        f'padding:8px 14px;margin:8px 0 16px;font-size:.82rem;color:var(--text-secondary);">'
+        f'📁 データセット: <b style="color:var(--text-primary)">{_ds_disp}</b>'
+        f'<span style="color:var(--text-muted);font-size:.75rem"> &nbsp;—&nbsp; {data_yaml_path}</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -823,14 +824,17 @@ def render_train() -> None:
 
         log_lines = st.session_state.training_log[-500:]
         log_text_escaped = "\n".join(log_lines).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        # iframe の中は親ドキュメントの CSS 変数を継承しないため、
+        # ここだけはテーマから実際の色を取り出して埋め込む
+        _th = active_theme()
         components.html(f"""
     <style>
-      body{{margin:0;background:#0e1117;}}
+      body{{margin:0;background:{_th['bg_log']};}}
       #log-box{{
-    background:#0e1117;color:#e0e6ed;
+    background:{_th['bg_log']};color:{_th['text_secondary']};
     font-family:'JetBrains Mono',monospace;font-size:12px;
     height:380px;overflow-y:auto;
-    padding:12px;border:1px solid #1e2330;border-radius:8px;
+    padding:12px;border:1px solid {_th['border']};border-radius:8px;
     white-space:pre-wrap;word-break:break-all;
       }}
     </style>
@@ -904,7 +908,6 @@ def render_train() -> None:
             with st.expander("📄 生データ（末尾5行）"):
                 st.dataframe(df_r.tail(5), use_container_width=True)
 
-    st.markdown('</div>', unsafe_allow_html=True)
 
     # --- 既存モデル選択 ---
     # ── 学習履歴の比較（MLflow）────────────────────────────────────────────

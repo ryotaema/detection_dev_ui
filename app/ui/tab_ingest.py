@@ -33,7 +33,7 @@ def render_ingest() -> None:
       <div class="sb-prev">← 事前準備: CVATでアノテーションを完了させてください (http://localhost:8080)</div>
       <div class="sb-desc">→ ここでやること: CVATタスクをエクスポート → YOLOデータセット形式に変換</div>
     </div>""", unsafe_allow_html=True)
-    st.markdown('<div class="pipeline-card"><h3>📤 CVATタスクエクスポート</h3>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><h3>📤 CVATタスクエクスポート</h3></div>', unsafe_allow_html=True)
 
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -205,7 +205,6 @@ def render_ingest() -> None:
                         )
                         st.code(str(yaml_path), language="text")
 
-    st.markdown('</div>', unsafe_allow_html=True)
 
     with st.expander("💡 既にRAWデータがある場合（再解析）"):
         manual_raw = st.text_input(

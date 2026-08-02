@@ -30,7 +30,7 @@ from .widgets import show_error
 def render_manage() -> None:
     import shutil
 
-    st.markdown('<div class="pipeline-card"><h3>📁 データ管理</h3>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><h3>📁 データ管理</h3></div>', unsafe_allow_html=True)
 
     # --- data/ データセット一覧 ---
     st.markdown("#### 学習データセット (`data/`)")
@@ -791,4 +791,3 @@ def render_manage() -> None:
             st.success(f"✅ 統合完了: `{out_dir}` (ラベル: {all_labels})")
             st.rerun()
 
-    st.markdown('</div>', unsafe_allow_html=True)

@@ -25,72 +25,10 @@ from core import (  # アンダースコア始まりは * で入らないので�
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
 
-USER_THEMES_PATH = MODELS_DIR / ".user_themes.json"
-
-# ---------------------------------------------------------------------------
-# プリセットテーマ定義
-# ---------------------------------------------------------------------------
-PRESET_THEMES: dict[str, dict] = {
-    "ダーク（デフォルト）": {
-        "bg_app": "#0d0f14", "bg_sidebar": "#12151c", "bg_card": "#161b26",
-        "bg_card_inner": "#0e1520", "bg_log": "#0a0c10",
-        "border": "#1e2330", "border_accent": "#2d4a80",
-        "text_primary": "#c8d8e8", "text_secondary": "#6a8aaa", "text_muted": "#4a6080",
-        "accent": "#7ecff4", "accent_dark": "#2d7dd2",
-        "success": "#4caf7d", "success_bg": "#111f17", "success_border": "#2d6b47",
-        "warning": "#f0a830", "warning_bg": "#3a2a10", "warning_border": "#7a5520",
-        "error": "#f06060", "error_bg": "#3a1a1a", "error_border": "#7a3030",
-        "btn_bg": "#1a2540", "btn_hover": "#2d4a80",
-        "chip_bg": "#0e1520", "chip_border": "#1e2d42", "chip_text": "#4a90c4",
-    },
-    "ダーク カラフル": {
-        "bg_app": "#0d0c14", "bg_sidebar": "#13101c", "bg_card": "#1a1628",
-        "bg_card_inner": "#120e20", "bg_log": "#0a0810",
-        "border": "#28203c", "border_accent": "#6040b0",
-        "text_primary": "#ead8ff", "text_secondary": "#9a78d0", "text_muted": "#6040a0",
-        "accent": "#c47eff", "accent_dark": "#8040d0",
-        "success": "#60e090", "success_bg": "#0d1a14", "success_border": "#306050",
-        "warning": "#ffb040", "warning_bg": "#2a1e08", "warning_border": "#705020",
-        "error": "#ff7090", "error_bg": "#2a1018", "error_border": "#703040",
-        "btn_bg": "#221040", "btn_hover": "#4820a0",
-        "chip_bg": "#160e28", "chip_border": "#2e1e50", "chip_text": "#a078e8",
-    },
-    "ライト シンプル": {
-        "bg_app": "#f5f7fa", "bg_sidebar": "#ebeef5", "bg_card": "#ffffff",
-        "bg_card_inner": "#eef2f8", "bg_log": "#e4e9f2",
-        "border": "#ced6e4", "border_accent": "#4878b8",
-        "text_primary": "#1a2038", "text_secondary": "#445878", "text_muted": "#7a8ca0",
-        "accent": "#2d6bb8", "accent_dark": "#1a4a90",
-        "success": "#2a7848", "success_bg": "#e8f5ee", "success_border": "#4a9868",
-        "warning": "#a86800", "warning_bg": "#fff3d8", "warning_border": "#c89040",
-        "error": "#c03030", "error_bg": "#fff0f0", "error_border": "#e06060",
-        "btn_bg": "#dce8f8", "btn_hover": "#b8d0f0",
-        "chip_bg": "#e8f0fa", "chip_border": "#b0c4dc", "chip_text": "#2a5898",
-    },
-    "ライト カラフル": {
-        "bg_app": "#f4f0ff", "bg_sidebar": "#ece4ff", "bg_card": "#ffffff",
-        "bg_card_inner": "#ede5ff", "bg_log": "#e4daf8",
-        "border": "#d0c4ec", "border_accent": "#8840e8",
-        "text_primary": "#1c1030", "text_secondary": "#5830a0", "text_muted": "#8860c0",
-        "accent": "#7c30e0", "accent_dark": "#5010b8",
-        "success": "#1a8040", "success_bg": "#e8fff0", "success_border": "#40a060",
-        "warning": "#c07000", "warning_bg": "#fff8e0", "warning_border": "#d09030",
-        "error": "#c02040", "error_bg": "#fff0f4", "error_border": "#e05070",
-        "btn_bg": "#e8d8ff", "btn_hover": "#c8a8ff",
-        "chip_bg": "#ecdeff", "chip_border": "#c4a0e8", "chip_text": "#6010c0",
-    },
-}
-
-# ユーザーが色ピッカーで編集できる主要フィールド
-THEME_EDIT_FIELDS: list[tuple[str, str]] = [
-    ("bg_app",       "背景色（メイン）"),
-    ("bg_card",      "カード背景色"),
-    ("text_primary", "メインテキスト色"),
-    ("accent",       "アクセント/ハイライト色"),
-    ("success",      "成功/完了色"),
-    ("warning",      "警告色"),
-    ("error",        "エラー色"),
-]
+# 配色の定義は ui/theme.py に集約している
+from ui.theme import (DEFAULT_THEME_NAME, PRESET_THEMES, THEME_EDIT_FIELDS,
+                      active_theme, build_theme_vars, load_user_themes,
+                      save_user_themes)
 
 # ---------------------------------------------------------------------------
 # Streamlit ページ設定
@@ -152,14 +90,24 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
     border-right: 1px solid var(--border);
 }
 
-.pipeline-card {
+/* セクション見出しの帯。
+   以前は .pipeline-card で「中身を囲む枠」にするつもりだったが、
+   st.markdown は呼び出しごとに独立した DOM ブロックになるため
+   開きタグと閉じタグを別々に出しても囲めない（空の枠だけが描画される）。
+   囲むのは諦めて、セクションの始まりを示す帯として使う。 */
+.section-head {
     background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 20px;
-    margin: 10px 0;
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+    padding: 12px 18px;
+    margin: 14px 0 16px;
 }
-.pipeline-card h3 { color: var(--accent); margin-top: 0; }
+.section-head h3 {
+    color: var(--accent);
+    margin: 0;
+    font-size: 1.05rem;
+}
 
 .badge-ok   { background: var(--success-bg);  color: var(--success);  border: 1px solid var(--success-border);
               padding:2px 10px; border-radius:4px; font-size:.78rem; }
@@ -325,7 +273,7 @@ defaults = {
     "cvat_export_tasks": [],   # 直近にエクスポートしたタスク（来歴に残す）
     "cvat_xml_info": None,
     "cvat_raw_dir": None,
-    "theme_name": "ライト シンプル",
+    "theme_name": DEFAULT_THEME_NAME,
     "reanno_set": set(),   # 再アノテーション要フラグを立てた JSON ファイル名の集合
 }
 # データもモデルも無い＝初回起動とみなし、はじめかたガイドを開いた状態にする
@@ -341,70 +289,10 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ---------------------------------------------------------------------------
-# テーマ永続化・注入
-# ---------------------------------------------------------------------------
-def _load_user_themes() -> dict:
-    if USER_THEMES_PATH.exists():
-        try:
-            return json.loads(USER_THEMES_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_user_themes(themes: dict) -> None:
-    USER_THEMES_PATH.write_text(json.dumps(themes, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _get_active_theme() -> dict:
-    name = st.session_state.get("theme_name", "ダーク（デフォルト）")
-    if name in PRESET_THEMES:
-        return PRESET_THEMES[name]
-    user_themes = _load_user_themes()
-    return user_themes.get(name, PRESET_THEMES["ライト シンプル"])
-
-
-def _build_theme_vars(t: dict) -> str:
-    return f"""<style>
-:root {{
-  --bg-app:         {t['bg_app']};
-  --bg-sidebar:     {t['bg_sidebar']};
-  --bg-card:        {t['bg_card']};
-  --bg-card-inner:  {t['bg_card_inner']};
-  --bg-log:         {t['bg_log']};
-  --border:         {t['border']};
-  --border-accent:  {t['border_accent']};
-  --text-primary:   {t['text_primary']};
-  --text-secondary: {t['text_secondary']};
-  --text-muted:     {t['text_muted']};
-  --accent:         {t['accent']};
-  --accent-dark:    {t['accent_dark']};
-  --success:        {t['success']};
-  --success-bg:     {t['success_bg']};
-  --success-border: {t['success_border']};
-  --warning:        {t['warning']};
-  --warning-bg:     {t['warning_bg']};
-  --warning-border: {t['warning_border']};
-  --error:          {t['error']};
-  --error-bg:       {t['error_bg']};
-  --error-border:   {t['error_border']};
-  --btn-bg:         {t['btn_bg']};
-  --btn-hover:      {t['btn_hover']};
-  --chip-bg:        {t['chip_bg']};
-  --chip-border:    {t['chip_border']};
-  --chip-text:      {t['chip_text']};
-}}
-.stApp {{ background: {t['bg_app']}; }}
-[data-testid="stSidebar"] {{
-  background: {t['bg_sidebar']};
-  border-right: 1px solid {t['border']};
-}}
-</style>"""
-
-
 # テーマ変数を注入（デフォルトCSS変数を上書き）
-st.markdown(_build_theme_vars(_get_active_theme()), unsafe_allow_html=True)
+st.markdown(build_theme_vars(active_theme()), unsafe_allow_html=True)
+
+
 def _get_pipeline_status() -> dict:
     yaml_exists  = len(list(DATA_DIR.rglob("data.yaml"))) > 0
     model_exists = len(list(MODELS_DIR.rglob("*.pt"))) > 0
@@ -518,7 +406,7 @@ with st.sidebar:
     st.markdown("---")
     # ── テーマ設定（サイドバー最下部） ──
     with st.expander("🎨 テーマ設定", expanded=False):
-        _user_themes_db = _load_user_themes()
+        _user_themes_db = load_user_themes()
         _preset_names   = list(PRESET_THEMES.keys())
         _user_names     = list(_user_themes_db.keys())
         _all_names      = _preset_names + _user_names
@@ -584,7 +472,7 @@ with st.sidebar:
             if st.button("💾 保存", key="save_theme_btn"):
                 if _new_name.strip():
                     _user_themes_db[_new_name.strip()] = _merged
-                    _save_user_themes(_user_themes_db)
+                    save_user_themes(_user_themes_db)
                     st.session_state.theme_name = _new_name.strip()
                     st.success(f"保存: {_new_name.strip()}")
                     st.rerun()
@@ -594,11 +482,11 @@ with st.sidebar:
             if _cur_theme in _user_themes_db:
                 if st.button("🗑 削除", key="del_theme_btn"):
                     del _user_themes_db[_cur_theme]
-                    _save_user_themes(_user_themes_db)
-                    st.session_state.theme_name = "ライト シンプル"
+                    save_user_themes(_user_themes_db)
+                    st.session_state.theme_name = DEFAULT_THEME_NAME
                     st.rerun()
 
-        _t = _get_active_theme()
+        _t = active_theme()
         st.markdown(
             f'<div style="margin-top:8px;font-size:.75rem;color:var(--text-muted);">'
             f'現在: <span style="color:var(--accent);font-family:monospace;">{_cur_theme}</span> '
