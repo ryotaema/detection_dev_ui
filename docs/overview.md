@@ -76,6 +76,8 @@ Step1 のアノテーション作業そのものが速くなり、この流れ�
 ### 推論・評価（Step4）
 
 - 画像 / ディレクトリ / 動画の推論（トラッキング、テンポラル平滑化つき）
+- **過去の学習の比較（MLflow）** … run を並べて設定と精度の対応を見る。
+  学習曲線を重ねて表示できる。MLflow が落ちていても `results.csv` から比較できる
 - **モデル評価** … 任意のデータセットで `model.val()` を実行し、mAP・クラス別 AP・
   推論速度を測定。モデル横断の比較表を作る
   - detect / segment / obb は mAP、classify は top1 / top5
@@ -112,26 +114,36 @@ Step1 のアノテーション作業そのものが速くなり、この流れ�
 
 ```
 app/
-├── main.py    画面（サイドバー・はじめかたガイド・6タブ）とテーマ/プリセット
-└── core/      画面を持たないロジック層
-    ├── config.py       パス・URL・共通定数（他のどのモジュールにも依存しない）
-    ├── state.py        バックグラウンド処理の共有状態
-    ├── utils.py        IoU 計算・スラッグ化など広く使う小物
-    ├── provenance.py   来歴管理
-    ├── cvat.py         CVAT の取得・エクスポート・書き戻し
-    ├── dataset.py      データセット生成・品質チェック・修正・ZIP
-    ├── models.py       モデルのメタ情報・持ち出し
-    ├── training.py     学習ワーカー
-    ├── evaluation.py   評価・正解ラベルとの差分分析
-    ├── inference.py    推論・描画・書き出し
-    ├── serverless.py   Nuclio 連携
-    ├── errors.py       エラーの解釈と対処の提示
-    ├── augment_preview.py データ拡張のプレビュー生成
-    └── fiftyone_app.py FiftyOne
+├── main.py    エントリ（設定・テーマ・ヘッダー・サイドバー・はじめかたガイド・タブ呼び出し）
+├── core/      画面を持たないロジック層
+│   ├── config.py       パス・URL・共通定数（他のどのモジュールにも依存しない）
+│   ├── state.py        バックグラウンド処理の共有状態
+│   ├── utils.py        IoU 計算・スラッグ化など広く使う小物
+│   ├── provenance.py   来歴管理
+│   ├── cvat.py         CVAT の取得・エクスポート・書き戻し
+│   ├── dataset.py      データセット生成・品質チェック・修正・再分割・クラス編集・ZIP
+│   ├── models.py       モデルのメタ情報・持ち出し
+│   ├── training.py     学習ワーカー
+│   ├── evaluation.py   評価・正解ラベルとの差分分析・conf 探索
+│   ├── inference.py    推論・描画・書き出し
+│   ├── serverless.py   Nuclio 連携
+│   ├── experiments.py  MLflow の実験比較
+│   ├── errors.py       エラーの解釈と対処の提示
+│   ├── augment_preview.py データ拡張のプレビュー生成
+│   └── fiftyone_app.py FiftyOne
+├── ui/        画面
+│   ├── widgets.py      説明つきスライダーなど共通部品・エラー表示
+│   ├── presets.py      学習パラメータのプリセット
+│   └── tab_*.py        各タブ（render_xxx() として独立）
+└── tests/     pytest（core/ のロジックが対象）
 ```
 
 `core/` は Streamlit のウィジェットを呼びません。ロジックだけを置き、
 UI から `from core import *` で使います。
+
+各タブは `ui/tab_*.py` に `render_xxx()` として独立していて、
+`main.py` は `with tab0: render_annotate()` のように呼ぶだけです。
+タブを1つ触るときに他のタブを読まなくて済むようにするためです。
 
 依存の向きは `config → state → utils → provenance → dataset → その他` の一方向で、
 循環参照を作らないでください。
