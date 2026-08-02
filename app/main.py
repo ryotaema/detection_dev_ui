@@ -370,8 +370,17 @@ with st.sidebar:
 <div class="sidebar-stat"><span class="ss-label">🤖 学習済みモデル</span><span class="ss-value">{_mdl_count}</span></div>
 <div class="sidebar-stat"><span class="ss-label">📋 推論結果</span><span class="ss-value">{_prd_count}</span></div>
 """, unsafe_allow_html=True)
+    # よく使うものほど上に置く。設定・参照情報は下の折りたたみへ回す
     st.markdown("---")
-    st.markdown("### 🖥 サービス状態")
+    st.markdown("#### 🔗 クイックリンク")
+    st.markdown(f"[📝 CVAT UI]({CVAT_WEB})", unsafe_allow_html=False)
+    st.markdown(f"[📊 MLflow UI]({MLFLOW_WEB})", unsafe_allow_html=False)
+    if st.session_state.fiftyone_port:
+        fo_url = f"http://localhost:{st.session_state.fiftyone_port}"
+        st.markdown(f"[🔭 FiftyOne App]({fo_url})", unsafe_allow_html=False)
+
+    st.markdown("---")
+    st.markdown("#### 🖥 サービス状態")
 
     def check_service(url: str, name: str):
         import requests
@@ -392,18 +401,15 @@ with st.sidebar:
     check_service(f"{MLFLOW_URI}/health", "MLflow")
 
     st.markdown("---")
-    st.markdown("#### 📁 ディレクトリ")
-    st.code(f"data/        {DATA_DIR}\nmodels/      {MODELS_DIR}\npredictions/ {PREDICTIONS_DIR}", language="text")
+    # 毎回見るものではないので畳んでおく
+    with st.expander("📁 ディレクトリ", expanded=False):
+        st.code(
+            f"data/        {DATA_DIR}\n"
+            f"models/      {MODELS_DIR}\n"
+            f"predictions/ {PREDICTIONS_DIR}",
+            language="text",
+        )
 
-    st.markdown("---")
-    st.markdown("#### 🔗 クイックリンク")
-    st.markdown(f"[📝 CVAT UI]({CVAT_WEB})", unsafe_allow_html=False)
-    st.markdown(f"[📊 MLflow UI]({MLFLOW_WEB})", unsafe_allow_html=False)
-    if st.session_state.fiftyone_port:
-        fo_url = f"http://localhost:{st.session_state.fiftyone_port}"
-        st.markdown(f"[🔭 FiftyOne App]({fo_url})", unsafe_allow_html=False)
-
-    st.markdown("---")
     # ── テーマ設定（サイドバー最下部） ──
     with st.expander("🎨 テーマ設定", expanded=False):
         _user_themes_db = load_user_themes()
