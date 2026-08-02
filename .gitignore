@@ -34,3 +34,7 @@ docker-compose.yml.bak
 serverless/bin/
 serverless/.build/
 
+
+# デザインシステムのプレビュー生成物
+# （tools/build_design_system.py でいつでも作り直せる）
+design_system/
