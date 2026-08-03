@@ -134,6 +134,62 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
     background: linear-gradient(90deg, var(--accent-dark), var(--accent));
 }
 
+/* ── Streamlit 標準ウィジェットの色合わせ ──────────────────────────────────
+   ここから下は Streamlit が生成する DOM 構造に依存する。
+   構造が変わってもセレクタが当たらなくなるだけで壊れはしないが、
+   バージョンを上げたときは見た目を確認すること（現在 1.35.0）。 */
+
+/* タブ。Step4 の内部タブが増えたので、選択中がはっきり分かるようにする */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+}
+.stTabs [data-baseweb="tab"] {
+    color: var(--text-secondary);
+    border-radius: 6px 6px 0 0;
+    padding: 6px 14px;
+}
+.stTabs [data-baseweb="tab"]:hover { color: var(--accent); }
+.stTabs [aria-selected="true"] {
+    color: var(--accent);
+    background: var(--bg-card-inner);
+    font-weight: 600;
+}
+.stTabs [data-baseweb="tab-highlight"] { background: var(--accent); }
+
+/* expander の見出し */
+.streamlit-expanderHeader,
+[data-testid="stExpander"] summary {
+    color: var(--text-primary);
+    font-size: .88rem;
+}
+[data-testid="stExpander"] summary:hover { color: var(--accent); }
+[data-testid="stExpander"] details {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-card);
+}
+
+/* 表 */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+/* ── 狭い画面での折り返し ────────────────────────────────────────────────
+   layout="wide" 固定で、st.columns() は既定では折り返さない。
+   幅が足りないときだけ縦に積ませる。
+   ここで扱うのは入力を含むカラムで、表示だけの指標は metric_row() を使う。 */
+@media (max-width: 900px) {
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap;
+    }
+    [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        flex: 1 1 240px;
+        min-width: 240px;
+    }
+}
+
 .stButton > button {
     background: var(--btn-bg);
     color: var(--accent);

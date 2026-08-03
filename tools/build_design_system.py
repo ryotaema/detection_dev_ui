@@ -170,8 +170,12 @@ def page(card: str, title: str, note: str, themes: dict[str, dict],
     """1 コンポーネントを 4 テーマ分並べたページを組み立てる。"""
     panels = []
     for i, name in enumerate(themes):
+        # data-theme-name は書き戻し（tools/apply_design_tokens.py）が
+        # 「どのパネルがどのテーマか」を機械的に判定するための目印。
+        # 見出しテキストは編集される可能性があるので、属性側を正とする。
         panels.append(
-            f'<div class="ds-panel t{i}">'
+            f'<div class="ds-panel t{i}" data-theme-index="{i}" '
+            f'data-theme-name="{html.escape(name, quote=True)}">'
             f'<div class="ds-panel-title">{html.escape(name)}</div>'
             f'{body_for(i, name)}'
             f'</div>'

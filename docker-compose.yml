@@ -468,6 +468,10 @@ services:
       - ./models:/workspace/models
       - ./predictions:/workspace/predictions
       - ./app:/app
+      # 開発用スクリプト。app/tests/ から読めるようにするためだけのマウントで、
+      # アプリの実行には使わない（コンテナ内では ROOT が / になり、
+      # /app/ui/theme.py・/app/main.py を指すのでホストと同じように動く）
+      - ./tools:/tools:ro
       # --- Nuclio 関数を UI からデプロイするための連携 ---
       # serverless/ 一式 (deploy.sh / function.yaml / nuctl バイナリ)
       - ./serverless:/workspace/serverless
