@@ -1004,6 +1004,78 @@ def render_manage() -> None:
 #   隠し漏れのほうが隠しすぎより高くつくため、既定値は
 #   「conf 低め・余白あり」にしてある。
 # ===========================================================================
+def _mosaic_face_ui(ds, key: str, image_paths):
+    """顔のモザイクは他の指定と**重ねて**かけられるようにする。
+
+    対象物と顔の両方を隠したい場面が多く、排他にすると 2 回実行することになる。
+    設定でいつでも切れるようにしておく。
+    """
+    _on = st.checkbox(
+        "👤 顔にもモザイクをかける", value=False, key=f"{key}_face_on",
+        help="プライバシー用途。上で選んだ場所と一緒に隠します",
+    )
+    if not _on:
+        return {}, ""
+
+    st.caption(
+        "Ultralytics を通さず OpenCV だけで検出するので、"
+        "ライセンス上の制約がありません（YuNet は MIT）。"
+    )
+    _det = st.radio(
+        "検出器", list(FACE_DETECTORS),
+        format_func=lambda d: f"{FACE_DETECTORS[d]['label']} — {FACE_DETECTORS[d]['desc']}",
+        key=f"{key}_facedet",
+    )
+
+    if _det == "yunet" and not yunet_available():
+        st.info("YuNet のモデルファイル（約 230KB）がまだありません。"
+                "1 回だけ取得すれば以降は不要です。")
+        if st.button("⬇ YuNet を取得する", key=f"{key}_getyunet",
+                     use_container_width=True):
+            with st.spinner("取得しています…"):
+                _dl = download_yunet()
+            if _dl["ok"]:
+                st.success(f"✅ 取得しました: `{_dl['path']}`")
+                st.rerun()
+            else:
+                show_error(_dl["error"], prefix="❌ 取得できませんでした: ")
+                st.caption("ネットワークに出られない環境では、"
+                           "「Haar カスケード」を選べば追加の取得なしで使えます。")
+        return {}, ""
+
+    _fconf = st.slider(
+        "検出のしきい値", 0.10, 0.95, 0.45, 0.05, key=f"{key}_fconf",
+        help="隠す用途では低めにします。顔を1つ見逃すほうが、"
+             "余分にぼかすよりずっと重大なためです",
+        disabled=(_det == "haar"))
+    if _det == "haar":
+        st.caption("ℹ Haar にはしきい値の概念がありません。"
+                   "正面向き以外は取りこぼしやすいので、結果を必ず確認してください。")
+
+    if st.button("👤 顔を検出する", key=f"{key}_facerun", use_container_width=True):
+        _fbar = st.progress(0.0, text="検出しています…")
+
+        def _fprog(done, total):
+            if total:
+                _fbar.progress(min(done / total, 1.0), text=f"{done} / {total} 枚")
+
+        st.session_state[f"{key}_faces"] = regions_from_faces(
+            image_paths, detector=_det, conf=float(_fconf), on_progress=_fprog)
+        _fbar.empty()
+
+    _faces = st.session_state.get(f"{key}_faces")
+    if _faces is None:
+        st.caption("「👤 顔を検出する」を押すと探します。")
+        return {}, ""
+
+    _nf = sum(len(v) for v in _faces.values())
+    if _nf:
+        st.info(f"👤 {len(_faces)} 枚に {_nf} 件の顔を検出しました")
+    else:
+        st.caption("顔は見つかりませんでした。")
+    return _faces, f"顔検出({FACE_DETECTORS[_det]['label']})"
+
+
 def _mosaic_regions_ui(ds, key: str):
     """領域の決め方を選ばせ、{画像パス: [(x1,y1,x2,y2)]} を返す"""
     _imgs = dataset_image_paths(ds)
@@ -1121,27 +1193,58 @@ def _render_mosaic(ds) -> None:
         f"`{BACKUP_DIR_NAME}/` へ退避するので、あとから元に戻せます。"
     )
 
-    # --- 退避があれば復元できるようにする ---
+    # --- 適用済みがあれば、結果の確認と復元をできるようにする ---
     if has_backup(ds):
         _rc1, _rc2 = st.columns([3, 2])
         with _rc1:
-            st.info(f"↩ このデータセットには退避済みの原本が {count_backup(ds)} 枚あります。")
+            st.info(f"↩ このデータセットには適用済みの画像があります"
+                    f"（原本を {count_backup(ds)} 枚退避中）。")
         with _rc2:
             if st.button("↩ 元に戻す", key=f"{_key}_restore", use_container_width=True):
                 with st.spinner("戻しています…"):
                     _rs = restore_mosaic(ds)
                 if _rs["ok"]:
                     st.success(f"✅ {_rs['restored']} 枚を元に戻しました")
-                    st.session_state.pop(f"{_key}_found", None)
+                    for _k in ("_found", "_faces", "_prev", "_applied"):
+                        st.session_state.pop(f"{_key}{_k}", None)
                     st.rerun()
                 else:
                     show_error(_rs["error"], prefix="❌ 戻せませんでした: ")
 
+        # 隠し漏れが無いか、適用したあとから見直せるようにする
+        if st.checkbox("🔍 適用済みの結果を確認する", key=f"{_key}_applied"):
+            _ap_n = st.select_slider(
+                "表示枚数", options=[6, 12, 24, 48], value=12,
+                key=f"{_key}_apn")
+            _rows = applied_previews(ds, limit=int(_ap_n))
+            if not _rows:
+                st.caption("確認できる画像がありません。")
+            else:
+                st.caption(
+                    f"{len(_rows)} 枚を表示中（左が処理前・右が処理後）。"
+                    "隠し漏れが無いか確認してください。"
+                )
+                for _r in _rows:
+                    st.caption(f"`{_r['name']}`")
+                    _ac1, _ac2 = st.columns(2)
+                    _ac1.image(_r["original"], caption="処理前",
+                               use_column_width=True)
+                    _ac2.image(_r["current"], caption="処理後",
+                               use_column_width=True)
+            st.markdown("---")
+
     _regions, _how_desc = _mosaic_regions_ui(ds, _key)
     if _regions is None:
-        return
+        _regions, _how_desc = {}, ""
+
+    # 顔は他の指定と重ねてかけられる（設定でオン/オフ）
+    st.markdown("---")
+    _faces, _face_desc = _mosaic_face_ui(ds, _key, dataset_image_paths(ds))
+
+    _regions = merge_regions(_regions, _faces)
+    _how_desc = " + ".join(d for d in (_how_desc, _face_desc) if d)
     if not _regions:
-        st.info("隠す対象が見つかりませんでした。条件をゆるめてみてください。")
+        st.info("隠す対象がまだありません。上で場所を決めてください。")
         return
 
     _n_img = len(_regions)
@@ -1165,6 +1268,48 @@ def _render_mosaic(ds) -> None:
             "学習してしまうことがあります。モザイクかぼかしを勧めます。"
         )
 
+    # --- アノテーション済みの物体と重なっていないか ---
+    #     隠すとその学習データが壊れるので、必ず人に確認させる
+    _conf_list = find_annotation_conflicts(
+        _regions, ds, class_names=dataset_class_names(ds),
+        padding=int(_padding))
+    if _conf_list:
+        _c_imgs = {c["image"] for c in _conf_list}
+        st.error(
+            f"🚨 **アノテーション済みの物体と重なっています**"
+            f"（{len(_c_imgs)} 枚 / {len(_conf_list)} 箇所）\n\n"
+            "このまま適用すると、**アノテーションした対象が隠れて学習データが壊れます**。\n"
+            "考えられるのは次の 2 つです。必ず中身を確認してください。\n"
+            "- 対象物を顔などと**誤検出**している → 隠す範囲を見直す\n"
+            "- 本当に人と対象物が**重なって写っている** → その画像を除くか、"
+            "アノテーションを外す"
+        )
+        with st.expander(f"重なっている箇所を見る（{len(_conf_list)} 件）", expanded=True):
+            for _c in _conf_list[:30]:
+                st.caption(
+                    f"・`{Path(_c['image']).name}` — ラベル **{_c['label']}** の "
+                    f"{_c['covered'] * 100:.0f}% が隠れます"
+                )
+            if len(_conf_list) > 30:
+                st.caption(f"…他 {len(_conf_list) - 30} 件")
+
+            _pv_c = preview_mosaic(Path(_conf_list[0]["image"]),
+                                   _regions[_conf_list[0]["image"]],
+                                   _method, int(_strength), int(_padding))
+            if _pv_c:
+                _b, _a, _ = _pv_c
+                _cc1, _cc2 = st.columns(2)
+                _cc1.image(_b, caption="処理前", use_column_width=True)
+                _cc2.image(_a, caption="処理後", use_column_width=True)
+
+        _ack = st.checkbox(
+            "上の内容を確認しました。承知のうえで適用します",
+            key=f"{_key}_ack",
+        )
+    else:
+        _ack = True
+        st.caption("✅ アノテーション済みの物体との重なりはありません。")
+
     # --- プレビュー（適用前に必ず見せる）---
     if st.button("👁 プレビュー（3枚）", key=f"{_key}_preview",
                  use_container_width=True):
@@ -1185,7 +1330,8 @@ def _render_mosaic(ds) -> None:
     # --- 適用 ---
     st.markdown("---")
     if st.button(f"🟦 {_n_img} 枚に適用する（上書き）", type="primary",
-                 use_container_width=True, key=f"{_key}_apply"):
+                 use_container_width=True, key=f"{_key}_apply",
+                 disabled=not _ack):
         _bar = st.progress(0.0, text="適用しています…")
 
         def _prog(done, total):

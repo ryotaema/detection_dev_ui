@@ -43,3 +43,6 @@ design_system/
 extensions/*
 !extensions/README.md
 !extensions/INTEGRATION.md
+
+# 顔検出モデル（UIから取得する生成物。MIT / opencv_zoo 由来）
+app/.face_models/

@@ -394,3 +394,283 @@ def dataset_image_paths(dataset_dir: Path) -> list[Path]:
         if p.is_file() and p.suffix.lower() in IMG_EXTS
         and BACKUP_DIR_NAME not in p.parts
     )
+
+
+# ---------------------------------------------------------------------------
+# 顔検出（YuNet / Haar）
+#
+#   プライバシー目的で顔を隠すための検出。Ultralytics（AGPL）を通さず、
+#   OpenCV だけで完結させている。配布や実機への搭載を考えると
+#   ライセンスの制約が無いほうが後々やりやすいため。
+#
+#   YuNet … MIT。ONNX 1 ファイルだけで動く。こちらが主力
+#   Haar  … OpenCV 同梱で追加取得が不要。2001 年の手法で取りこぼしが多いが、
+#           ネットワークが使えない環境や、YuNet の保険として併用できる
+# ---------------------------------------------------------------------------
+FACE_MODELS_DIR = Path(__file__).resolve().parent.parent / ".face_models"
+
+# opencv_zoo（MIT ライセンス）の配布物
+YUNET_FILENAME = "face_detection_yunet_2023mar.onnx"
+YUNET_URLS = (
+    "https://raw.githubusercontent.com/opencv/opencv_zoo/main/"
+    "models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+    "https://huggingface.co/opencv/face_detection_yunet/resolve/main/"
+    "face_detection_yunet_2023mar.onnx",
+)
+
+FACE_DETECTORS = {
+    "yunet": {
+        "label": "YuNet（推奨・MIT）",
+        "desc": "OpenCV Zoo の軽量モデル。精度が高く、ライセンスの制約が無い",
+    },
+    "haar": {
+        "label": "Haar カスケード（OpenCV 同梱）",
+        "desc": "追加の取得が不要。正面向き以外は取りこぼしやすい",
+    },
+}
+
+
+def yunet_model_path() -> Path:
+    return FACE_MODELS_DIR / YUNET_FILENAME
+
+
+def yunet_available() -> bool:
+    p = yunet_model_path()
+    return p.exists() and p.stat().st_size > 100_000
+
+
+def download_yunet() -> dict:
+    """YuNet の ONNX を取得する。取得済みなら何もしない。
+
+    ネットワークに出るので、利用者が押したときだけ呼ぶこと。
+    """
+    dst = yunet_model_path()
+    if yunet_available():
+        return {"ok": True, "path": str(dst), "error": "", "skipped": True}
+
+    import urllib.request
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(".part")
+    errors = []
+    for url in YUNET_URLS:
+        try:
+            urllib.request.urlretrieve(url, tmp)
+            if tmp.stat().st_size < 100_000:
+                raise RuntimeError(f"取得したファイルが小さすぎます ({tmp.stat().st_size} バイト)")
+            tmp.replace(dst)
+            return {"ok": True, "path": str(dst), "error": "", "skipped": False}
+        except Exception as e:
+            errors.append(f"{url.split('/')[2]}: {e}")
+            tmp.unlink(missing_ok=True)
+    return {"ok": False, "path": str(dst),
+            "error": "取得できませんでした（" + " / ".join(errors) + "）"}
+
+
+def _detect_faces_yunet(img, conf: float) -> list[tuple]:
+    import cv2
+
+    h, w = img.shape[:2]
+    det = cv2.FaceDetectorYN.create(
+        str(yunet_model_path()), "", (w, h),
+        score_threshold=float(conf), nms_threshold=0.3, top_k=5000)
+    det.setInputSize((w, h))
+    _, faces = det.detect(img)
+    if faces is None:
+        return []
+    # 戻りは [x, y, w, h, 5点のランドマーク..., score]
+    return [(float(f[0]), float(f[1]), float(f[0] + f[2]), float(f[1] + f[3]))
+            for f in faces]
+
+
+def _detect_faces_haar(img, min_size: int = 30) -> list[tuple]:
+    import cv2
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+    out: list[tuple] = []
+    # 正面と横顔の両方を当てる（Haar は向きに弱いため）
+    for name in ("haarcascade_frontalface_default.xml",
+                 "haarcascade_profileface.xml"):
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + name)
+        if cascade.empty():
+            continue
+        for (x, y, w, h) in cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=4,
+                minSize=(min_size, min_size)):
+            out.append((float(x), float(y), float(x + w), float(y + h)))
+    return out
+
+
+def regions_from_faces(
+    image_paths,
+    detector: str = "yunet",
+    conf: float = 0.6,
+    on_progress=None,
+) -> dict[str, list[tuple]]:
+    """顔を検出して領域を返す。
+
+    conf は YuNet のみ有効（Haar にはスコアの概念が無い）。
+    隠す用途なので、呼び出し側は低めの既定値にすること。
+    """
+    import cv2
+
+    if detector == "yunet" and not yunet_available():
+        return {}
+
+    out: dict[str, list[tuple]] = {}
+    paths = list(image_paths)
+    for i, p in enumerate(paths, 1):
+        if on_progress:
+            on_progress(i, len(paths))
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        try:
+            boxes = (_detect_faces_yunet(img, conf) if detector == "yunet"
+                     else _detect_faces_haar(img))
+        except Exception:
+            continue
+        if boxes:
+            out[str(p)] = boxes
+    return out
+
+
+# ---------------------------------------------------------------------------
+# アノテーションとの重なり検出
+#
+#   顔だと判定した場所が、実はアノテーション済みの対象物と重なっていることがある。
+#   そのまま隠すと**学習データを壊す**ので、必ず人に確認させる。
+#   起きる原因は 2 つ:
+#     - 対象物を顔と誤検出した（果実の模様など）
+#     - 本当に人と対象物が重なって写っている
+#   どちらであっても、機械が勝手に決めてよい話ではない。
+# ---------------------------------------------------------------------------
+def label_path_for(image_path: Path, dataset_dir: Path) -> Optional[Path]:
+    """画像に対応する YOLO ラベル txt を探す。
+
+    `images/train/x.jpg` → `labels/train/x.txt` のほか、
+    画像と同じ場所に置く形にも対応する。
+    """
+    img = Path(image_path)
+    ds = Path(dataset_dir)
+
+    # images/... を labels/... に読み替える
+    try:
+        rel = img.resolve().relative_to(ds.resolve())
+        parts = list(rel.parts)
+        if "images" in parts:
+            parts[parts.index("images")] = "labels"
+            cand = ds.joinpath(*parts).with_suffix(".txt")
+            if cand.exists():
+                return cand
+    except ValueError:
+        pass
+
+    same = img.with_suffix(".txt")
+    return same if same.exists() else None
+
+
+def overlap_ratio(region: tuple, box: tuple) -> float:
+    """region のうち box と重なっている割合（0〜1）。
+
+    IoU ではなく「隠す側が相手をどれだけ覆うか」で見る。
+    小さなアノテーションが大きな顔領域に丸ごと飲まれる場合、
+    IoU は小さく出てしまい見逃すため。
+    """
+    ix1, iy1 = max(region[0], box[0]), max(region[1], box[1])
+    ix2, iy2 = min(region[2], box[2]), min(region[3], box[3])
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    box_area = max(1e-9, (box[2] - box[0]) * (box[3] - box[1]))
+    return inter / box_area
+
+
+def find_annotation_conflicts(
+    regions_by_image: dict,
+    dataset_dir: Path,
+    class_names: Optional[list[str]] = None,
+    min_overlap: float = 0.01,
+    padding: int = 0,
+) -> list[dict]:
+    """隠そうとしている領域が、アノテーション済みの物体と重なっていないか調べる。
+
+    戻り値は重なった組の一覧。空なら衝突なし。
+    padding には実際に適用する余白と同じ値を渡すこと
+    （余白ぶん広がったところで初めて重なる場合があるため）。
+    """
+    from .dataset import _yolo_txt_to_xyxy
+
+    ds = Path(dataset_dir)
+    names = class_names or []
+    conflicts: list[dict] = []
+
+    for img_str, regions in regions_by_image.items():
+        img_path = Path(img_str)
+        lbl = label_path_for(img_path, ds)
+        if lbl is None:
+            continue
+        size = _image_size(img_path)
+        if size is None:
+            continue
+        w, h = size
+
+        anns = _yolo_txt_to_xyxy(lbl, w, h, names)
+        if not anns:
+            continue
+
+        for region in regions:
+            padded = (region[0] - padding, region[1] - padding,
+                      region[2] + padding, region[3] + padding)
+            for ann in anns:
+                box = ann.get("bbox_xyxy") or []
+                if len(box) != 4:
+                    continue
+                ratio = overlap_ratio(padded, tuple(box))
+                if ratio >= min_overlap:
+                    conflicts.append({
+                        "image": str(img_path),
+                        "region": tuple(float(v) for v in region),
+                        "annotation": tuple(float(v) for v in box),
+                        "label": ann.get("label") or "（クラス不明）",
+                        "covered": ratio,
+                    })
+    return conflicts
+
+
+def merge_regions(*region_maps) -> dict[str, list[tuple]]:
+    """複数の領域の集まりを 1 つにまとめる（顔と対象物を同時に隠す場合など）"""
+    out: dict[str, list[tuple]] = {}
+    for m in region_maps:
+        for img, regions in (m or {}).items():
+            for r in regions:
+                out.setdefault(img, [])
+                if r not in out[img]:
+                    out[img].append(r)
+    return out
+
+
+def applied_previews(dataset_dir: Path, limit: int = 12) -> list[dict]:
+    """適用済みの結果を確認するための一覧を作る。
+
+    退避してある原本と、いまの（隠したあとの）画像を対にして返す。
+    隠し漏れが無いかを後から見直すためのもの。
+    """
+    ds = Path(dataset_dir)
+    root = backup_root(ds)
+    if not root.exists():
+        return []
+
+    out: list[dict] = []
+    for bak in sorted(root.rglob("*")):
+        if not bak.is_file() or bak.suffix.lower() not in IMG_EXTS:
+            continue
+        cur = ds / bak.relative_to(root)
+        if not cur.exists():
+            continue
+        out.append({"name": cur.name, "current": str(cur), "original": str(bak)})
+        if len(out) >= limit:
+            break
+    return out

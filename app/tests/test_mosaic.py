@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -300,3 +301,204 @@ def test_読めない画像は飛ばして続ける(ds):
     }, padding=0)
     assert res["images"] == 1, "読めるほうまで止まっている"
     assert any("読めません" in why for _, why in res["skipped"])
+
+
+# ---------------------------------------------------------------------------
+# 顔検出
+#
+#   ネットワークに出る処理（モデル取得）はテストしない。
+#   ここで見るのは「モデルが無いときに落ちないか」「Haar が動くか」。
+# ---------------------------------------------------------------------------
+from core.mosaic import (  # noqa: E402
+    FACE_DETECTORS, YUNET_FILENAME, download_yunet, regions_from_faces,
+    yunet_available, yunet_model_path,
+)
+
+
+def test_顔検出の選択肢():
+    assert set(FACE_DETECTORS) == {"yunet", "haar"}
+    assert "MIT" in FACE_DETECTORS["yunet"]["label"]
+
+
+def test_モデルの置き場所():
+    p = yunet_model_path()
+    assert p.name == YUNET_FILENAME
+    assert p.parent.name == ".face_models"
+
+
+def test_モデルが無ければ空を返す(ds, monkeypatch):
+    """未取得のまま呼んでも例外にせず、空で返すこと"""
+    import core.mosaic as mz
+    monkeypatch.setattr(mz, "yunet_model_path", lambda: ds / "ない.onnx")
+    assert mz.regions_from_faces(_paths(ds), detector="yunet") == {}
+
+
+def test_取得済み判定はサイズも見る(ds, monkeypatch):
+    """途中で切れた小さいファイルを「取得済み」と誤認しないこと"""
+    import core.mosaic as mz
+    fake = ds / "fake.onnx"
+    fake.write_bytes(b"x" * 100)
+    monkeypatch.setattr(mz, "yunet_model_path", lambda: fake)
+    assert not mz.yunet_available()
+
+    fake.write_bytes(b"x" * 200_000)
+    assert mz.yunet_available()
+
+
+def test_取得済みなら再取得しない(ds, monkeypatch):
+    import core.mosaic as mz
+    fake = ds / "fake.onnx"
+    fake.write_bytes(b"x" * 200_000)
+    monkeypatch.setattr(mz, "yunet_model_path", lambda: fake)
+
+    def _boom(*a, **kw):
+        raise AssertionError("取得済みなのにダウンロードしている")
+
+    monkeypatch.setattr("urllib.request.urlretrieve", _boom)
+    res = download_yunet()
+    assert res["ok"] and res["skipped"]
+
+
+def test_Haarは追加取得なしで動く(ds):
+    """顔が写っていない画像でも、例外にならず空で返ること"""
+    got = regions_from_faces(_paths(ds), detector="haar")
+    assert isinstance(got, dict)
+    for boxes in got.values():
+        for b in boxes:
+            assert len(b) == 4
+
+
+def test_読めない画像は飛ばす(ds):
+    broken = ds / "images" / "train" / "broken.png"
+    broken.write_text("画像ではない")
+    got = regions_from_faces([broken], detector="haar")
+    assert got == {}
+
+
+def test_進捗が通知される(ds):
+    seen = []
+    regions_from_faces(_paths(ds), detector="haar",
+                       on_progress=lambda d, t: seen.append((d, t)))
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+# ---------------------------------------------------------------------------
+# アノテーションとの重なり（顔を隠すと学習データを壊す場合）
+# ---------------------------------------------------------------------------
+from core.mosaic import (  # noqa: E402
+    applied_previews, find_annotation_conflicts, label_path_for, merge_regions,
+    overlap_ratio,
+)
+
+
+@pytest.fixture
+def ds_labeled(tmp_path):
+    """images/train と labels/train を持つデータセット（画像 80x60）"""
+    d = tmp_path / "labeled"
+    (d / "images" / "train").mkdir(parents=True)
+    (d / "labels" / "train").mkdir(parents=True)
+    cv2.imwrite(str(d / "images" / "train" / "a.png"), _img())
+    # 中央付近に 1 件（cx=0.5 cy=0.5 w=0.25 h=0.33 → 30,10 - 50,50）
+    (d / "labels" / "train" / "a.txt").write_text("0 0.5 0.5 0.25 0.667\n")
+    return d
+
+
+def test_ラベルの場所を見つける(ds_labeled):
+    img = ds_labeled / "images" / "train" / "a.png"
+    assert label_path_for(img, ds_labeled) == ds_labeled / "labels" / "train" / "a.txt"
+
+
+def test_ラベルが無ければNone(ds):
+    assert label_path_for(_paths(ds)[0], ds) is None
+
+
+def test_覆っている割合():
+    box = (0.0, 0.0, 10.0, 10.0)
+    assert overlap_ratio((0, 0, 10, 10), box) == pytest.approx(1.0)
+    assert overlap_ratio((0, 0, 5, 10), box) == pytest.approx(0.5)
+    assert overlap_ratio((100, 100, 110, 110), box) == 0.0
+
+
+def test_小さなラベルが大きな領域に飲まれても検出する():
+    """IoU だと小さく出て見逃すため、覆う割合で見ている"""
+    small = (10.0, 10.0, 12.0, 12.0)
+    big = (0.0, 0.0, 200.0, 200.0)
+    assert overlap_ratio(big, small) == pytest.approx(1.0)
+
+
+def test_アノテーションと重なれば報告する(ds_labeled):
+    img = str(ds_labeled / "images" / "train" / "a.png")
+    # ラベルは 30,10 - 50,50 付近。そこに重なる領域を渡す
+    got = find_annotation_conflicts({img: [(35, 20, 45, 40)]}, ds_labeled,
+                                    class_names=["bell_pepper"])
+    assert len(got) == 1
+    assert got[0]["label"] == "bell_pepper"
+    assert got[0]["covered"] > 0
+
+
+def test_重ならなければ報告しない(ds_labeled):
+    img = str(ds_labeled / "images" / "train" / "a.png")
+    got = find_annotation_conflicts({img: [(0, 0, 5, 5)]}, ds_labeled,
+                                    class_names=["bell_pepper"])
+    assert got == []
+
+
+def test_余白のぶんで重なる場合も見つける(ds_labeled):
+    """実際に適用する余白と同じ値を渡さないと見逃す"""
+    img = str(ds_labeled / "images" / "train" / "a.png")
+    region = {img: [(10, 20, 25, 40)]}          # ラベル(30〜)の手前で終わる
+    assert find_annotation_conflicts(region, ds_labeled,
+                                     class_names=["p"], padding=0) == []
+    assert find_annotation_conflicts(region, ds_labeled,
+                                     class_names=["p"], padding=10) != []
+
+
+def test_ラベルの無い画像は対象外(ds):
+    img = str(_paths(ds)[0])
+    assert find_annotation_conflicts({img: [(1, 1, 50, 50)]}, ds) == []
+
+
+# ---------------------------------------------------------------------------
+# 領域の統合（顔と対象物を同時に隠す）
+# ---------------------------------------------------------------------------
+def test_複数の領域をまとめる():
+    a = {"/x/1.png": [(1, 1, 2, 2)]}
+    b = {"/x/1.png": [(3, 3, 4, 4)], "/x/2.png": [(5, 5, 6, 6)]}
+    got = merge_regions(a, b)
+    assert got["/x/1.png"] == [(1, 1, 2, 2), (3, 3, 4, 4)]
+    assert got["/x/2.png"] == [(5, 5, 6, 6)]
+
+
+def test_同じ領域は重複させない():
+    a = {"/x/1.png": [(1, 1, 2, 2)]}
+    assert merge_regions(a, a) == {"/x/1.png": [(1, 1, 2, 2)]}
+
+
+def test_空を混ぜても壊れない():
+    assert merge_regions(None, {}, {"/x/1.png": [(1, 1, 2, 2)]}) == \
+        {"/x/1.png": [(1, 1, 2, 2)]}
+
+
+# ---------------------------------------------------------------------------
+# 適用済みの確認
+# ---------------------------------------------------------------------------
+def test_適用済みは原本と対で確認できる(ds):
+    paths = _paths(ds)
+    apply_mosaic(ds, {str(p): [(20, 20, 60, 40)] for p in paths}, padding=0)
+
+    got = applied_previews(ds)
+    assert len(got) == 3
+    for row in got:
+        assert Path(row["current"]).exists() and Path(row["original"]).exists()
+        cur = cv2.imread(row["current"])
+        org = cv2.imread(row["original"])
+        assert not np.array_equal(cur, org), "処理前後が同じ"
+
+
+def test_適用前は確認する対象が無い(ds):
+    assert applied_previews(ds) == []
+
+
+def test_確認する枚数を絞れる(ds):
+    apply_mosaic(ds, {str(p): [(20, 20, 60, 40)] for p in _paths(ds)}, padding=0)
+    assert len(applied_previews(ds, limit=2)) == 2
