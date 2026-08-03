@@ -54,6 +54,16 @@ def _safe_name(name: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9._-]+", name))
 
 
+# マニフェストを探す場所（先に見つかったものを使う）。
+#   連携用のファイルが増えても散らからないよう、ディレクトリにまとめる形を標準にする。
+#   単体ファイルを直下に置く形も、小さい拡張のために残しておく。
+MANIFEST_LOCATIONS = (
+    f"extension/{EXTENSION_MANIFEST}",     # 標準。連携用の資材をここにまとめる
+    f".dev_ui/{EXTENSION_MANIFEST}",        # 隠しディレクトリにしたい場合
+    EXTENSION_MANIFEST,                     # 直下に 1 ファイルだけ置く簡易形
+)
+
+
 def _read_json(path: Path) -> Optional[dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -204,10 +214,19 @@ def discover_extensions() -> list[dict]:
         if not _safe_name(d.name):
             continue
 
-        manifest = _read_json(d / EXTENSION_MANIFEST)      # ① 同梱されていれば最優先
-        source = "リポジトリ内の extension.json"
+        # ① 拡張リポジトリ自身が持つマニフェスト（これを標準にしたい）。
+        #    ツールの引数やエントリポイントは向こうで変わるので、
+        #    その定義は実装している側に置くのが本筋。
+        manifest, source, base = None, "", d
+        for rel in MANIFEST_LOCATIONS:
+            manifest = _read_json(d / rel)
+            if manifest is not None:
+                source = f"リポジトリ内の {rel}"
+                base = (d / rel).parent
+                break
+
         if manifest is None:
-            manifest = _preset_manifest(d.name)             # ② こちらが用意した既定
+            manifest = _preset_manifest(d.name)             # ② 変更できないリポジトリ用
             source = "同梱の既定マニフェスト"
         if manifest is None:
             manifest = _infer_manifest(d)                   # ③ 構成から推測
@@ -215,14 +234,55 @@ def discover_extensions() -> list[dict]:
 
         ext = _normalize(manifest, d)
         ext.update({
-            "dir": str(d),
+            "dir": str(d),                # 実行時の作業ディレクトリ（リポジトリの根）
+            "base_dir": str(base),        # module を解決する起点（マニフェストのある場所）
             "dir_name": d.name,
             "manifest_source": source,
+            "has_own_manifest": base != d or source.startswith("リポジトリ内"),
             "revision": git_revision(d),
             "missing": missing_requirements(ext["requirements"]),
         })
         found.append(ext)
     return found
+
+
+def scaffold_manifest(ext_dir: Path, manifest: dict) -> dict:
+    """推測した内容をもとに、拡張リポジトリ側へ雛形を書き出す。
+
+    これを向こうのリポジトリにコミットしてもらえば、
+    以降は clone するだけで正しいタブが出るようになる。
+    """
+    target = Path(ext_dir) / "extension" / EXTENSION_MANIFEST
+    if target.exists():
+        return {"ok": False, "path": str(target),
+                "error": f"すでにあります: extension/{EXTENSION_MANIFEST}"}
+
+    body = {
+        "name": manifest.get("name") or Path(ext_dir).name,
+        "icon": manifest.get("icon") or "🧩",
+        "description": manifest.get("description") or "",
+        "url": manifest.get("url") or "",
+        "requirements": manifest.get("requirements") or [],
+        "actions": [
+            {k: v for k, v in a.items() if v not in ("", [], None)}
+            for a in (manifest.get("actions") or [])
+        ],
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # コンテナは root で動くので、そのままだとホスト側で編集・削除できない。
+        # 書き出したものは向こうのリポジトリでコミットしてもらう前提なので、
+        # 誰でも書き換えられるようにしておく。
+        try:
+            os.chmod(target.parent, 0o777)
+            os.chmod(target, 0o666)
+        except Exception:
+            pass
+    except Exception as e:
+        return {"ok": False, "path": str(target), "error": str(e)}
+    return {"ok": True, "path": str(target), "error": ""}
 
 
 def resolve_command(command: list[str], ext_dir: Path, values: Optional[dict] = None) -> list[str]:

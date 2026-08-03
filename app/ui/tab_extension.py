@@ -13,6 +13,7 @@ import streamlit as st
 from core import *  # noqa: F401,F403
 from core.extensions import (
     PLACEHOLDERS, load_streamlit_action, resolve_command, run_extension_command,
+    scaffold_manifest,
 )
 from .widgets import empty_state, show_error
 
@@ -93,8 +94,10 @@ def _render_command_action(ext: dict, action: dict, key: str) -> None:
 
 def _render_streamlit_action(ext: dict, action: dict) -> None:
     """拡張が用意した render() をこの場で描く。ここで初めて相手のコードが動く。"""
+    # module はマニフェストのある場所を起点に探す
+    # （extension/ にまとめている場合は extension/app.py のように置ける）
     fn, err = load_streamlit_action(
-        Path(ext["dir"]), action["module"], action["function"])
+        Path(ext.get("base_dir") or ext["dir"]), action["module"], action["function"])
     if fn is None:
         show_error(err, prefix="❌ 読み込めませんでした: ")
         st.caption(
@@ -131,12 +134,26 @@ def render_extension(ext: dict) -> None:
     if ext.get("url"):
         st.caption(f"🔗 {ext['url']}")
 
-    if ext.get("inferred"):
+    if not ext.get("has_own_manifest"):
         st.info(
-            "ℹ この拡張にはマニフェストが無いため、ファイル構成から推測して表示しています。"
-            f"`extensions/{ext['dir_name']}/extension.json` を置くと、"
-            "操作名や引数を思いどおりに出せます（書き方は `extensions/README.md`）。"
+            "ℹ この拡張には**自前のマニフェストがありません**。"
+            + ("ファイル構成から推測して表示しています。"
+               if ext.get("inferred") else "本体側に同梱した既定の設定で表示しています。")
+            + "\n\n拡張リポジトリ側に `extension/extension.json` を置いてコミットすると、"
+              "以降は clone するだけで正しいタブが出ます。"
+              "ツールの引数はそちらで変わるので、**定義も向こうに置くほうがズレません**。"
         )
+        _sc_key = f"scaffold_{ext['dir_name']}"
+        if st.button("📄 雛形を書き出す", key=_sc_key,
+                     help=f"extensions/{ext['dir_name']}/extension/extension.json "
+                          "を、いまの表示内容をもとに作ります"):
+            _sc = scaffold_manifest(Path(ext["dir"]), ext)
+            if _sc["ok"]:
+                st.success(f"✅ 書き出しました: `{_sc['path']}`")
+                st.caption("拡張リポジトリ側でコミットしてください。"
+                           "ブラウザを再読み込みすると、こちらが読まれるようになります。")
+            else:
+                show_error(_sc["error"], prefix="❌ 書き出せませんでした: ")
     for w in ext.get("warnings", []):
         st.warning(f"⚠ マニフェスト: {w}")
 

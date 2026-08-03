@@ -224,3 +224,66 @@ def test_足りない依存を検出する():
     assert ex.missing_requirements(["numpy"]) == []
     # パッケージ名と import 名が違うもの
     assert ex.missing_requirements(["opencv-python", "Pillow", "pyyaml"]) == []
+
+
+# ---------------------------------------------------------------------------
+# マニフェストをディレクトリにまとめる形
+# ---------------------------------------------------------------------------
+def test_extensionディレクトリのマニフェストを読む(ext_root):
+    _make_ext(ext_root, "t", files={
+        "extension/extension.json": json.dumps(
+            {"name": "まとめた", "actions": []}, ensure_ascii=False)})
+    got = ex.discover_extensions()[0]
+    assert got["name"] == "まとめた"
+    assert got["manifest_source"].endswith("extension/extension.json")
+    assert got["base_dir"].endswith("/extension")
+    assert got["has_own_manifest"] is True
+
+
+def test_隠しディレクトリのマニフェストも読む(ext_root):
+    _make_ext(ext_root, "t", files={
+        ".dev_ui/extension.json": json.dumps({"name": "隠し", "actions": []},
+                                             ensure_ascii=False)})
+    assert ex.discover_extensions()[0]["name"] == "隠し"
+
+
+def test_ディレクトリ形が直下の単体ファイルより優先される(ext_root):
+    _make_ext(ext_root, "t", {"name": "直下", "actions": []}, files={
+        "extension/extension.json": json.dumps({"name": "ディレクトリ", "actions": []},
+                                               ensure_ascii=False)})
+    assert ex.discover_extensions()[0]["name"] == "ディレクトリ"
+
+
+def test_既定マニフェストは自前扱いにしない(ext_root):
+    (ex.PRESET_DIR / "known.json").write_text(
+        json.dumps({"name": "既定", "actions": []}), encoding="utf-8")
+    _make_ext(ext_root, "known")
+    assert ex.discover_extensions()[0]["has_own_manifest"] is False
+
+
+# ---------------------------------------------------------------------------
+# 雛形の書き出し
+# ---------------------------------------------------------------------------
+def test_雛形を書き出せる(ext_root):
+    d = _make_ext(ext_root, "t", files={"my_gui.py": "import tkinter\n"})
+    ext = ex.discover_extensions()[0]
+    res = ex.scaffold_manifest(d, ext)
+    assert res["ok"], res["error"]
+
+    written = json.loads((d / "extension" / "extension.json").read_text(encoding="utf-8"))
+    assert written["name"] == "t"
+    assert written["actions"][0]["kind"] == "desktop"
+
+    # 書き出したものが次回そのまま読まれる
+    again = ex.discover_extensions()[0]
+    assert again["has_own_manifest"] is True
+    assert again["inferred"] is False
+
+
+def test_雛形は既存を上書きしない(ext_root):
+    d = _make_ext(ext_root, "t", files={
+        "extension/extension.json": json.dumps({"name": "既存", "actions": []},
+                                               ensure_ascii=False)})
+    res = ex.scaffold_manifest(d, {"name": "新しい", "actions": []})
+    assert not res["ok"] and "すでにあります" in res["error"]
+    assert json.loads((d / "extension" / "extension.json").read_text())["name"] == "既存"
