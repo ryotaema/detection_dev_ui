@@ -691,12 +691,21 @@ def render_evaluate() -> None:
         else:
             _ev_c1, _ev_c2, _ev_c3 = st.columns([3, 1, 1])
             with _ev_c1:
+                # 評価は「学習に使っていないデータ」で測るのが本筋なので、
+                # 状態を出しておいて 🔵 テスト用 を選びやすくする
                 _ev_yaml_sel = st.selectbox(
                     "評価に使うデータセット (data.yaml)",
                     [str(p.relative_to(DATA_DIR)) for p in _ev_yamls],
                     key="ev_yaml_sel",
+                    format_func=lambda v: f"{v}　{status_label(read_status((DATA_DIR / v).parent))}",
                 )
                 _ev_yaml_path = str(DATA_DIR / _ev_yaml_sel)
+                if read_status(Path(_ev_yaml_path).parent) != "test_only":
+                    st.caption(
+                        "ℹ 学習に使ったデータセットで測ると精度が実力より高く出ます。"
+                        "評価専用のデータセットには「📁 データ管理」で "
+                        "**🔵 テスト用** を付けておくと選び間違えません。"
+                    )
             with _ev_c2:
                 _ev_split = st.selectbox("スプリット", ["val", "train"], key="ev_split")
             with _ev_c3:

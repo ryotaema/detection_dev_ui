@@ -407,10 +407,17 @@ def render_train() -> None:
 
     _yc1, _yc2 = st.columns([10, 1])
     with _yc1:
+        # 選択肢に状態を出しておくと、テスト用を誤って学習に使う事故を防げる
+        def _yaml_option_label(v: str) -> str:
+            if v == _YAML_MANUAL:
+                return v
+            return f"{v}　{status_label(read_status((DATA_DIR / v).parent))}"
+
         _yaml_sel = st.selectbox(
             "data.yaml",
             _yaml_options,
             index=0 if _yaml_labels else len(_yaml_options) - 1,
+            format_func=_yaml_option_label,
         )
     with _yc2:
         st.markdown('<div style="margin-top:24px"></div>', unsafe_allow_html=True)
@@ -425,6 +432,29 @@ def render_train() -> None:
     else:
         data_yaml_path = str(DATA_DIR / _yaml_sel)
         _ds_dir_path = Path(data_yaml_path).parent
+
+        # 学習に向かない状態のものを選んでいたら知らせる（止めはしない）
+        _ds_status = read_status(_ds_dir_path)
+        if _ds_status == "test_only":
+            st.warning(
+                "⚠ このデータセットは **🔵 テスト用** です。評価専用として登録されています。"
+                "学習に使うと、あとで同じデータで評価したときに精度が実力より高く出ます。"
+            )
+        elif _ds_status == "archived":
+            st.warning("⚠ このデータセットは **⚪ 保管** です。もう使わない想定で登録されています。")
+        elif _ds_status == "auto_annotated":
+            st.info(
+                "ℹ このデータセットは **🟠 自動アノテのみ**（人の目が入っていない）です。"
+                "モデルの誤りをそのまま学習してしまうので、"
+                "「🔭 Step4」でアノテーションを確認してからのほうが確実です。"
+            )
+        elif _ds_status == "draft":
+            st.caption(
+                "ℹ 状態が **🟡 作成中** のままです。"
+                "精査が済んだら「📁 データ管理」で状態を更新しておくと、"
+                "あとで何を使ったか分かりやすくなります。"
+            )
+
         # ── データセット詳細パネル ──
         try:
             import yaml as _yaml_mod

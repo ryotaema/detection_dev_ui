@@ -36,7 +36,37 @@ def render_manage() -> None:
     st.markdown("#### 学習データセット (`data/`)")
     datasets = sorted(DATA_DIR.iterdir()) if DATA_DIR.exists() else []
     datasets = [d for d in datasets if d.is_dir()]
-    if not datasets:
+
+    _ds_filtered = False        # 絞り込みで 0 件になったのか、元から 0 件なのか
+
+    # --- 絞り込み（件数が増えたときに効く）---
+    if len(datasets) > 1:
+        _f1, _f2 = st.columns([3, 3])
+        with _f1:
+            _f_status = st.multiselect(
+                "状態で絞り込む", list(DATASET_STATUSES),
+                format_func=lambda v: status_label(v),
+                key="ds_filter_status",
+                placeholder="すべて",
+            )
+        with _f2:
+            _f_tags = st.multiselect(
+                "タグで絞り込む", collect_tags(datasets),
+                key="ds_filter_tags", placeholder="すべて",
+            )
+        _all_n = len(datasets)
+        if _f_status:
+            datasets = [d for d in datasets if read_status(d) in _f_status]
+        if _f_tags:
+            # 選んだタグを1つでも持つもの
+            datasets = [d for d in datasets if set(read_tags(d)) & set(_f_tags)]
+        if _f_status or _f_tags:
+            _ds_filtered = True
+            st.caption(f"{len(datasets)} / {_all_n} 件を表示中")
+
+    if _ds_filtered and not datasets:
+        st.info("条件に合うデータセットがありません。絞り込みを外してください。")
+    elif not datasets:
         empty_state(
             "まだデータセットがありません",
             "「📤 Step2: データ取込」で CVAT のタスクを取り込むか、"
@@ -54,10 +84,16 @@ def render_manage() -> None:
                 size_mb = sum(f.stat().st_size for f in all_files) / (1024 * 1024)
                 col1, col2, col3 = st.columns([4, 2, 1])
                 with col1:
-                    st.markdown(f"**`{ds.name}`**")
+                    st.markdown(f"**`{ds.name}`**　{status_label(read_status(ds))}")
                     _split_counts = dataset_split_counts(ds)
                     if _split_counts:
                         st.caption(" / ".join(f"{k} {v}枚" for k, v in _split_counts.items()))
+                    _ds_tags = read_tags(ds)
+                    if _ds_tags:
+                        st.markdown(
+                            " ".join(f'<span class="tc-chip">{t}</span>' for t in _ds_tags),
+                            unsafe_allow_html=True,
+                        )
                 with col2:
                     st.text(f"{file_count} files  /  {size_mb:.1f} MB")
                 with col3:
@@ -83,16 +119,63 @@ def render_manage() -> None:
                 else:
                     st.caption("📚 来歴の記録なし（この機能を入れる前に作られたデータセットです）")
 
+                # 統合で作られたものは、何を混ぜたのかを出す
+                for _s in ((_ds_prov or {}).get("sources") or []):
+                    st.caption(
+                        f"　└ 🔀 `{_s.get('name', '不明')}`"
+                        f"（{status_label(_s.get('status', ''))}"
+                        + (f"　{' / '.join(f'{k} {v}枚' for k, v in (_s.get('counts') or {}).items())}"
+                           if _s.get("counts") else "")
+                        + "）統合した時点の記録"
+                    )
+
                 _DS_OP_NONE = "—"
                 _ds_op = st.radio(
                     "操作",
-                    [_DS_OP_NONE, "✂️ train/val を分け直す", "🏷 クラス名を編集",
-                     "⬇ 持ち出す (ZIP)", "🔍 品質チェック", "➕ 画像を追加"],
+                    [_DS_OP_NONE, "🏷 状態とタグ", "✂️ train/val を分け直す",
+                     "🏷 クラス名を編集", "⬇ 持ち出す (ZIP)", "🔍 品質チェック",
+                     "➕ 画像を追加"],
                     horizontal=True, key=f"ds_op_{ds.name}",
                     label_visibility="collapsed",
                 )
 
-                if _ds_op == "✂️ train/val を分け直す":
+                if _ds_op == "🏷 状態とタグ":
+                    st.caption(
+                        "状態は「いまどの段階か」を1つだけ選びます。"
+                        "タグは性格づけ（撮影場所・被写体・用途など）を自由に付けられます。"
+                    )
+                    _st_keys = list(DATASET_STATUSES)
+                    _cur_st = read_status(ds)
+                    _new_st = st.radio(
+                        "状態",
+                        _st_keys,
+                        index=_st_keys.index(_cur_st),
+                        format_func=lambda v: f"{status_label(v)} — {DATASET_STATUSES[v]['desc']}",
+                        key=f"ds_status_{ds.name}",
+                    )
+                    _new_tags = st.text_input(
+                        "タグ（カンマ区切り）",
+                        value=", ".join(read_tags(ds)),
+                        key=f"ds_tags_{ds.name}",
+                        placeholder="例: 屋内, ペッパー, 自動アノテ由来",
+                    )
+                    _new_note = st.text_area(
+                        "メモ（任意）", value=read_note(ds),
+                        key=f"ds_note_{ds.name}", height=70,
+                        placeholder="照明条件が偏っているので追加撮影の予定あり など",
+                    )
+                    if st.button("💾 保存", key=f"ds_meta_save_{ds.name}",
+                                 type="primary", use_container_width=True):
+                        _up = update_provenance(
+                            ds, kind="dataset", status=_new_st,
+                            tags=_new_tags, note=_new_note)
+                        if _up["ok"]:
+                            st.success("✅ 保存しました")
+                            st.rerun()
+                        else:
+                            show_error(_up["error"], prefix="❌ 保存できませんでした: ")
+
+                elif _ds_op == "✂️ train/val を分け直す":
                     st.caption(
                         "生成時に決めた比率のままだと「val が偏っていて評価が信用できない」"
                         "ときに手が出せません。ここで混ぜ直せます。"
@@ -542,11 +625,25 @@ def render_manage() -> None:
 
             with st.container(border=True):
                 _label_col, _size_col, _map_col, _use_col, _del_col = st.columns([4, 2, 2, 2, 1])
+                # 来歴（status / tags）は run ディレクトリ側に付いている。
+                # weights/best.pt なら 2 つ上が run ディレクトリ。
+                _run_dir = mp.parent.parent if mp.parent.name == "weights" else mp.parent
+
                 with _label_col:
                     if is_current:
                         st.markdown("⭐ **現在使用中**")
-                    st.markdown(f"`{mp.relative_to(MODELS_DIR)}`")
+                    st.markdown(f"`{mp.relative_to(MODELS_DIR)}`　"
+                                f"{status_label(read_status(_run_dir, 'model'), 'model')}")
                     st.caption(mod_time)
+                    _md_tags = read_tags(_run_dir)
+                    if _md_tags:
+                        st.markdown(
+                            " ".join(f'<span class="tc-chip">{t}</span>' for t in _md_tags),
+                            unsafe_allow_html=True,
+                        )
+                    _md_note = read_note(_run_dir)
+                    if _md_note:
+                        st.caption(f"📝 {_md_note}")
                     _meta = read_model_meta(mp)
                     if _meta and _meta.get("ok"):
                         _cls = _meta.get("names") or []
@@ -619,6 +716,36 @@ def render_manage() -> None:
                         if st.session_state.last_model_path == str(mp):
                             st.session_state.last_model_path = None
                         st.rerun()
+
+                # --- 状態とタグ（人が「これを使うか」を判断するための目印）---
+                #     expander の入れ子は不可なのでチェックボックスで開閉する
+                if st.checkbox("🏷 状態とタグを編集", key=f"md_meta_{mp}"):
+                    _mst_keys = list(MODEL_STATUSES)
+                    _md_cur = read_status(_run_dir, "model")
+                    _md_new = st.radio(
+                        "状態", _mst_keys,
+                        index=_mst_keys.index(_md_cur),
+                        format_func=lambda v: f"{status_label(v, 'model')} — {MODEL_STATUSES[v]['desc']}",
+                        key=f"md_status_{mp}",
+                    )
+                    _md_new_tags = st.text_input(
+                        "タグ（カンマ区切り）", value=", ".join(read_tags(_run_dir)),
+                        key=f"md_tags_{mp}", placeholder="例: 近距離向け, 屋内, ベースライン",
+                    )
+                    _md_new_note = st.text_area(
+                        "メモ（任意）", value=read_note(_run_dir),
+                        key=f"md_note_{mp}", height=70,
+                    )
+                    if st.button("💾 保存", key=f"md_meta_save_{mp}",
+                                 type="primary", use_container_width=True):
+                        _mup = update_provenance(
+                            _run_dir, kind="model", status=_md_new,
+                            tags=_md_new_tags, note=_md_new_note)
+                        if _mup["ok"]:
+                            st.success("✅ 保存しました")
+                            st.rerun()
+                        else:
+                            show_error(_mup["error"], prefix="❌ 保存できませんでした: ")
 
                 # --- 持ち出し（他PCへ渡す）---
                 _dl1, _dl2 = st.columns(2)
@@ -701,18 +828,55 @@ def render_manage() -> None:
                 _ld = _lin_pv.get("dataset", {}) or {}
                 _dsp = _ld.get("provenance") or {}
                 st.markdown("**系譜**")
-                _chain = []
-                if _dsp.get("cvat_tasks"):
-                    _chain.append("CVAT タスク " + ", ".join(
-                        f"[{t.get('id')}] {t.get('name')}" for t in _dsp["cvat_tasks"]))
-                elif _dsp.get("source"):
-                    _chain.append({"upload_zip": "外部 ZIP の取込",
-                                   "upload_images": "画像の直接アップロード",
-                                   "merge": "データセット統合"}.get(_dsp["source"], _dsp["source"]))
+
+                # 統合データセットは親が複数あるので、一本道ではなく木で辿る。
+                # 記録が入れ子になっているぶんだけ再帰的に降りていく。
+                _SRC_LABELS = {
+                    "cvat": "CVAT から生成", "upload_zip": "外部 ZIP の取込",
+                    "upload_images": "画像の直接アップロード",
+                    "merge": "データセット統合", "unknown": "出所不明",
+                }
+
+                def _render_dataset_node(prov: dict, name: str, depth: int = 0) -> None:
+                    """データセット 1 つぶんを出し、統合なら親へ降りる"""
+                    indent = "　" * depth + ("└ " if depth else "")
+                    src = (prov or {}).get("source", "")
+                    bits = [f"{indent}📁 `{name}`"]
+                    if prov and prov.get("status"):
+                        bits.append(status_label(prov["status"]))
+                    if src:
+                        bits.append(_SRC_LABELS.get(src, src))
+                    if prov and prov.get("cvat_tasks"):
+                        bits.append("CVAT タスク " + ", ".join(
+                            f"[{t.get('id')}] {t.get('name')}"
+                            for t in prov["cvat_tasks"]))
+                    st.markdown("　".join(bits))
+
+                    if depth > 5:            # 記録が壊れていても止まるように
+                        st.caption("　" * (depth + 1) + "…（これ以上は辿りません）")
+                        return
+                    for _src_snap in (prov or {}).get("sources") or []:
+                        _child_name = _src_snap.get("name", "不明")
+                        _child_dir = DATA_DIR / _child_name
+                        # 統合時のスナップショットを基本に、親が残っていれば今の来歴も見る
+                        _child_prov = dict(_src_snap)
+                        _live = read_provenance(_child_dir)
+                        if _live:
+                            _child_prov = {**_live, **{
+                                k: v for k, v in _src_snap.items() if k in ("counts",)}}
+                        _cnt = _src_snap.get("counts") or {}
+                        _render_dataset_node(_child_prov, _child_name, depth + 1)
+                        if _cnt:
+                            st.caption("　" * (depth + 2)
+                                       + "統合した時点: "
+                                       + " / ".join(f"{k} {v}枚" for k, v in _cnt.items())
+                                       + ("" if _child_dir.exists() else "　※ 現在は削除済み"))
+
+                st.markdown(f"🤖 モデル `{_lin_sel}`")
                 if _ld.get("name"):
-                    _chain.append(f"データセット `{_ld['name']}`")
-                _chain.append(f"モデル `{_lin_sel}`")
-                st.markdown("　→　".join(_chain))
+                    _render_dataset_node(_dsp, _ld["name"], depth=1)
+                else:
+                    st.caption("　└ 学習データの記録がありません")
 
                 _lc1, _lc2 = st.columns(2)
                 with _lc1:
@@ -777,45 +941,54 @@ def render_manage() -> None:
         st.info("統合するには2つ以上のデータセットが必要です。")
     else:
         merge_targets = st.multiselect("統合するデータセットを選択（2つ以上）", _ds_names)
-        merge_out_name = st.text_input("統合先ディレクトリ名", value=f"merged_{datetime.now():%Y%m%d_%H%M}")
+        st.caption(
+            "クラス名の並びが違うデータセット同士でも、統合先の並びに合わせて"
+            "クラスIDを振り直します。元のデータセットには手を加えません。"
+        )
+        if merge_targets:
+            _mg_info = []
+            for _n in merge_targets:
+                _d = DATA_DIR / _n
+                _mg_info.append(
+                    f"- `{_n}` … {status_label(read_status(_d))}"
+                    f"　{' / '.join(f'{k} {v}枚' for k, v in dataset_split_counts(_d).items()) or '（画像なし）'}"
+                    f"　クラス: {', '.join(dataset_class_names(_d)) or '—'}"
+                )
+            st.markdown("\n".join(_mg_info))
+
+        _mg1, _mg2 = st.columns([3, 2])
+        with _mg1:
+            merge_out_name = st.text_input(
+                "統合先ディレクトリ名", value=f"merged_{datetime.now():%Y%m%d_%H%M}")
+        with _mg2:
+            _mg_status = st.selectbox(
+                "統合後の状態",
+                list(DATASET_STATUSES),
+                format_func=lambda v: status_label(v),
+                key="merge_status",
+                help="精査済みどうしを混ぜたなら精査済み、"
+                     "自動アノテのものが混ざるなら自動アノテのみ、と付けておく",
+            )
+        _mg_tags = st.text_input("タグ（カンマ区切り・任意）", key="merge_tags")
+
         if st.button("🔀 統合実行", disabled=len(merge_targets) < 2,
-                     key="merge_datasets_run"):
-            import yaml as pyyaml
-            out_dir = DATA_DIR / merge_out_name
-            all_labels: list[str] = []
-            # 各データセットからラベル収集
-            for ds_name in merge_targets:
-                src = DATA_DIR / ds_name
-                yaml_f = src / "data.yaml"
-                if yaml_f.exists():
-                    with open(yaml_f) as f:
-                        ydata = pyyaml.safe_load(f)
-                    for lbl in ydata.get("names", []):
-                        if lbl not in all_labels:
-                            all_labels.append(lbl)
-            # 画像・ラベルをコピー
-            for split in ("train", "val"):
-                for ds_name in merge_targets:
-                    src = DATA_DIR / ds_name
-                    for kind in ("images", "labels"):
-                        src_dir = src / split / kind
-                        if not src_dir.exists():
-                            continue
-                        dst_dir = out_dir / split / kind
-                        dst_dir.mkdir(parents=True, exist_ok=True)
-                        for f in src_dir.iterdir():
-                            dst = dst_dir / f"{ds_name}_{f.name}"
-                            shutil.copy2(f, dst)
-            # data.yaml 生成
-            data_yaml_content = {
-                "path": str(out_dir),
-                "train": "train/images",
-                "val": "val/images",
-                "names": all_labels,
-                "nc": len(all_labels),
-            }
-            with open(out_dir / "data.yaml", "w") as f:
-                pyyaml.dump(data_yaml_content, f, allow_unicode=True)
-            st.success(f"✅ 統合完了: `{out_dir}` (ラベル: {all_labels})")
-            st.rerun()
+                     type="primary", key="merge_datasets_run"):
+            with st.spinner("統合しています…"):
+                _mg = merge_datasets(
+                    [DATA_DIR / n for n in merge_targets],
+                    DATA_DIR / merge_out_name,
+                    status=_mg_status,
+                    tags=_mg_tags,
+                )
+            if not _mg["ok"]:
+                show_error(_mg["error"], prefix="❌ 統合できませんでした: ")
+            else:
+                st.success(
+                    f"✅ 統合完了: `{merge_out_name}`　"
+                    + " / ".join(f"{k} {v}枚" for k, v in _mg["counts"].items())
+                    + f"　クラス: {', '.join(_mg['labels'])}"
+                )
+                for _w in _mg["warnings"]:
+                    st.warning(f"⚠ {_w}")
+                st.rerun()
 

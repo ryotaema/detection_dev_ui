@@ -951,3 +951,185 @@ def resolve_train_data_arg(data_yaml: str) -> str:
     if dataset_task_type(data_yaml) == "classify":
         return str(Path(data_yaml).parent)
     return data_yaml
+
+
+# ---------------------------------------------------------------------------
+# データセットの統合
+# ---------------------------------------------------------------------------
+def _merge_label_line(line: str, id_map: dict[int, int]) -> Optional[str]:
+    """ラベル 1 行のクラス ID を振り直す。読めない行は捨てる。"""
+    parts = line.split()
+    if not parts:
+        return None
+    try:
+        old = int(float(parts[0]))
+    except ValueError:
+        return None
+    new = id_map.get(old)
+    if new is None:
+        return None
+    return " ".join([str(new)] + parts[1:])
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """symlink で置く。張れない環境ならコピーにフォールバックする。"""
+    if dst.exists():
+        return
+    try:
+        dst.symlink_to(src.resolve())
+    except Exception:
+        import shutil
+        shutil.copy2(src, dst)
+
+
+def merge_datasets(
+    dataset_dirs: list,
+    out_dir: Path,
+    status: str = "draft",
+    tags=None,
+) -> dict:
+    """複数のデータセットを 1 つにまとめる。
+
+    **クラス ID の振り直しが要点**。データセットごとに data.yaml の names の
+    並びが違うので、ラベル txt をそのままコピーすると別のクラスとして
+    学習されてしまう（例: A が [pepper, leaf]、B が [leaf] のとき、
+    B の「0 = leaf」を素通しすると統合後は pepper になる）。
+
+    元のデータセットには一切触らない。出力先が既にあるときは中断する。
+    """
+    import yaml
+
+    from .provenance import record_dataset_provenance, snapshot_dataset_source
+
+    out = Path(out_dir)
+    srcs = [Path(d) for d in dataset_dirs]
+    result: dict = {"ok": False, "error": "", "warnings": [], "out_dir": str(out),
+                    "labels": [], "counts": {}, "n_copied": 0, "n_skipped": 0}
+
+    if len(srcs) < 2:
+        result["error"] = "統合には 2 つ以上のデータセットが必要です"
+        return result
+    for s in srcs:
+        if not s.exists():
+            result["error"] = f"データセットがありません: {s.name}"
+            return result
+    if out.exists() and any(out.iterdir()):
+        result["error"] = f"出力先が既にあります: {out.name}（別の名前にしてください）"
+        return result
+
+    # --- タスク種別を揃える（ラベルの形式が違うものは混ぜられない）---
+    tasks = {}
+    for s in srcs:
+        y = s / "data.yaml"
+        tasks[s.name] = dataset_task_type(str(y)) if y.exists() else "detect"
+    if len(set(tasks.values())) > 1:
+        result["error"] = ("タスク種別の違うデータセットは統合できません: "
+                           + ", ".join(f"{k}={v}" for k, v in tasks.items()))
+        return result
+    task_type = next(iter(tasks.values()))
+
+    # --- クラス名を統合する（先に出てきた順を保つ）---
+    all_labels: list[str] = []
+    per_ds_labels: dict[str, list[str]] = {}
+    for s in srcs:
+        names = dataset_class_names(s)
+        per_ds_labels[s.name] = names
+        if not names:
+            result["warnings"].append(f"{s.name}: data.yaml にクラス定義がありません")
+        for n in names:
+            if n not in all_labels:
+                all_labels.append(n)
+    if not all_labels and task_type != "classify":
+        result["error"] = "どのデータセットにもクラス定義がありませんでした"
+        return result
+
+    out.mkdir(parents=True, exist_ok=True)
+    n_copied = 0
+    n_skipped = 0
+
+    if task_type == "classify":
+        # <split>/<クラス名>/*.jpg 構造。ID が無いので振り直しは要らない
+        cls_seen: list[str] = []
+        for s in srcs:
+            for sp_dir in sorted(p for p in s.iterdir()
+                                 if p.is_dir() and p.name in ("train", "val", "test")):
+                for cls_dir in sorted(p for p in sp_dir.iterdir() if p.is_dir()):
+                    if cls_dir.name not in cls_seen:
+                        cls_seen.append(cls_dir.name)
+                    dst_dir = out / sp_dir.name / cls_dir.name
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    for f in sorted(cls_dir.iterdir()):
+                        if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                            _link_or_copy(f, dst_dir / f"{s.name}__{f.name}")
+                            n_copied += 1
+        all_labels = cls_seen
+    else:
+        for s in srcs:
+            # 統合後のクラス ID への対応表
+            id_map = {i: all_labels.index(n) for i, n in enumerate(per_ds_labels[s.name])}
+            img_root = s / "images"
+            if not img_root.exists():
+                result["warnings"].append(f"{s.name}: images/ が無いので飛ばしました")
+                continue
+            for sp_dir in sorted(p for p in img_root.iterdir() if p.is_dir()):
+                sp = sp_dir.name
+                dst_img = out / "images" / sp
+                dst_lbl = out / "labels" / sp
+                dst_img.mkdir(parents=True, exist_ok=True)
+                dst_lbl.mkdir(parents=True, exist_ok=True)
+
+                for img in sorted(sp_dir.iterdir()):
+                    if not img.is_file() or img.suffix.lower() not in IMG_EXTS:
+                        continue
+                    # 元のデータセット名を前置してファイル名の衝突を避ける
+                    prefixed = f"{s.name}__{img.name}"
+                    _link_or_copy(img, dst_img / prefixed)
+
+                    src_lbl = s / "labels" / sp / f"{img.stem}.txt"
+                    lines: list[str] = []
+                    if src_lbl.exists():
+                        for line in src_lbl.read_text().splitlines():
+                            remapped = _merge_label_line(line, id_map)
+                            if remapped is None:
+                                if line.strip():
+                                    n_skipped += 1
+                            else:
+                                lines.append(remapped)
+                    # ラベルが無い画像は背景画像として空ファイルを置く
+                    (dst_lbl / f"{Path(prefixed).stem}.txt").write_text(
+                        "\n".join(lines))
+                    n_copied += 1
+
+    if n_copied == 0:
+        result["error"] = ("コピーできる画像が 1 枚もありませんでした"
+                           "（データセットの構造を確認してください）")
+        return result
+
+    cfg = {
+        "path": str(out.resolve()),
+        "train": "train" if task_type == "classify" else "images/train",
+        "val": "val" if task_type == "classify" else "images/val",
+        "task": task_type,
+        "nc": len(all_labels),
+        "names": all_labels,
+    }
+    with open(out / "data.yaml", "w") as f:
+        yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+    record_dataset_provenance(
+        out, source="merge", task_type=task_type, labels=all_labels,
+        status=status, tags=tags,
+        sources=[snapshot_dataset_source(s) for s in srcs],
+    )
+
+    if n_skipped:
+        result["warnings"].append(
+            f"{n_skipped} 行のラベルを読めずに除外しました"
+            "（元のデータセットの品質チェックを確認してください）")
+
+    result.update({
+        "ok": True, "labels": all_labels, "n_copied": n_copied,
+        "n_skipped": n_skipped, "counts": dataset_split_counts(out),
+        "task_type": task_type,
+    })
+    return result
