@@ -38,3 +38,7 @@ serverless/.build/
 # デザインシステムのプレビュー生成物
 # （tools/build_design_system.py でいつでも作り直せる）
 design_system/
+
+# 拡張機能（別リポジトリを clone して置く）。README と既定設定だけ追跡する
+extensions/*
+!extensions/README.md
