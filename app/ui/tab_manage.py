@@ -133,8 +133,8 @@ def render_manage() -> None:
                 _ds_op = st.radio(
                     "操作",
                     [_DS_OP_NONE, "🏷 状態とタグ", "✂️ train/val を分け直す",
-                     "🏷 クラス名を編集", "⬇ 持ち出す (ZIP)", "🔍 品質チェック",
-                     "➕ 画像を追加"],
+                     "🏷 クラス名を編集", "🟦 モザイク", "⬇ 持ち出す (ZIP)",
+                     "🔍 品質チェック", "➕ 画像を追加"],
                     horizontal=True, key=f"ds_op_{ds.name}",
                     label_visibility="collapsed",
                 )
@@ -258,6 +258,9 @@ def render_manage() -> None:
                                     st.rerun()
                         else:
                             st.caption("変更はありません。")
+
+                elif _ds_op == "🟦 モザイク":
+                    _render_mosaic(ds)
 
                 elif _ds_op == "⬇ 持ち出す (ZIP)":
                     st.caption(
@@ -992,3 +995,230 @@ def render_manage() -> None:
                     st.warning(f"⚠ {_w}")
                 st.rerun()
 
+
+
+# ===========================================================================
+# モザイク（写り込みを隠す）
+#
+#   元画像を上書きするので、必ず「下見 → プレビュー → 適用」の順に進ませる。
+#   隠し漏れのほうが隠しすぎより高くつくため、既定値は
+#   「conf 低め・余白あり」にしてある。
+# ===========================================================================
+def _mosaic_regions_ui(ds, key: str):
+    """領域の決め方を選ばせ、{画像パス: [(x1,y1,x2,y2)]} を返す"""
+    _imgs = dataset_image_paths(ds)
+    if not _imgs:
+        st.info("このデータセットに画像がありません。")
+        return None, ""
+
+    _how = st.radio(
+        "隠す場所の決め方",
+        ["🤖 モデルの検出結果", "📐 固定領域（全画像に同じ場所）", "🏷 CVAT の mask ラベル"],
+        key=f"{key}_how",
+    )
+
+    # ── モデルの検出結果 ──────────────────────────────────────────────
+    if _how.startswith("🤖"):
+        st.caption(
+            "背景データに写り込んだ対象物や、顔・ナンバープレートを自動で拾います。"
+            "顔やナンバーを隠したい場合は、その検出モデルを"
+            "「📤 学習済みモデルをアップロード」から入れれば同じ手順で使えます。"
+        )
+        _models = sorted(MODELS_DIR.rglob("*.pt"))
+        if not _models:
+            empty_state("使えるモデルがありません",
+                        "「🚀 Step3: モデル学習」で学習するか、"
+                        "下の「📤 学習済みモデルをアップロード」から取り込んでください。")
+            return None, ""
+
+        _mmap = {str(p.relative_to(MODELS_DIR)): p for p in _models}
+        _m1, _m2 = st.columns([3, 2])
+        with _m1:
+            _msel = st.selectbox("使うモデル", list(_mmap), key=f"{key}_model")
+        with _m2:
+            _conf = st.slider(
+                "conf しきい値", 0.01, 0.90, 0.10, 0.01, key=f"{key}_conf",
+                help="隠す用途では低めにします。取りこぼしのほうが高くつくためです")
+
+        _meta = read_model_meta(_mmap[_msel])
+        _classes = (_meta or {}).get("names") or []
+        _targets = st.multiselect(
+            "隠すクラス（空なら全部）", _classes, key=f"{key}_cls") if _classes else []
+
+        if st.button("🔍 検出する", key=f"{key}_detect", use_container_width=True):
+            _tmp = PREDICTIONS_DIR / "_mosaic_scan"
+            if _tmp.exists():
+                shutil.rmtree(_tmp)
+            _tmp.mkdir(parents=True, exist_ok=True)
+            with st.spinner(f"{len(_imgs)} 枚を検出中…"):
+                # predictions/ を汚さないよう、専用の場所へ書き出して読み捨てる
+                _saved = []
+                for _d in sorted({p.parent for p in _imgs}):
+                    _saved += run_inference(str(_mmap[_msel]), _d, _tmp,
+                                            conf_threshold=float(_conf))
+            st.session_state[f"{key}_found"] = regions_from_predictions(
+                _saved, labels=_targets or None, conf=float(_conf))
+
+        _found = st.session_state.get(f"{key}_found")
+        if _found is None:
+            st.caption("「🔍 検出する」を押すと対象を探します。")
+            return None, ""
+        return _found, f"検出ベース / conf {_conf} / {_msel}"
+
+    # ── 固定領域 ────────────────────────────────────────────────────
+    if _how.startswith("📐"):
+        st.caption(
+            "カメラが固定で、隠したいものがいつも同じ位置にある場合に使います。"
+            "画像の左上を (0, 0)、右下を (1, 1) とした割合で指定します。"
+        )
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _x1 = _c1.number_input("左 x", 0.0, 1.0, 0.0, 0.01, key=f"{key}_x1")
+        _y1 = _c2.number_input("上 y", 0.0, 1.0, 0.7, 0.01, key=f"{key}_y1")
+        _x2 = _c3.number_input("右 x", 0.0, 1.0, 0.3, 0.01, key=f"{key}_x2")
+        _y2 = _c4.number_input("下 y", 0.0, 1.0, 1.0, 0.01, key=f"{key}_y2")
+        if abs(_x2 - _x1) < 0.01 or abs(_y2 - _y1) < 0.01:
+            st.warning("範囲がほとんどありません。値を離してください。")
+            return None, ""
+        return (regions_from_fixed(_imgs, (_x1, _y1, _x2, _y2)),
+                f"固定領域 ({_x1:.2f},{_y1:.2f})-({_x2:.2f},{_y2:.2f})")
+
+    # ── CVAT の mask ラベル ─────────────────────────────────────────
+    st.caption(
+        "CVAT に `mask` のようなラベルを作って隠したい範囲を囲っておき、"
+        "その領域を使います。画像ごとに正確に指定できます。"
+    )
+    _xmls = sorted(DATA_DIR.rglob("*.xml"))
+    if not _xmls:
+        empty_state("CVAT の XML が見つかりません",
+                    "「📤 Step2: データ取込」でタスクをエクスポートしてください。")
+        return None, ""
+    _xsel = st.selectbox(
+        "使う XML", [str(p.relative_to(DATA_DIR)) for p in _xmls], key=f"{key}_xml")
+    _xpath = DATA_DIR / _xsel
+    _lbls = st.text_input(
+        "マスク扱いにするラベル（カンマ区切り）", value="mask",
+        key=f"{key}_masklbl",
+        help="ここに書いたラベルの領域だけを隠します。学習クラスとは別にしてください")
+    _names = [s.strip() for s in _lbls.split(",") if s.strip()]
+    if not _names:
+        st.warning("ラベル名を入れてください。")
+        return None, ""
+    _dirs = sorted({p.parent for p in _imgs})
+    return (regions_from_cvat_xml(_xpath, _names, _dirs),
+            f"CVAT ラベル {', '.join(_names)}")
+
+
+def _render_mosaic(ds) -> None:
+    _key = f"mz_{ds.name}"
+
+    st.caption(
+        "写り込んでしまったものを隠します。"
+        "背景データに入った対象物（学習で「背景」と覚えられると見逃しが増えます）や、"
+        "顔・ナンバープレートなどに使います。"
+    )
+    st.warning(
+        "⚠ **元の画像を上書きします。** 書き換える前に "
+        f"`{BACKUP_DIR_NAME}/` へ退避するので、あとから元に戻せます。"
+    )
+
+    # --- 退避があれば復元できるようにする ---
+    if has_backup(ds):
+        _rc1, _rc2 = st.columns([3, 2])
+        with _rc1:
+            st.info(f"↩ このデータセットには退避済みの原本が {count_backup(ds)} 枚あります。")
+        with _rc2:
+            if st.button("↩ 元に戻す", key=f"{_key}_restore", use_container_width=True):
+                with st.spinner("戻しています…"):
+                    _rs = restore_mosaic(ds)
+                if _rs["ok"]:
+                    st.success(f"✅ {_rs['restored']} 枚を元に戻しました")
+                    st.session_state.pop(f"{_key}_found", None)
+                    st.rerun()
+                else:
+                    show_error(_rs["error"], prefix="❌ 戻せませんでした: ")
+
+    _regions, _how_desc = _mosaic_regions_ui(ds, _key)
+    if _regions is None:
+        return
+    if not _regions:
+        st.info("隠す対象が見つかりませんでした。条件をゆるめてみてください。")
+        return
+
+    _n_img = len(_regions)
+    _n_box = sum(len(v) for v in _regions.values())
+    st.success(f"🎯 {_n_img} 枚 / {_n_box} 箇所が対象です（{_how_desc}）")
+
+    # --- かけ方 ---
+    _m1, _m2, _m3 = st.columns(3)
+    with _m1:
+        _method = st.selectbox("方式", list(METHODS),
+                               format_func=lambda m: METHODS[m], key=f"{_key}_method")
+    with _m2:
+        _strength = st.slider("強さ", 2, 40, 12, key=f"{_key}_strength",
+                              help="大きいほど粗く/強くぼけます")
+    with _m3:
+        _padding = st.slider("余白（画素）", 0, 40, 8, key=f"{_key}_pad",
+                             help="範囲を広げて隠し漏れを減らします")
+    if _method == "fill":
+        st.warning(
+            "⚠ 塗りつぶしは不自然な直線の縁ができ、それ自体を特徴として"
+            "学習してしまうことがあります。モザイクかぼかしを勧めます。"
+        )
+
+    # --- プレビュー（適用前に必ず見せる）---
+    if st.button("👁 プレビュー（3枚）", key=f"{_key}_preview",
+                 use_container_width=True):
+        st.session_state[f"{_key}_prev"] = True
+
+    if st.session_state.get(f"{_key}_prev"):
+        for _p in sorted(_regions)[:3]:
+            _pv = preview_mosaic(Path(_p), _regions[_p], _method,
+                                 int(_strength), int(_padding))
+            if _pv is None:
+                continue
+            _before, _after, _n = _pv
+            st.caption(f"`{Path(_p).name}` — {_n} 箇所")
+            _pc1, _pc2 = st.columns(2)
+            _pc1.image(_before, caption="処理前", use_column_width=True)
+            _pc2.image(_after, caption="処理後", use_column_width=True)
+
+    # --- 適用 ---
+    st.markdown("---")
+    if st.button(f"🟦 {_n_img} 枚に適用する（上書き）", type="primary",
+                 use_container_width=True, key=f"{_key}_apply"):
+        _bar = st.progress(0.0, text="適用しています…")
+
+        def _prog(done, total):
+            if total:
+                _bar.progress(min(done / total, 1.0), text=f"{done} / {total} 枚")
+
+        _res = apply_mosaic(ds, _regions, method=_method,
+                            strength=int(_strength), padding=int(_padding),
+                            on_progress=_prog)
+        _bar.empty()
+
+        if _res["images"]:
+            st.success(
+                f"✅ {_res['images']} 枚 / {_res['regions']} 箇所に適用しました"
+                f"（{_res['backed_up']} 枚を新たに退避）"
+            )
+            update_provenance(
+                ds, kind="dataset",
+                note=(read_note(ds) + "\n" if read_note(ds) else "")
+                     + f"[{datetime.now():%Y-%m-%d %H:%M}] モザイク適用: "
+                       f"{_how_desc} / {_method} / 強さ{_strength} / 余白{_padding} "
+                       f"→ {_res['images']}枚 {_res['regions']}箇所",
+            )
+        if _res["skipped"]:
+            st.warning(f"⚠ {len(_res['skipped'])} 枚を飛ばしました")
+            with st.expander("飛ばした対象"):
+                for _p, _why in _res["skipped"][:50]:
+                    st.caption(f"・{Path(_p).name} — {_why}")
+        if _res["errors"]:
+            show_error(_res["error"], prefix="❌ ")
+            with st.expander("内容"):
+                for _p, _why in _res["errors"][:50]:
+                    st.caption(f"・{Path(_p).name} — {_why}")
+        if _res["images"]:
+            st.session_state.pop(f"{_key}_found", None)
+            st.session_state.pop(f"{_key}_prev", None)

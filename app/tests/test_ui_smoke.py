@@ -46,6 +46,8 @@ HEAVY_KEYS = {
     "resume_btn", "lc_pick",
 }
 HEAVY_PREFIXES = (
+    # mz_ はモザイク。検出（推論が走る）・適用・復元はいずれも押させない
+    "mz_",
     "rs_run_", "fx_run_", "cls_run_", "ex_build_", "qc_run_", "redeploy_",
     "delfn_", "del_model_", "del_ds_", "mkbundle_", "insp_model_", "use_model_",
     "dl_", "add_btn_", "ul_zip_btn", "ul_imgs_btn",
