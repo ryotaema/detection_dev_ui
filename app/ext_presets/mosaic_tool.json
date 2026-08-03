@@ -1,0 +1,15 @@
+{
+  "name": "モザイク処理",
+  "icon": "🟦",
+  "description": "アノテーション漏れや写り込んだ同種物体をモザイクで隠し、学習時の悪影響を防ぐ。",
+  "url": "https://github.com/ryotaema/mosaic_tool",
+  "requirements": ["opencv-python", "numpy", "Pillow"],
+  "actions": [
+    {
+      "label": "モザイクツールを起動する",
+      "kind": "desktop",
+      "command": ["python3", "mosaic_tool.py"],
+      "note": "マウスドラッグで範囲を選ぶ操作が必要なため、ホストで実行します。起動後にフォルダ選択ダイアログが出るので data/ 配下の画像フォルダを指定してください。上書き前に _backup_original/ へ自動バックアップされます。"
+    }
+  ]
+}

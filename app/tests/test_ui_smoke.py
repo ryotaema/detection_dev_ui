@@ -32,6 +32,10 @@ TAB_MARKERS = {
     "トピックス":            "どのタスク種別を選ぶか",
 }
 
+# 拡張タブは extensions/ に clone されているかで有無が変わるので、
+# 「あれば描けていること」だけを見る（無くても失敗にしない）
+
+
 # 押すと重い処理が走るもの（学習・推論・評価・デプロイ・ZIP生成・破壊的操作）
 HEAVY_KEYS = {
     "train_start", "infer_run", "ev_run", "gd_run", "sw_run", "ap_run",

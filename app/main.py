@@ -787,36 +787,57 @@ from ui.tab_train import render_train
 from ui.tab_evaluate import render_evaluate
 from ui.tab_manage import render_manage
 from ui.tab_topics import render_topics
+from ui.tab_extension import render_extension, render_extension_placeholder
 
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+# extensions/ に clone された拡張のぶんだけタブを増やす。
+# ここでは一覧を作るだけで、拡張のコードは実行しない
+# （実行はそのタブが描かれるとき、または利用者がボタンを押したとき）。
+_exts = discover_extensions()
+
+_tab_labels = [
     "🏷 Step1: アノテーション",
     "📤 Step2: データ取込",
     "🚀 Step3: モデル学習",
     "🔭 Step4: 推論・評価",
     "📁 データ管理",
     "📚 トピックス",
-])
+]
+if _exts:
+    _tab_labels += [f"{e['icon']} {e['name']}" for e in _exts]
+else:
+    _tab_labels.append("🧩 拡張")
+
+_tabs = st.tabs(_tab_labels)
 
 # ===========================================================================
 # タブ0: アノテーション（CVAT 自動アノテーション運用 + 進捗）
 # ===========================================================================
-with tab0:
+with _tabs[0]:
     render_annotate()
 
-with tab1:
+with _tabs[1]:
     render_ingest()
 
-with tab2:
+with _tabs[2]:
     render_train()
 
-with tab3:
+with _tabs[3]:
     render_evaluate()
 
-with tab4:
+with _tabs[4]:
     render_manage()
 
-with tab5:
+with _tabs[5]:
     render_topics()
+
+# --- 拡張タブ（clone された数だけ増える）---
+if _exts:
+    for _i, _ext in enumerate(_exts):
+        with _tabs[6 + _i]:
+            render_extension(_ext)
+else:
+    with _tabs[6]:
+        render_extension_placeholder()
 
 
 # ---------------------------------------------------------------------------

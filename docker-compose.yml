@@ -457,6 +457,7 @@ services:
       MODELS_DIR: /workspace/models
       PREDICTIONS_DIR: /workspace/predictions
       SERVERLESS_DIR: /workspace/serverless
+      EXTENSIONS_DIR: /workspace/extensions
       # Nuclio 自動アノテーション連携
       # 関数を接続するネットワーク名 (deploy.sh は .env を読めないため明示的に渡す)
       CVAT_NETWORK: ${COMPOSE_PROJECT_NAME:-mlops_workspace}_cvat_net
@@ -472,6 +473,8 @@ services:
       # アプリの実行には使わない（コンテナ内では ROOT が / になり、
       # /app/ui/theme.py・/app/main.py を指すのでホストと同じように動く）
       - ./tools:/tools:ro
+      # 別リポジトリの道具を clone して置く場所（タブが自動で増える）
+      - ./extensions:/workspace/extensions
       # --- Nuclio 関数を UI からデプロイするための連携 ---
       # serverless/ 一式 (deploy.sh / function.yaml / nuctl バイナリ)
       - ./serverless:/workspace/serverless
