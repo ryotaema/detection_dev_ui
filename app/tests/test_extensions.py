@@ -287,3 +287,67 @@ def test_雛形は既存を上書きしない(ext_root):
     res = ex.scaffold_manifest(d, {"name": "新しい", "actions": []})
     assert not res["ok"] and "すでにあります" in res["error"]
     assert json.loads((d / "extension" / "extension.json").read_text())["name"] == "既存"
+
+
+# ---------------------------------------------------------------------------
+# 自前パッケージの import（過去に踏んだ不具合）
+#
+#   拡張は render() の中で自前のパッケージを import することが多い。
+#   その import が走るのは「読み込み時」ではなく「呼び出し時」なので、
+#   読み込みのあいだだけ sys.path を通しても届かなかった。
+# ---------------------------------------------------------------------------
+def _repo_with_package(tmp_path, pkg="mylib"):
+    """extension/app.py から repo 直下の <pkg> を import する構成
+
+    パッケージ名はテストごとに変える。一度 import されると sys.modules に
+    残るため、名前を使い回すと「通らないはず」の検証が通ってしまう。
+    """
+    repo = tmp_path / "repo"
+    (repo / pkg).mkdir(parents=True)
+    (repo / pkg / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
+    (repo / "extension").mkdir()
+    (repo / "extension" / "app.py").write_text(
+        f"def render():\n"
+        f"    from {pkg} import VALUE     # 呼び出し時に import される\n"
+        f"    return VALUE\n",
+        encoding="utf-8")
+    return repo
+
+
+def test_呼び出し時に自前パッケージをimportできる(tmp_path):
+    repo = _repo_with_package(tmp_path, "extlib_call")
+    fn, err = ex.load_streamlit_action(
+        repo / "extension", "app", "render", repo_dir=repo)
+    assert err == "", err
+    assert fn() == 42, "呼び出し時に repo 直下のパッケージを import できていない"
+
+
+def test_呼び出しのたびにimportできる(tmp_path):
+    """再描画のたびに render() が呼ばれるので、2 回目以降も通ること"""
+    repo = _repo_with_package(tmp_path, "extlib_twice")
+    fn, _ = ex.load_streamlit_action(
+        repo / "extension", "app", "render", repo_dir=repo)
+    assert fn() == 42
+    assert fn() == 42
+
+
+def test_呼び出し後にsys_pathを元へ戻す(tmp_path):
+    """拡張のディレクトリを通したままにすると、本体のモジュールを隠しかねない"""
+    import sys
+
+    repo = _repo_with_package(tmp_path, "extlib_path")
+    fn, _ = ex.load_streamlit_action(
+        repo / "extension", "app", "render", repo_dir=repo)
+    before = list(sys.path)
+    fn()
+    assert sys.path == before
+    assert str(repo) not in sys.path
+
+
+def test_repo_dirを省くとbase_dirだけを見る(tmp_path):
+    """repo_dir を渡さない呼び方でも壊れないこと（既定は base_dir）"""
+    repo = _repo_with_package(tmp_path, "extlib_norepo")
+    fn, err = ex.load_streamlit_action(repo / "extension", "app", "render")
+    assert err == ""
+    with pytest.raises(ModuleNotFoundError):
+        fn()          # パッケージは repo 直下なので、base_dir だけでは届かない

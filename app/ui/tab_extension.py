@@ -98,9 +98,11 @@ def _render_command_action(ext: dict, action: dict, key: str) -> None:
 def _render_streamlit_action(ext: dict, action: dict) -> None:
     """拡張が用意した render() をこの場で描く。ここで初めて相手のコードが動く。"""
     # module はマニフェストのある場所を起点に探す
-    # （extension/ にまとめている場合は extension/app.py のように置ける）
+    # （extension/ にまとめている場合は extension/app.py のように置ける）。
+    # 自前のパッケージ（dsm/ など）はリポジトリの根にあるので、そちらも渡す。
     fn, err = load_streamlit_action(
-        Path(ext.get("base_dir") or ext["dir"]), action["module"], action["function"])
+        Path(ext.get("base_dir") or ext["dir"]), action["module"], action["function"],
+        repo_dir=Path(ext["dir"]))
     if fn is None:
         show_error(err, prefix="❌ 読み込めませんでした: ")
         st.caption(

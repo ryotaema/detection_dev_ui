@@ -189,6 +189,22 @@ def render() -> None:
 - import は `render()` の中に書くと、読み込みが軽くなり、
   依存が足りないときも本体を巻き込みません
 
+### 自前のパッケージを import する場合
+
+リポジトリ直下のパッケージ（`dsm/` など）は、
+**`extension/` の中からでもそのまま import できます**。
+
+```python
+# extension/app.py
+def render():
+    from dsm import ops        # リポジトリ直下の dsm/ が見える
+```
+
+`render()` を呼ぶあいだ、リポジトリの直下と `extension/` の両方が
+import の探索先に入るようになっています（呼び終わると外れます）。
+相対 import（`from ..dsm import ops`）は使えないので、
+上のように絶対名で書いてください。
+
 例外を投げても本体は落ちません（そのタブにエラーが出るだけ）が、
 利用者が読める形で伝えるほうが親切です。
 

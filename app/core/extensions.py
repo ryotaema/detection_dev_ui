@@ -345,37 +345,84 @@ def run_extension_command(
                 "command": resolved, "error": str(e)}
 
 
-def load_streamlit_action(ext_dir: Path, module: str, function: str):
+class _ExtPath:
+    """拡張のディレクトリを一時的に sys.path へ通す文脈。
+
+    拡張が自前のパッケージ（`dsm/` など）を import できるようにする。
+    本体のモジュールを隠さないよう、使い終わったら必ず外す。
+    """
+
+    def __init__(self, dirs):
+        seen, self._dirs = set(), []
+        for d in dirs:
+            s = str(d)
+            if s and s not in seen:
+                seen.add(s)
+                self._dirs.append(s)
+        self._added: list[str] = []
+
+    def __enter__(self):
+        import sys
+        for d in self._dirs:
+            if d not in sys.path:
+                sys.path.insert(0, d)
+                self._added.append(d)
+        return self
+
+    def __exit__(self, *exc):
+        import sys
+        for d in self._added:
+            try:
+                sys.path.remove(d)
+            except ValueError:
+                pass
+        self._added.clear()
+        return False
+
+
+def load_streamlit_action(base_dir: Path, module: str, function: str,
+                          repo_dir: Optional[Path] = None):
     """拡張の描画関数を読み込む。**ここで初めて拡張のコードが動く。**
 
+    base_dir … module を探す起点（マニフェストのある場所）
+    repo_dir … 拡張リポジトリの根。`dsm/` のような自前パッケージはここにある
+
     戻り値: (関数, エラー文字列)。読めなければ (None, 理由)
+
+    返す関数は sys.path を通した状態で呼ばれるように包んである。
+    拡張側は `render()` の中で import することが多く（読み込みを軽くするため）、
+    その import は**読み込み時ではなく呼び出し時**に走るため。
     """
     import importlib.util
     import sys
 
-    path = Path(ext_dir) / f"{module.replace('.', '/')}.py"
+    base = Path(base_dir)
+    repo = Path(repo_dir) if repo_dir else base
+    search = [repo, base]
+
+    path = base / f"{module.replace('.', '/')}.py"
     if not path.exists():
         return None, f"{path.name} が見つかりません"
 
     # 拡張どうしで名前がぶつからないように、モジュール名を拡張ごとに分ける
-    mod_name = f"_ext_{Path(ext_dir).name}_{module.replace('.', '_')}"
+    mod_name = f"_ext_{repo.name}_{module.replace('.', '_')}"
     try:
-        # 相対 import が使えるように拡張のディレクトリを一時的に通す
-        added = str(ext_dir) not in sys.path
-        if added:
-            sys.path.insert(0, str(ext_dir))
-        try:
+        with _ExtPath(search):
             spec = importlib.util.spec_from_file_location(mod_name, path)
             mod = importlib.util.module_from_spec(spec)
             sys.modules[mod_name] = mod
             spec.loader.exec_module(mod)
-        finally:
-            if added:
-                sys.path.remove(str(ext_dir))
     except Exception as e:
         return None, f"{module} の読み込みに失敗しました: {type(e).__name__}: {e}"
 
     fn = getattr(mod, function, None)
     if not callable(fn):
         return None, f"{module}.{function}() が見つかりません"
-    return fn, ""
+
+    def _with_path(*args, **kwargs):
+        with _ExtPath(search):
+            return fn(*args, **kwargs)
+
+    _with_path.__name__ = getattr(fn, "__name__", function)
+    _with_path.__doc__ = getattr(fn, "__doc__", None)
+    return _with_path, ""
