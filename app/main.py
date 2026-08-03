@@ -25,6 +25,9 @@ from core import (  # アンダースコア始まりは * で入らないので�
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
 
+# 使う人だけ出すオプション機能
+from ui.features import (OPTIONAL_FEATURES, enabled_tab_features,
+                         feature_enabled, render_feature_settings)
 # 配色の定義は ui/theme.py に集約している
 from ui.theme import (AUTO_THEME_NAME, DEFAULT_THEME_NAME, PRESET_THEMES,
                       THEME_EDIT_FIELDS, active_theme, build_auto_theme_vars,
@@ -140,10 +143,30 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
    構造が変わってもセレクタが当たらなくなるだけで壊れはしないが、
    バージョンを上げたときは見た目を確認すること（現在 1.35.0）。 */
 
-/* タブ。Step4 の内部タブが増えたので、選択中がはっきり分かるようにする */
+/* タブ。Step4 の内部タブが増えたので、選択中がはっきり分かるようにする。
+   タブは 6 固定 + オプション機能 + 拡張の数だけ増えるので、
+   入りきらないときは横スクロールさせる（折り返すと選択中の下線がずれる）。 */
 .stTabs [data-baseweb="tab-list"] {
     gap: 4px;
     border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+}
+.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar { height: 6px; }
+.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar-thumb {
+    background: var(--border-accent);
+    border-radius: 3px;
+}
+/* スクロールしても選ぶ対象が潰れないように、タブ自体は縮めない */
+.stTabs [data-baseweb="tab"] { flex: 0 0 auto; white-space: nowrap; }
+
+/* 横並びのラジオ（データセットの操作など）。
+   選択肢が増えると 1 行に収まらず、折り返しもスクロールもしないため
+   端の選択肢が押し出されてクリックできなくなる。必ず折り返させる。 */
+[data-testid="stRadio"] > div[role="radiogroup"] {
+    flex-wrap: wrap;
+    row-gap: 4px;
 }
 .stTabs [data-baseweb="tab"] {
     color: var(--text-secondary);
@@ -364,6 +387,7 @@ defaults = {
     "cvat_raw_dir": None,
     "theme_name": DEFAULT_THEME_NAME,
     "reanno_set": set(),   # 再アノテーション要フラグを立てた JSON ファイル名の集合
+    "pv_zoom": None,       # 推論プレビューで拡大表示中の番号（None=閉じている）
 }
 # データもモデルも無い＝初回起動とみなし、はじめかたガイドを開いた状態にする
 if "show_onboarding" not in st.session_state:
@@ -502,6 +526,9 @@ with st.sidebar:
             f"predictions/ {PREDICTIONS_DIR}",
             language="text",
         )
+
+    with st.expander("🧰 使う機能", expanded=False):
+        render_feature_settings()
 
     # ── テーマ設定（サイドバー最下部） ──
     with st.expander("🎨 テーマ設定", expanded=False):
@@ -788,6 +815,7 @@ from ui.tab_evaluate import render_evaluate
 from ui.tab_manage import render_manage
 from ui.tab_topics import render_topics
 from ui.tab_extension import render_extension, render_extension_placeholder
+from ui.tab_crop import render_crop
 
 # extensions/ に clone された拡張のぶんだけタブを増やす。
 # ここでは一覧を作るだけで、拡張のコードは実行しない
@@ -802,6 +830,10 @@ _tab_labels = [
     "📁 データ管理",
     "📚 トピックス",
 ]
+# 使う人だけ出すオプション機能（サイドバーの「🧰 使う機能」で切り替える）
+_opt_feats = enabled_tab_features()
+_tab_labels += [OPTIONAL_FEATURES[f]["label"] for f in _opt_feats]
+
 if _exts:
     _tab_labels += [f"{e['icon']} {e['name']}" for e in _exts]
 else:
@@ -830,13 +862,26 @@ with _tabs[4]:
 with _tabs[5]:
     render_topics()
 
+# --- オプション機能のタブ ---
+_OPT_RENDERERS = {"crop": render_crop}
+
+_next_tab = 6
+for _f in _opt_feats:
+    with _tabs[_next_tab]:
+        _fn = _OPT_RENDERERS.get(_f)
+        if _fn:
+            _fn()
+        else:
+            st.info(f"{OPTIONAL_FEATURES[_f]['label']} は準備中です。")
+    _next_tab += 1
+
 # --- 拡張タブ（clone された数だけ増える）---
 if _exts:
     for _i, _ext in enumerate(_exts):
-        with _tabs[6 + _i]:
+        with _tabs[_next_tab + _i]:
             render_extension(_ext)
 else:
-    with _tabs[6]:
+    with _tabs[_next_tab]:
         render_extension_placeholder()
 
 

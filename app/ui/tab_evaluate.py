@@ -394,6 +394,95 @@ def render_evaluate() -> None:
                 )
 
             _preview_jsons = _pred_jsons[:int(_pv_n)]
+
+            # ── 拡大パネル ──────────────────────────────────────────────
+            #   一覧のままだと 1 枚が画面の 1/3 程度で「合っているか」を判断できない。
+            #   選んだ 1 枚をここで大きく出し、閉じずに前後へ動けるようにする。
+            #   st.dialog は 1.35 では experimental なので使っていない。
+            _zoom = st.session_state.get("pv_zoom")
+            if _zoom is not None:
+                _zoom = min(max(0, int(_zoom)), len(_preview_jsons) - 1)
+                _zjf = _preview_jsons[_zoom]
+                with st.container(border=True):
+                    _zh1, _zh2 = st.columns([5, 1])
+                    with _zh1:
+                        st.markdown(
+                            f"##### 🔍 {prediction_display_name(_zjf)}"
+                            f"　<span style='color:var(--text-muted);font-size:.8rem'>"
+                            f"{_zoom + 1} / {len(_preview_jsons)}</span>",
+                            unsafe_allow_html=True)
+                    with _zh2:
+                        if st.button("✕ 閉じる", key="pv_zoom_close",
+                                     use_container_width=True):
+                            st.session_state.pv_zoom = None
+                            st.rerun()
+
+                    _zboxes = prediction_box_summaries(_zjf)
+                    _zm1, _zm2 = st.columns([2, 3])
+                    with _zm1:
+                        _zmode = st.radio(
+                            "見え方", ["画像全体", "検出ごとに拡大"],
+                            horizontal=True, key="pv_zoom_mode",
+                            label_visibility="collapsed")
+                    _zidx = None
+                    with _zm2:
+                        if _zmode == "検出ごとに拡大":
+                            if _zboxes:
+                                _zlabels = [
+                                    f"{i + 1}. {b['label']} {b['confidence']:.2f} "
+                                    f"({b['size'][0]}×{b['size'][1]}px)"
+                                    for i, b in enumerate(_zboxes)]
+                                _zsel = st.selectbox(
+                                    "どの検出を見るか", _zlabels,
+                                    key=f"pv_zoom_box_{_zjf.name}",
+                                    label_visibility="collapsed")
+                                _zidx = _zlabels.index(_zsel)
+                            else:
+                                st.caption("この画像には検出がありません。")
+
+                    _zmargin = st.slider(
+                        "まわりをどれだけ含めるか", 0.2, 3.0, 0.8, 0.1,
+                        key="pv_zoom_margin",
+                        disabled=(_zidx is None),
+                        help="小さくすると検出そのものを、大きくすると周辺との関係を見られます")
+
+                    _zdet = prediction_detail(_zjf, box_index=_zidx,
+                                              margin=float(_zmargin))
+                    if _zdet:
+                        st.image(_zdet["image"], use_column_width=True,
+                                 caption=(f"検出 {_zdet['n_boxes']} 件"
+                                          + (f"　切り出し {_zdet['crop_rect']}"
+                                             if _zdet["crop_rect"] else "")))
+                    else:
+                        st.warning("画像を読めませんでした（元画像が移動・削除された可能性）")
+
+                    # 閉じずに前後へ動けるようにする。
+                    # 1 枚ずつ開き直すと 100 枚の確認が現実的でない
+                    _zf = _zjf.name in st.session_state.reanno_set
+                    _zn1, _zn2, _zn3 = st.columns([1, 3, 1])
+                    with _zn1:
+                        if st.button("← 前の画像", key="pv_zoom_prev",
+                                     disabled=(_zoom == 0),
+                                     use_container_width=True):
+                            st.session_state.pv_zoom = _zoom - 1
+                            st.rerun()
+                    with _zn2:
+                        if st.button(
+                                "🚩 フラグ解除" if _zf else "🚩 再アノテーション要",
+                                key="pv_zoom_flag", type="primary",
+                                use_container_width=True):
+                            if _zf:
+                                st.session_state.reanno_set.discard(_zjf.name)
+                            else:
+                                st.session_state.reanno_set.add(_zjf.name)
+                            st.rerun()
+                    with _zn3:
+                        if st.button("次の画像 →", key="pv_zoom_next",
+                                     disabled=(_zoom >= len(_preview_jsons) - 1),
+                                     use_container_width=True):
+                            st.session_state.pv_zoom = _zoom + 1
+                            st.rerun()
+
             for _row_start in range(0, len(_preview_jsons), int(_pv_cols)):
                 _row_files = _preview_jsons[_row_start:_row_start + int(_pv_cols)]
                 _row_cols = st.columns(int(_pv_cols))
@@ -407,15 +496,22 @@ def render_evaluate() -> None:
                         else:
                             st.caption(prediction_display_name(_jf))
                         _is_flagged = _jf.name in st.session_state.reanno_set
-                        _flag_label = "🚩 フラグ解除" if _is_flagged else "🚩 再アノテーション要"
-                        if st.button(_flag_label, key=f"prev_flag_{_jf.name}",
-                                     use_container_width=True,
-                                     type="secondary"):
-                            if _is_flagged:
-                                st.session_state.reanno_set.discard(_jf.name)
-                            else:
-                                st.session_state.reanno_set.add(_jf.name)
-                            st.rerun()
+                        _flag_label = "🚩 解除" if _is_flagged else "🚩 要確認"
+                        _tb1, _tb2 = st.columns(2)
+                        with _tb1:
+                            if st.button("🔍 拡大", key=f"prev_zoom_{_jf.name}",
+                                         use_container_width=True):
+                                st.session_state.pv_zoom = _preview_jsons.index(_jf)
+                                st.rerun()
+                        with _tb2:
+                            if st.button(_flag_label, key=f"prev_flag_{_jf.name}",
+                                         use_container_width=True,
+                                         type="secondary"):
+                                if _is_flagged:
+                                    st.session_state.reanno_set.discard(_jf.name)
+                                else:
+                                    st.session_state.reanno_set.add(_jf.name)
+                                st.rerun()
             if len(_pred_jsons) > int(_pv_n):
                 st.caption(f"（他 {len(_pred_jsons) - int(_pv_n)} 件は省略。"
                            "表示枚数を増やすか、「④ 書き出す」の選択グリッドからフラグ付けできます）")

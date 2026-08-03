@@ -27,6 +27,7 @@ from .augment_preview import *  # noqa: F401,F403
 from .experiments import *     # noqa: F401,F403
 from .extensions import *      # noqa: F401,F403
 from .mosaic import *          # noqa: F401,F403
+from .crop import *            # noqa: F401,F403
 
 # `import *` はアンダースコア始まりを取り込まないため、明示的に公開する
 from .config import (  # noqa: F401

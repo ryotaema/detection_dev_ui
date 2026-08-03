@@ -518,3 +518,149 @@ def run_video_inference(
     except Exception as e:
         st.error(f"動画推論エラー: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# 拡大確認（再アノテーションのフラグ付けを楽にする）
+#
+#   一覧のプレビューは 1 枚が画面の 1/3 程度にしかならず、
+#   「この検出が合っているか」を判断できない。
+#   ここでは 2 つの見方を用意する:
+#     - 画像全体を大きく（線の太さを画像サイズに合わせて調整する）
+#     - 検出ボックスの周辺だけを切り出す（当たり外れはこちらのほうが速い）
+# ---------------------------------------------------------------------------
+def prediction_box_summaries(json_path: Path) -> list[dict]:
+    """拡大対象を選ぶための、検出ごとの要約を返す"""
+    try:
+        with open(json_path) as f:
+            pred = json.load(f)
+    except Exception:
+        return []
+
+    out = []
+    for i, b in enumerate(pred.get("boxes") or []):
+        xyxy = b.get("bbox_xyxy") or []
+        if len(xyxy) != 4:
+            continue
+        w = max(0.0, float(xyxy[2]) - float(xyxy[0]))
+        h = max(0.0, float(xyxy[3]) - float(xyxy[1]))
+        out.append({
+            "index": i,
+            "label": b.get("label", "?"),
+            "confidence": float(b.get("confidence", 0.0)),
+            "bbox_xyxy": [float(v) for v in xyxy],
+            "size": (int(w), int(h)),
+        })
+    return out
+
+
+def _scaled_draw(img, boxes, only_index: Optional[int] = None):
+    """画像の大きさに合わせた太さで枠を描く。
+
+    従来の描画は線幅 2px・文字 0.5 の固定で、1600px の画像では細すぎて見えない。
+    拡大して見る用途では画像サイズに比例させる。
+    """
+    import cv2
+
+    _COLORS = [
+        (78, 207, 244), (244, 168, 78), (126, 207, 78),
+        (207, 78, 126), (168, 78, 244), (78, 168, 207),
+    ]
+    h, w = img.shape[:2]
+    thick = max(2, int(round(min(w, h) / 400)))
+    fscale = max(0.5, min(w, h) / 900)
+
+    label_set = list(dict.fromkeys(b.get("label", "?") for b in boxes))
+    for i, b in enumerate(boxes):
+        xyxy = b.get("bbox_xyxy") or []
+        if len(xyxy) != 4:
+            continue
+        # 注目している検出だけ強調し、他は細く描く
+        focused = (only_index is None or i == only_index)
+        t = thick if focused else max(1, thick // 2)
+        color = _COLORS[label_set.index(b.get("label", "?")) % len(_COLORS)]
+
+        x1, y1, x2, y2 = [int(v) for v in xyxy]
+        _mxy = b.get("mask_xy")
+        if _mxy and len(_mxy) >= 3 and focused:
+            import numpy as _np
+            pts = _np.array(_mxy, dtype=_np.int32).reshape(-1, 1, 2)
+            ov = img.copy()
+            cv2.fillPoly(ov, [pts], color)
+            cv2.addWeighted(ov, 0.30, img, 0.70, 0, img)
+            cv2.polylines(img, [pts], True, color, t)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, t)
+
+        if focused:
+            text = f"{b.get('label','?')} {b.get('confidence', 0.0):.2f}"
+            (tw, th), _ = cv2.getTextSize(
+                text, cv2.FONT_HERSHEY_SIMPLEX, fscale, max(1, t - 1))
+            cv2.rectangle(img, (x1, max(0, y1 - th - 8)),
+                          (x1 + tw + 6, y1), color, -1)
+            cv2.putText(img, text, (x1 + 3, max(th, y1 - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, fscale,
+                        (255, 255, 255), max(1, t - 1))
+    return img
+
+
+def prediction_detail(
+    json_path: Path,
+    box_index: Optional[int] = None,
+    margin: float = 0.8,
+    max_side: int = 1400,
+):
+    """拡大確認用の画像を作る。
+
+    box_index=None … 画像全体（枠は画像サイズに合わせた太さで描く）
+    box_index=n    … その検出の周辺を切り出す。margin はボックス長辺に対する余白の割合
+
+    戻り値: {"image": RGB配列, "n_boxes": int, "stem": str, "crop_rect": tuple|None}
+    失敗時は None。
+    """
+    import cv2
+
+    try:
+        with open(json_path) as f:
+            pred = json.load(f)
+        img_path = pred.get("image_path", "")
+        if not img_path or not Path(img_path).exists():
+            return None
+        img = cv2.imread(img_path)
+        if img is None:
+            return None
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+
+    boxes = pred.get("boxes") or []
+    crop_rect = None
+
+    if box_index is not None and 0 <= box_index < len(boxes):
+        xyxy = boxes[box_index].get("bbox_xyxy") or []
+        if len(xyxy) == 4:
+            h, w = img.shape[:2]
+            x1, y1, x2, y2 = [float(v) for v in xyxy]
+            base = max(x2 - x1, y2 - y1)
+            pad = base * margin
+            cx1 = max(0, int(x1 - pad))
+            cy1 = max(0, int(y1 - pad))
+            cx2 = min(w, int(x2 + pad))
+            cy2 = min(h, int(y2 + pad))
+            if cx2 - cx1 > 4 and cy2 - cy1 > 4:
+                # 切り出す前に描画する（座標をずらさずに済む）
+                img = _scaled_draw(img, boxes, only_index=box_index)
+                img = img[cy1:cy2, cx1:cx2]
+                crop_rect = (cx1, cy1, cx2, cy2)
+
+    if crop_rect is None:
+        img = _scaled_draw(img, boxes, only_index=box_index)
+
+    # 大きすぎるとブラウザが重くなるので上限をかける（縮小のみ・拡大はしない）
+    h, w = img.shape[:2]
+    if max(h, w) > max_side:
+        r = max_side / max(h, w)
+        img = cv2.resize(img, (int(w * r), int(h * r)),
+                         interpolation=cv2.INTER_AREA)
+
+    return {"image": img, "n_boxes": len(boxes),
+            "stem": Path(json_path).stem, "crop_rect": crop_rect}

@@ -23,6 +23,7 @@ from core import (  # noqa: F401
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
 from .widgets import empty_state, show_error
+from .features import feature_enabled
 
 
 
@@ -130,11 +131,17 @@ def render_manage() -> None:
                     )
 
                 _DS_OP_NONE = "—"
+                # 使う人だけ出す操作は、サイドバーの「🧰 使う機能」で切り替える。
+                # 常に出しておくと選択肢が増え続けて、
+                # 自分に関係のあるものがどれか読み取れなくなるため。
+                _ds_ops = [_DS_OP_NONE, "🏷 状態とタグ", "✂️ 分け直す",
+                           "🏷 クラス名"]
+                if feature_enabled("mosaic"):
+                    _ds_ops.append("🟦 モザイク")
+                _ds_ops += ["⬇ 持ち出す", "🔍 品質チェック", "➕ 画像追加"]
+
                 _ds_op = st.radio(
-                    "操作",
-                    [_DS_OP_NONE, "🏷 状態とタグ", "✂️ train/val を分け直す",
-                     "🏷 クラス名を編集", "🟦 モザイク", "⬇ 持ち出す (ZIP)",
-                     "🔍 品質チェック", "➕ 画像を追加"],
+                    "操作", _ds_ops,
                     horizontal=True, key=f"ds_op_{ds.name}",
                     label_visibility="collapsed",
                 )
@@ -175,7 +182,7 @@ def render_manage() -> None:
                         else:
                             show_error(_up["error"], prefix="❌ 保存できませんでした: ")
 
-                elif _ds_op == "✂️ train/val を分け直す":
+                elif _ds_op == "✂️ 分け直す":
                     st.caption(
                         "生成時に決めた比率のままだと「val が偏っていて評価が信用できない」"
                         "ときに手が出せません。ここで混ぜ直せます。"
@@ -207,7 +214,7 @@ def render_manage() -> None:
                             )
                             st.rerun()
 
-                elif _ds_op == "🏷 クラス名を編集":
+                elif _ds_op == "🏷 クラス名":
                     _cls_names = dataset_class_names(ds)
                     if not _cls_names:
                         st.info("data.yaml にクラス定義がありません。")
@@ -262,7 +269,7 @@ def render_manage() -> None:
                 elif _ds_op == "🟦 モザイク":
                     _render_mosaic(ds)
 
-                elif _ds_op == "⬇ 持ち出す (ZIP)":
+                elif _ds_op == "⬇ 持ち出す":
                     st.caption(
                         "他の PC で学習させる場合などに、データセットを ZIP で書き出します。"
                         "展開すればそのまま YOLO の学習に使える構造のままです。"
@@ -427,7 +434,7 @@ def render_manage() -> None:
                                                 check_dataset_quality(ds)
                                             st.rerun()
 
-                elif _ds_op == "➕ 画像を追加":
+                elif _ds_op == "➕ 画像追加":
                     _add_imgs = st.file_uploader(
                         "追加する画像ファイル（複数選択可）",
                         type=["jpg", "jpeg", "png", "bmp", "tiff"],

@@ -200,3 +200,37 @@ def test_onboarding_toggle_does_not_break_tabs(app):
         cb = [c for c in at.checkbox if c.key == "show_onboarding"][0]
         (cb.check() if expected else cb.uncheck()).run()
         _assert_all_tabs_rendered(at, f"ガイド={'ON' if expected else 'OFF'}")
+
+
+def test_preview_zoom_panel_opens_and_closes():
+    """推論プレビューの拡大パネルが開き、前後に動け、閉じられること。
+
+    フラグ付けの主要導線なので、描画が壊れていないかまで見る。
+    """
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(MAIN, default_timeout=300)
+    at.run()
+
+    def _open(a):
+        return any(b.key == "pv_zoom_close" for b in a.button)
+
+    zoom_buttons = [b for b in at.button if b.key and b.key.startswith("prev_zoom_")]
+    if not zoom_buttons:
+        pytest.skip("推論結果が無いので拡大パネルを開けない")
+
+    assert not _open(at), "最初からパネルが開いている"
+
+    zoom_buttons[0].click().run()
+    _assert_all_tabs_rendered(at, "拡大パネルを開いた")
+    assert _open(at), "拡大パネルが開かない"
+
+    nxt = [b for b in at.button if b.key == "pv_zoom_next"]
+    if nxt and not getattr(nxt[0], "disabled", False):
+        nxt[0].click().run()
+        _assert_all_tabs_rendered(at, "次の画像へ移動")
+        assert _open(at), "移動したらパネルが閉じてしまった"
+
+    [b for b in at.button if b.key == "pv_zoom_close"][0].click().run()
+    _assert_all_tabs_rendered(at, "拡大パネルを閉じた")
+    assert not _open(at), "パネルが閉じない"
