@@ -26,8 +26,9 @@ from core import (  # アンダースコア始まりは * で入らないので�
 )
 
 # 配色の定義は ui/theme.py に集約している
-from ui.theme import (DEFAULT_THEME_NAME, PRESET_THEMES, THEME_EDIT_FIELDS,
-                      active_theme, build_theme_vars, load_user_themes,
+from ui.theme import (AUTO_THEME_NAME, DEFAULT_THEME_NAME, PRESET_THEMES,
+                      THEME_EDIT_FIELDS, active_theme, build_auto_theme_vars,
+                      build_theme_vars, is_auto_theme, load_user_themes,
                       save_user_themes)
 
 # ---------------------------------------------------------------------------
@@ -378,7 +379,11 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # テーマ変数を注入（デフォルトCSS変数を上書き）
-st.markdown(build_theme_vars(active_theme()), unsafe_allow_html=True)
+# 「OS に合わせる」は両方の配色を書き出して、どちらを使うかはブラウザに任せる
+st.markdown(
+    build_auto_theme_vars() if is_auto_theme() else build_theme_vars(active_theme()),
+    unsafe_allow_html=True,
+)
 
 
 def _get_pipeline_status() -> dict:
@@ -501,7 +506,8 @@ with st.sidebar:
     # ── テーマ設定（サイドバー最下部） ──
     with st.expander("🎨 テーマ設定", expanded=False):
         _user_themes_db = load_user_themes()
-        _preset_names   = list(PRESET_THEMES.keys())
+        # 「OS に合わせる」は PRESET_THEMES には無い擬似テーマなので手で足す
+        _preset_names   = [AUTO_THEME_NAME] + list(PRESET_THEMES.keys())
         _user_names     = list(_user_themes_db.keys())
         _all_names      = _preset_names + _user_names
 
@@ -546,9 +552,10 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("**カスタムテーマを作成・編集**")
 
+        # 「OS に合わせる」は色を1組に決められないので、編集の起点にはできない
         _base_sel = st.selectbox(
             "ベーステーマ（編集の起点）",
-            _preset_names,
+            list(PRESET_THEMES.keys()),
             key="theme_base_select",
         )
         _base = PRESET_THEMES[_base_sel].copy()

@@ -59,6 +59,10 @@ WRITE_LAYOUT = [
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# build_design_system.py がユーザーテーマに付ける接頭辞。
+# これらはコードではなく models/.user_themes.json 側の持ち物なので書き戻さない。
+USER_THEME_PREFIX = "👤 "
+
 
 class ParseError(Exception):
     pass
@@ -156,6 +160,15 @@ def main() -> int:
     except ParseError as e:
         print(f"❌ colors.html を読めません:\n{e}", file=sys.stderr)
         return 1
+
+    # ユーザーテーマ（UI のカラーピッカーで保存したもの）はコードではなく
+    # models/.user_themes.json にあるので、ここでは書き戻さない
+    user_named = [n for n in new_themes if n.startswith(USER_THEME_PREFIX)]
+    for n in user_named:
+        del new_themes[n]
+    if user_named:
+        print("ℹ ユーザーテーマは対象外です（models/.user_themes.json 側で管理）: "
+              + ", ".join(n[len(USER_THEME_PREFIX):] for n in user_named))
 
     src = THEME_PY.read_text(encoding="utf-8")
     try:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import html
+import json
 import re
 import shutil
 from pathlib import Path
@@ -56,19 +57,44 @@ TOKEN_GROUPS = [
 # ---------------------------------------------------------------------------
 # 情報源の読み取り
 # ---------------------------------------------------------------------------
-def load_themes() -> dict[str, dict]:
+def load_themes(include_user: bool = True) -> dict[str, dict]:
     """theme.py から PRESET_THEMES をリテラルとして取り出す。
 
     theme.py は streamlit を import するのでそのままでは読み込めない。
     AST から辞書リテラルだけを拾う。
+
+    include_user のとき、UI のカラーピッカーで保存された
+    `models/.user_themes.json` のテーマも後ろに足す。
+    テーマを増やしたいときはコードを触らずここから増やすのが正規のルート
+    （プリセットの追加・改名は theme.py を直接編集する）。
     """
     tree = ast.parse(THEME_PY.read_text(encoding="utf-8"))
+    presets = None
     for node in tree.body:
         targets = getattr(node, "targets", []) or [getattr(node, "target", None)]
         for t in targets:
             if isinstance(t, ast.Name) and t.id == "PRESET_THEMES":
-                return ast.literal_eval(node.value)
-    raise SystemExit("PRESET_THEMES が theme.py に見つかりません")
+                presets = ast.literal_eval(node.value)
+    if presets is None:
+        raise SystemExit("PRESET_THEMES が theme.py に見つかりません")
+
+    if include_user:
+        user_path = ROOT / "models" / ".user_themes.json"
+        if user_path.exists():
+            try:
+                user = json.loads(user_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"  ⚠ ユーザーテーマを読めませんでした（無視します）: {e}")
+                user = {}
+            for name, colors in user.items():
+                # 変数が欠けているものはプレビューを壊すので飛ばす
+                missing = {k for _, k in VAR_MAP} - set(colors)
+                if missing:
+                    print(f"  ⚠ ユーザーテーマ「{name}」は変数が不足のため除外: "
+                          f"{', '.join(sorted(missing))}")
+                    continue
+                presets[f"👤 {name}"] = colors
+    return presets
 
 
 def load_app_css() -> str:

@@ -39,8 +39,11 @@ def build_mod():
 
 @pytest.fixture(scope="module")
 def colors_html(build_mod):
-    """実際の theme.py から colors.html 相当を組み立てる"""
-    themes = build_mod.load_themes()
+    """実際の theme.py から colors.html 相当を組み立てる
+
+    ユーザーテーマは環境によって有無が変わるので、プリセットだけで組む。
+    """
+    themes = build_mod.load_themes(include_user=False)
     app_css = build_mod.load_app_css()
     return build_mod.page(
         build_mod.card("Colors", "カラートークン", "26変数 × 4テーマ"),
@@ -98,7 +101,7 @@ def test_知らない変数は無視される(apply_mod, colors_html):
 # 書き出し
 # ---------------------------------------------------------------------------
 def test_書き出した定義を読み直すと同じ辞書になる(apply_mod, build_mod):
-    themes = build_mod.load_themes()
+    themes = build_mod.load_themes(include_user=False)
     src = apply_mod.THEME_PY.read_text(encoding="utf-8")
     start, end, _ = apply_mod.find_preset_themes(src)
 
@@ -111,7 +114,7 @@ def test_書き出した定義を読み直すと同じ辞書になる(apply_mod,
 
 
 def test_色を変えたときだけ差し替わる(apply_mod, build_mod):
-    themes = build_mod.load_themes()
+    themes = build_mod.load_themes(include_user=False)
     first = list(themes)[0]
     edited = {n: dict(c) for n, c in themes.items()}
     edited[first]["accent"] = "#ff00ff"
@@ -134,7 +137,7 @@ def test_色を変えたときだけ差し替わる(apply_mod, build_mod):
 
 def test_書き出しても他の定義を巻き込まない(apply_mod, build_mod):
     """PRESET_THEMES の直後にある DEFAULT_THEME_NAME を消さないこと"""
-    themes = build_mod.load_themes()
+    themes = build_mod.load_themes(include_user=False)
     src = apply_mod.THEME_PY.read_text(encoding="utf-8")
     start, end, _ = apply_mod.find_preset_themes(src)
     lines = src.split("\n")
@@ -144,3 +147,36 @@ def test_書き出しても他の定義を巻き込まない(apply_mod, build_mo
     assert "DEFAULT_THEME_NAME" in new_src
     assert "THEME_EDIT_FIELDS" in new_src
     compile(new_src, "theme.py", "exec")   # 構文として妥当か
+
+
+# ---------------------------------------------------------------------------
+# OS 追従テーマ
+# ---------------------------------------------------------------------------
+def test_自動テーマは両方の配色を書き出す():
+    """prefers-color-scheme で切り替わる CSS になっていること"""
+    sys.path.insert(0, str(ROOT / "app"))
+    from ui import theme as th
+
+    css = th.build_auto_theme_vars()
+    light = th.PRESET_THEMES[th.AUTO_LIGHT_BASE]
+    dark = th.PRESET_THEMES[th.AUTO_DARK_BASE]
+
+    assert "@media (prefers-color-scheme: dark)" in css
+    # ライトが既定、ダークは media クエリの中
+    head, _, tail = css.partition("@media (prefers-color-scheme: dark)")
+    assert f"--accent: {light['accent']};" in head
+    assert f"--accent: {dark['accent']};" in tail
+    # 26 変数がどちらにも揃っている
+    for var, key in th._VAR_MAP:
+        assert f"{var}: {light[key]};" in head
+        assert f"{var}: {dark[key]};" in tail
+
+
+def test_自動テーマはベースがプリセットに存在する():
+    sys.path.insert(0, str(ROOT / "app"))
+    from ui import theme as th
+
+    assert th.AUTO_LIGHT_BASE in th.PRESET_THEMES
+    assert th.AUTO_DARK_BASE in th.PRESET_THEMES
+    # 擬似テーマなので PRESET_THEMES 自体には入れない
+    assert th.AUTO_THEME_NAME not in th.PRESET_THEMES

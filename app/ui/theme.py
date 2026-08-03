@@ -74,6 +74,13 @@ PRESET_THEMES: dict[str, dict] = {
 
 DEFAULT_THEME_NAME = "ライト シンプル"
 
+# OS の配色設定に合わせるモード。
+#   Streamlit（サーバ側）からはブラウザの prefers-color-scheme を読めないので、
+#   両方の配色を CSS に書き出しておき、どちらを使うかはブラウザに決めさせる。
+AUTO_THEME_NAME = "🌗 OS に合わせる"
+AUTO_LIGHT_BASE = "ライト シンプル"
+AUTO_DARK_BASE  = "ダーク（デフォルト）"
+
 # ユーザーが色ピッカーで編集できる主要フィールド
 THEME_EDIT_FIELDS: list[tuple[str, str]] = [
     ("bg_app",       "背景色（メイン）"),
@@ -130,24 +137,69 @@ def save_user_themes(themes: dict) -> None:
         json.dumps(themes, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def is_auto_theme() -> bool:
+    return st.session_state.get("theme_name", DEFAULT_THEME_NAME) == AUTO_THEME_NAME
+
+
 def active_theme() -> dict:
-    """現在選択中のテーマの色辞書を返す。"""
+    """現在選択中のテーマの色辞書を返す。
+
+    「OS に合わせる」のときは実際にどちらが使われるか**サーバ側では分からない**。
+    この関数の戻り値は iframe（学習ログ）に色を焼き込む用途にしか使っていないので、
+    その場合はライト側を返す。iframe の中だけは OS 設定に追従しない。
+    """
     name = st.session_state.get("theme_name", DEFAULT_THEME_NAME)
+    if name == AUTO_THEME_NAME:
+        return PRESET_THEMES[AUTO_LIGHT_BASE]
     if name in PRESET_THEMES:
         return PRESET_THEMES[name]
     return load_user_themes().get(name, PRESET_THEMES[DEFAULT_THEME_NAME])
 
 
+def _var_block(t: dict, indent: str = "  ") -> str:
+    return "\n".join(f"{indent}{var}: {t[key]};" for var, key in _VAR_MAP)
+
+
 def build_theme_vars(t: dict) -> str:
     """テーマ辞書から :root の CSS 変数定義を組み立てる。"""
-    body = "\n".join(f"  {var}: {t[key]};" for var, key in _VAR_MAP)
     return f"""<style>
 :root {{
-{body}
+{_var_block(t)}
 }}
 .stApp {{ background: {t['bg_app']}; }}
 [data-testid="stSidebar"] {{
   background: {t['bg_sidebar']};
   border-right: 1px solid {t['border']};
+}}
+</style>"""
+
+
+def build_auto_theme_vars() -> str:
+    """OS の配色設定に追従する CSS を組み立てる。
+
+    ライトを既定として書き、`prefers-color-scheme: dark` のときだけ
+    ダークで上書きする。切り替えはブラウザが行うので再実行は要らない。
+    """
+    light = PRESET_THEMES[AUTO_LIGHT_BASE]
+    dark  = PRESET_THEMES[AUTO_DARK_BASE]
+    return f"""<style>
+:root {{
+{_var_block(light)}
+}}
+.stApp {{ background: {light['bg_app']}; }}
+[data-testid="stSidebar"] {{
+  background: {light['bg_sidebar']};
+  border-right: 1px solid {light['border']};
+}}
+
+@media (prefers-color-scheme: dark) {{
+  :root {{
+{_var_block(dark, indent="    ")}
+  }}
+  .stApp {{ background: {dark['bg_app']}; }}
+  [data-testid="stSidebar"] {{
+    background: {dark['bg_sidebar']};
+    border-right: 1px solid {dark['border']};
+  }}
 }}
 </style>"""
