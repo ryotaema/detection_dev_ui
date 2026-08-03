@@ -46,3 +46,6 @@ extensions/*
 
 # 顔検出モデル（UIから取得する生成物。MIT / opencv_zoo 由来）
 app/.face_models/
+
+# 仕様書の元ファイル（開発方針の扱い。roadmap.md と同じく配布しない）
+docs/*.docx
