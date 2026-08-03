@@ -39,6 +39,7 @@ serverless/.build/
 # （tools/build_design_system.py でいつでも作り直せる）
 design_system/
 
-# 拡張機能（別リポジトリを clone して置く）。README と既定設定だけ追跡する
+# 拡張機能（別リポジトリを clone して置く）。説明用の md だけ追跡する
 extensions/*
 !extensions/README.md
+!extensions/INTEGRATION.md

@@ -3,6 +3,14 @@
 ここに `git clone` すると、Streamlit UI にその道具専用のタブが増えます。
 本体（`app/`）を大きくせずに機能を足していくための仕組みです。
 
+> **対応させる側の手順は [INTEGRATION.md](INTEGRATION.md) にまとまっています。**
+> 取り込みたいリポジトリにあのファイルをコピーして、そこで作業すれば対応できます
+> （detection_dev_ui 側のコードを読む必要はありません）。
+>
+> ```bash
+> cp extensions/INTEGRATION.md /path/to/対応させたいリポジトリ/
+> ```
+
 ```bash
 cd extensions
 git clone https://github.com/ryotaema/anno_dataset_tools

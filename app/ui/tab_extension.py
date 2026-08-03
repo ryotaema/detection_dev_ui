@@ -38,7 +38,10 @@ def render_extension_placeholder() -> None:
         "# ブラウザを再読み込みするとタブが増えます",
         language="bash",
     )
-    st.caption("詳しい書き方は `extensions/README.md` にあります。")
+    st.caption(
+        "使い方は `extensions/README.md`、"
+        "**取り込みたいリポジトリ側の対応手順**は `extensions/INTEGRATION.md` にあります。"
+    )
 
 
 def _render_desktop_action(ext: dict, action: dict) -> None:
@@ -142,6 +145,10 @@ def render_extension(ext: dict) -> None:
             + "\n\n拡張リポジトリ側に `extension/extension.json` を置いてコミットすると、"
               "以降は clone するだけで正しいタブが出ます。"
               "ツールの引数はそちらで変わるので、**定義も向こうに置くほうがズレません**。"
+        )
+        st.caption(
+            "対応のさせ方は `extensions/INTEGRATION.md` にまとまっています。"
+            "そのファイルを対象のリポジトリにコピーして作業すれば対応できます。"
         )
         _sc_key = f"scaffold_{ext['dir_name']}"
         if st.button("📄 雛形を書き出す", key=_sc_key,
