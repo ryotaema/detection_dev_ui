@@ -95,7 +95,7 @@ def test_中心がbboxの中心と一致する():
 
 
 def test_画像の端でも欠けない():
-    """左上の果実。パディングして正方を保つ"""
+    """左上にある対象。パディングして正方を保つ"""
     img = _img()
     crop, g = make_crop(img, [10, 10, 50, 50], scale=3.0, out_size=240)
     assert g["padding"]["left"] > 0 and g["padding"]["top"] > 0
@@ -121,7 +121,7 @@ def test_出力サイズにそろう():
 
 
 def test_拡大しすぎない():
-    """640 由来の小さな果実を 1024 へ無理に引き伸ばさない"""
+    """低解像度由来の小さな対象を 1024 へ無理に引き伸ばさない"""
     img = _img(640, 480)
     crop, g = make_crop(img, [300, 200, 340, 240], scale=2.0,
                         out_size=1024, max_upscale=1.5)
@@ -173,7 +173,7 @@ def test_bboxの中心はクロップの中心へ写る():
     assert cy == pytest.approx(oh / 2, abs=1.0)
 
 
-def test_端の果実でも往復する():
+def test_端の対象でも往復する():
     """パディングが入っても座標系が狂わないこと"""
     img = _img()
     _, g = make_crop(img, [10, 10, 50, 50], scale=3.0, out_size=240,
@@ -233,14 +233,14 @@ def test_間引きは決定的():
 # ---------------------------------------------------------------------------
 # アノテーション用の書き出し
 # ---------------------------------------------------------------------------
-def test_果実ごとに1枚できる(src, tmp_path):
+def test_対象ごとに1枚できる(src, tmp_path):
     out = tmp_path / "crops"
     res = generate_crops(_dets(src), out, out_size=256, max_upscale=10.0)
     assert res["ok"], res["error"]
     assert res["crops"] == 3 and res["images"] == 2
 
     imgs = sorted(p.name for p in (out / "images").iterdir())
-    assert imgs == ["IMG_0_fruit00.png", "IMG_0_fruit01.png", "IMG_1_fruit00.png"]
+    assert imgs == ["IMG_0_obj00.png", "IMG_0_obj01.png", "IMG_1_obj00.png"]
     assert len(list((out / "meta").iterdir())) == 3
 
 
@@ -249,22 +249,22 @@ def test_サイドカーに復元用の情報が入る(src, tmp_path):
     generate_crops(_dets(src), out, annotation_scale=2.0, target_scale=1.5,
                    out_size=256, max_upscale=10.0,
                    model_info={"model_id": "fruit_v3", "infer_input_size": 640})
-    meta = json.loads((out / "meta" / "IMG_0_fruit00.json").read_text())
+    meta = json.loads((out / "meta" / "IMG_0_obj00.json").read_text())
 
-    assert meta["data_type"] == "fruit_crop"
+    assert meta["data_type"] == "object_crop"
     assert meta["annotation_status"] == "raw"
     assert meta["source_image"]["width"] == 800
     assert meta["source_image"]["sha1"]
     assert meta["bbox_model"]["model_id"] == "fruit_v3"
-    assert meta["target_fruit"]["confidence"] == 0.9
+    assert meta["target_object"]["confidence"] == 0.9
     g = meta["crop_geometry"]
     for k in ("crop_rect_in_source", "padding", "resize_ratio",
               "target_rect_in_crop", "annotation_scale", "target_scale"):
         assert k in g, k
 
 
-def test_同じクロップに写る他の果実を記録する(src, tmp_path):
-    """密集した果実。対象を特定するのに使う"""
+def test_同じクロップに写る他の対象を記録する(src, tmp_path):
+    """密集した対象。どれが主対象かの判別に使う"""
     dets = {str(src / "IMG_0.png"): [
         {"bbox_xyxy": [300, 300, 360, 360], "confidence": 0.9},
         {"bbox_xyxy": [380, 300, 440, 360], "confidence": 0.8},
@@ -272,11 +272,11 @@ def test_同じクロップに写る他の果実を記録する(src, tmp_path):
     out = tmp_path / "crops"
     generate_crops(dets, out, annotation_scale=3.0, out_size=256,
                    max_upscale=10.0)
-    meta = json.loads((out / "meta" / "IMG_0_fruit00.json").read_text())
-    assert len(meta["other_fruits_in_crop"]) == 1
+    meta = json.loads((out / "meta" / "IMG_0_obj00.json").read_text())
+    assert len(meta["others_in_crop"]) == 1
 
 
-def test_離れた果実は写り込みに入れない(src, tmp_path):
+def test_離れた対象は写り込みに入れない(src, tmp_path):
     dets = {str(src / "IMG_0.png"): [
         {"bbox_xyxy": [10, 10, 50, 50], "confidence": 0.9},
         {"bbox_xyxy": [700, 500, 760, 560], "confidence": 0.8},
@@ -284,8 +284,8 @@ def test_離れた果実は写り込みに入れない(src, tmp_path):
     out = tmp_path / "crops"
     generate_crops(dets, out, annotation_scale=2.0, out_size=256,
                    max_upscale=10.0)
-    meta = json.loads((out / "meta" / "IMG_0_fruit00.json").read_text())
-    assert meta["other_fruits_in_crop"] == []
+    meta = json.loads((out / "meta" / "IMG_0_obj00.json").read_text())
+    assert meta["others_in_crop"] == []
 
 
 def test_マニフェストが1クロップ1行(src, tmp_path):
@@ -420,3 +420,12 @@ def test_倍率を変えると切り出し範囲が変わる():
                          out_size=512, max_upscale=0.0)
         sizes.append(g["crop_rect_in_source"][2])
     assert sizes == sorted(sizes) and len(set(sizes)) == 3, sizes
+
+
+def test_ファイル名の接頭辞を変えられる(src, tmp_path):
+    """対象に合わせて名前を変えられること（既定は汎用の obj）"""
+    out = tmp_path / "crops"
+    generate_crops(_dets(src), out, out_size=256, max_upscale=10.0,
+                   name_prefix="fruit")
+    assert (out / "images" / "IMG_0_fruit00.png").exists()
+    assert (out / "meta" / "IMG_0_fruit00.json").exists()

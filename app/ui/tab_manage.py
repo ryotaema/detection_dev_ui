@@ -164,7 +164,7 @@ def render_manage() -> None:
                         "タグ（カンマ区切り）",
                         value=", ".join(read_tags(ds)),
                         key=f"ds_tags_{ds.name}",
-                        placeholder="例: 屋内, ペッパー, 自動アノテ由来",
+                        placeholder="例: 屋内, 夜間, 自動アノテ由来",
                     )
                     _new_note = st.text_area(
                         "メモ（任意）", value=read_note(ds),

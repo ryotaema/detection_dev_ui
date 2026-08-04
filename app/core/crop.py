@@ -1,7 +1,7 @@
 # =============================================================================
 # クロップ生成（2段階検出のための切り出し）
 #
-#   BBOX で果実を見つけ → その周辺を切り出し → セグメンテーションで細部を取る、
+#   BBOX で対象を見つけ → その周辺を切り出し → セグメンテーションで細部を取る、
 #   という 2 段構えのための前段。
 #
 #   ★ make_crop() は実機（crop_for_runtime）と**同一の実装を使う**こと ★
@@ -10,7 +10,7 @@
 #     依存しない。実機側はこれを import して target_scale を渡すだけでよい。
 #
 #   アノテーション用と実機用の違いはラッパだけ:
-#     アノテーション用 … 全果実をループ + 画像とサイドカー json を保存
+#     アノテーション用 … 検出した対象ごとにループ + 画像とサイドカー json を保存
 #     実機用           … 対象 1 個 + メモリ上のテンソル + 座標変換情報を返す
 #
 #   仕様: docs/spec_crop_for_annotation.md / docs/spec_crop_for_runtime.md
@@ -55,7 +55,7 @@ def make_crop(
 
     max_upscale <= 0 なら拡大を制限しない（必ず out_size で出す）。
     学習で使うサイズをそろえたいときはこちら。
-    小さな果実は引き伸ばされるが、実効解像度が上がるわけではない。
+    小さな対象は引き伸ばされるが、実効解像度が上がるわけではない。
 
     戻り値: (クロップ画像, crop_geometry)
 
@@ -90,7 +90,7 @@ def make_crop(
     ix0, iy0 = int(round(rx0)), int(round(ry0))
     ix1, iy1 = int(round(rx1)), int(round(ry1))
 
-    # ③ はみ出したぶんはパディングで補う（端の果実を欠けさせない）
+    # ③ はみ出したぶんはパディングで補う（画像の端にある対象を欠けさせない）
     pad_left   = max(0, -ix0)
     pad_top    = max(0, -iy0)
     pad_right  = max(0, ix1 - w)
@@ -197,7 +197,7 @@ def _sha1(path: Path, limit: int = 8 * 1024 * 1024) -> str:
 def dedup_detections(dets: list[dict], center_dist: float) -> tuple:
     """bbox 中心が近すぎるものを間引く。0 なら何もしない。
 
-    アノテーション用は原則 0（全果実を出す）。
+    アノテーション用は原則 0（検出した対象をすべて出す）。
     密集しすぎて重複クロップが増えるときだけ使う。
     """
     if center_dist <= 0 or len(dets) < 2:
@@ -244,12 +244,16 @@ def generate_crops(
     jpg_quality: int = 95,
     save_rejected: bool = False,
     model_info: Optional[dict] = None,
+    name_prefix: str = "obj",
     on_progress=None,
 ) -> dict:
-    """果実ごとに 1 枚のクロップと、サイドカー json を書き出す。
+    """検出した対象ごとに 1 枚のクロップと、サイドカー json を書き出す。
 
     detections_by_image: {画像パス: [{"bbox_xyxy": [...], "confidence": f,
                                       "label": str, "class_id": int}, ...]}
+
+    name_prefix: 出力ファイル名に使う語。対象に合わせて変えられる
+                 （例: "fruit" にすると IMG_0031_fruit00.png になる）
 
     情報量とトレーサビリティを優先する（速度は求めない）。
     後から再生成・座標復元・モデル更新ができるよう、メタは多めに持たせる。
@@ -305,7 +309,7 @@ def generate_crops(
                 if geom["max_upscale_applied"]:
                     result["upscale_limited"] += 1
 
-                stem = f"{img_path.stem}_fruit{i:02d}"
+                stem = f"{img_path.stem}_{name_prefix}{i:02d}"
                 img_rel = f"images/{stem}.{ext}"
                 meta_rel = f"meta/{stem}.json"
 
@@ -318,7 +322,7 @@ def generate_crops(
                 x1, y1, x2, y2 = [float(v) for v in det["bbox_xyxy"]]
                 meta = {
                     "schema_version": SCHEMA_VERSION,
-                    "data_type": "fruit_crop",
+                    "data_type": "object_crop",
                     "annotation_status": "raw",
                     "annotation_history": [{
                         "status": "raw", "tool": "detection_dev_ui/crop",
@@ -330,7 +334,7 @@ def generate_crops(
                         "width": src_w, "height": src_h,
                     },
                     "bbox_model": dict(model_info or {}),
-                    "target_fruit": {
+                    "target_object": {
                         "index": i,
                         "bbox_xywh": [x1, y1, x2 - x1, y2 - y1],
                         "confidence": float(det.get("confidence", 0.0)),
@@ -345,8 +349,8 @@ def generate_crops(
                         "target_rect_in_crop": target_rect_in_crop(
                             geom, target_scale),
                     },
-                    # 同じクロップに写り込む他の果実（対象の特定に使う）
-                    "other_fruits_in_crop": [
+                    # 同じクロップに写り込む他の対象（どれが主対象かの判別に使う）
+                    "others_in_crop": [
                         {"bbox_xywh_in_source": [
                             o["bbox_xyxy"][0], o["bbox_xyxy"][1],
                             o["bbox_xyxy"][2] - o["bbox_xyxy"][0],
@@ -367,7 +371,7 @@ def generate_crops(
 
                 mf.write(json.dumps({
                     "crop_image": img_rel, "meta": meta_rel,
-                    "data_type": "fruit_crop", "annotation_status": "raw",
+                    "data_type": "object_crop", "annotation_status": "raw",
                     "source_image": str(img_path),
                     "confidence": float(det.get("confidence", 0.0)),
                     "source_width": src_w, "source_height": src_h,
@@ -402,9 +406,10 @@ def generate_background_tiles(
     out_format: str = "png",
     on_progress=None,
 ) -> dict:
-    """果実の出ない画像をタイルに分割する。
+    """対象の検出されない画像をタイルに分割する。
 
-    空タイルの自動除去はしない（枝葉の判定は誤りやすい）。
+    中身が薄いタイルを機械的に捨てることはしない。
+    「何も無い」の判定は対象領域によって大きく変わり、誤ると必要な背景を失う。
     全タイルを出し、採否は人が決める。
     """
     import cv2

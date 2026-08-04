@@ -1,7 +1,7 @@
 # =============================================================================
 # ✂️ クロップ生成（2 段階目のアノテーション素材を作る）
 #
-#   BBOX で果実を見つけ → 周辺を切り出して CVAT へ → セグメンテーションを付ける、
+#   BBOX で対象を見つけ → 周辺を切り出して CVAT へ → セグメンテーションを付ける、
 #   という流れの前段。切り出しの核（make_crop）は実機と共通なので、
 #   ここで決めた倍率・基準は実機側とそろえること。
 # =============================================================================
@@ -39,7 +39,7 @@ def render_crop() -> None:
         '<div class="section-head"><h3>✂️ クロップ生成</h3></div>',
         unsafe_allow_html=True)
     st.caption(
-        "BBOX の検出結果をもとに果実ごとの切り出しを作ります。"
+        "BBOX の検出結果をもとに、対象ごとの切り出しを作ります。"
         "CVAT に入れてセグメンテーションを付けると、2 段階目のモデルを学習できます。"
     )
     st.info(
@@ -76,14 +76,14 @@ def render_crop() -> None:
     _c3, _c4 = st.columns(2)
     with _c3:
         _targets = st.multiselect(
-            "果実として扱うクラス（空なら全部）", _classes, key="cr_cls",
-            help="複数クラスのモデルでは、果実だけを選んでください") if _classes else []
+            "切り出す対象のクラス（空なら全部）", _classes, key="cr_cls",
+            help="複数クラスのモデルでは、切り出したいクラスだけを選んでください") if _classes else []
     with _c4:
         st.session_state.setdefault("cr_conf", 0.25)
         _conf = st.slider("conf しきい値", 0.05, 0.95, step=0.05, key="cr_conf",
                           help="低いほど拾いますが、誤検出のクロップも増えます")
 
-    if st.button("🔍 果実を検出する", type="primary", use_container_width=True,
+    if st.button("🔍 対象を検出する", type="primary", use_container_width=True,
                  key="cr_detect"):
         _tmp = PREDICTIONS_DIR / "_crop_scan"
         if _tmp.exists():
@@ -121,18 +121,18 @@ def render_crop() -> None:
 
     _found = st.session_state.get("cr_found")
     if _found is None:
-        st.caption("「🔍 果実を検出する」を押すと対象を探します。")
+        st.caption("「🔍 対象を検出する」を押すと切り出す対象を探します。")
         return
 
     _bg = st.session_state.get("cr_bg") or []
-    _n_fruit = sum(len(v) for v in _found.values())
+    _n_obj = sum(len(v) for v in _found.values())
     metric_row([
-        ("果実の写る画像", len(_found)),
-        ("検出した果実", _n_fruit),
-        ("果実の出ない画像", len(_bg)),
+        ("対象の写る画像", len(_found)),
+        ("検出した対象", _n_obj),
+        ("対象の出ない画像", len(_bg)),
     ])
     if not _found:
-        st.warning("果実が 1 つも検出されませんでした。conf を下げてみてください。")
+        st.warning("対象が 1 つも検出されませんでした。conf を下げてみてください。")
 
     # ── ② 切り出しの決め方 ───────────────────────────────────────────────
     #     key= を付けたウィジェットには value= を渡さない。
@@ -175,8 +175,8 @@ def render_crop() -> None:
     with _o3:
         _square = st.checkbox("正方形にする", key="cr_square")
 
-    # 検出済みの果実から、いまの設定で何倍に引き伸ばされるかを実測して出す。
-    # データセットによって果実の写る大きさが違うので、既定値を当てにしない
+    # 検出済みの対象から、いまの設定で何倍に引き伸ばされるかを実測して出す。
+    # データセットによって対象の写る大きさが違うので、既定値を当てにしない
     _longs = sorted(max(b["bbox_xyxy"][2] - b["bbox_xyxy"][0],
                         b["bbox_xyxy"][3] - b["bbox_xyxy"][1])
                     for v in _found.values() for b in v)
@@ -203,13 +203,13 @@ def render_crop() -> None:
         _max_up = 0.0          # 上限なし
         st.caption(
             "ℹ 指定したサイズで必ず書き出します（学習の入力サイズがそろいます）。"
-            "小さな果実は引き伸ばされますが、実効解像度は上がりません。"
+            "小さな対象は引き伸ばされますが、実効解像度は上がりません。"
         )
     else:
         _max_up = st.number_input(
             "max_upscale（これを超える拡大はしない）", 1.0, 8.0, step=0.1,
             key="cr_maxup",
-            help="小さい果実の水増しを防ぎます。上限に当たったクロップは"
+            help="小さい対象の水増しを防ぎます。上限に当たったクロップは"
                  "指定より小さい出力になります")
 
     _p1, _p2, _p3 = st.columns(3)
@@ -223,7 +223,7 @@ def render_crop() -> None:
     with _p3:
         _dedup = st.slider(
             "重複除去", 0.0, 1.0, step=0.05, key="cr_dedup",
-            help="0 なら全果実を出します。密集して重複が多いときだけ上げます")
+            help="0 なら検出した対象をすべて出します。密集して重複が多いときだけ上げます")
 
     # ── ③ 下見 ──────────────────────────────────────────────────────────
     st.markdown("#### ③ 切り出しを確認する")
@@ -287,7 +287,7 @@ def render_crop() -> None:
 
     st.session_state.setdefault("cr_bgon", False)
     _bg_on = st.checkbox(
-        f"果実の出ない画像を背景タイルにする（{len(_bg)} 枚）", key="cr_bgon",
+        f"対象の出ない画像を背景タイルにする（{len(_bg)} 枚）", key="cr_bgon",
         help="空タイルの自動除去はしません。採否は人が決めてください",
         disabled=not _bg)
     _tile, _overlap = int(_out_size), 0.0
@@ -332,11 +332,11 @@ def render_crop() -> None:
                                 caption=f"r{_r}_c{_c}", use_column_width=True)
                             _shown += 1
                 st.caption(
-                    "空に見えるタイルも自動では捨てません"
-                    "（枝葉の判定は誤りやすいため）。採否は人が決めてください。"
+                    "中身が薄く見えるタイルも自動では捨てません"
+                    "（「何も無い」の判定は対象によって変わるため）。採否は人が決めてください。"
                 )
 
-    if st.button(f"✂️ {_n_fruit} 件のクロップを作る", type="primary",
+    if st.button(f"✂️ {_n_obj} 件のクロップを作る", type="primary",
                  use_container_width=True, key="cr_run",
                  disabled=not _found):
         _bar = st.progress(0.0, text="切り出しています…")

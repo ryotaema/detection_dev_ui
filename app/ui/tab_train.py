@@ -231,7 +231,7 @@ def render_train() -> None:
             with _sv1:
                 _new_pname = st.text_input(
                     "プリセット名", key="preset_new_name",
-                    placeholder="例: ペッパー物体検出用", label_visibility="collapsed",
+                    placeholder="例: 小物体むけ 高解像度", label_visibility="collapsed",
                 )
             with _sv2:
                 if st.button("✅ 保存", key="preset_save_confirm", use_container_width=True):
