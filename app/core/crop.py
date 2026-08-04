@@ -53,6 +53,10 @@ def make_crop(
 ):
     """bbox の周りを切り出して out_size にそろえる。
 
+    max_upscale <= 0 なら拡大を制限しない（必ず out_size で出す）。
+    学習で使うサイズをそろえたいときはこちら。
+    小さな果実は引き伸ばされるが、実効解像度が上がるわけではない。
+
     戻り値: (クロップ画像, crop_geometry)
 
     crop_geometry にはマスクを元画像へ戻すのに必要な値をすべて入れる。
@@ -117,8 +121,10 @@ def make_crop(
     ph, pw = patch.shape[:2]
     src_side = max(ph, pw)
     want_ratio = out_size / max(1e-6, src_side)
-    upscaled = want_ratio > max_upscale
-    ratio = min(want_ratio, float(max_upscale))
+    # max_upscale <= 0 は「上限なし」。学習で使うサイズをそろえたいときに使う
+    unlimited = float(max_upscale) <= 0
+    upscaled = (not unlimited) and want_ratio > max_upscale
+    ratio = want_ratio if unlimited else min(want_ratio, float(max_upscale))
     final = max(1, int(round(src_side * ratio)))
 
     resized = cv2.resize(patch, (max(1, int(round(pw * ratio))),

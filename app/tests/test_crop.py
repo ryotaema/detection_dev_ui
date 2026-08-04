@@ -378,3 +378,45 @@ def test_空タイルを勝手に捨てない(tmp_path):
     res = generate_background_tiles([d / "blank.png"], tmp_path / "bg",
                                     tile_size=400)
     assert res["tiles"] == 4, "真っ黒でも捨てないこと"
+
+
+# ---------------------------------------------------------------------------
+# 出力サイズを優先する（max_upscale <= 0 = 上限なし）
+#
+#   学習で使うサイズをそろえたい、という要望に応える経路。
+# ---------------------------------------------------------------------------
+def test_上限なしなら必ず出力サイズになる():
+    img = _img(640, 480)
+    crop, g = make_crop(img, [300, 200, 340, 240], scale=2.0,
+                        out_size=1024, max_upscale=0.0)
+    assert max(crop.shape[:2]) == 1024
+    assert g["max_upscale_applied"] is False, "上限なしなのにフラグが立っている"
+
+
+@pytest.mark.parametrize("scale", [1.5, 2.0, 3.0])
+def test_上限なしなら倍率によらず同じサイズ(scale):
+    """学習の入力サイズをそろえられること"""
+    img = _img(640, 480)
+    crop, _ = make_crop(img, [300, 200, 340, 240], scale=scale,
+                        out_size=512, max_upscale=0.0)
+    assert max(crop.shape[:2]) == 512
+
+
+def test_上限なしでも座標は往復する():
+    img = _img(640, 480)
+    _, g = make_crop(img, [300, 200, 340, 240], scale=2.0,
+                     out_size=1024, max_upscale=0.0)
+    cx, cy = source_to_crop(320.0, 220.0, g)
+    bx, by = crop_to_source(cx, cy, g)
+    assert (bx, by) == pytest.approx((320.0, 220.0))
+
+
+def test_倍率を変えると切り出し範囲が変わる():
+    """UI で annotation_scale を変えたら結果が変わること"""
+    img = _img()
+    sizes = []
+    for s in (1.5, 2.0, 3.0):
+        _, g = make_crop(img, [300, 200, 400, 300], scale=s,
+                         out_size=512, max_upscale=0.0)
+        sizes.append(g["crop_rect_in_source"][2])
+    assert sizes == sorted(sizes) and len(set(sizes)) == 3, sizes

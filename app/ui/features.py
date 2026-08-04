@@ -88,25 +88,35 @@ def enabled_tab_features() -> list[str]:
 
 
 def render_feature_settings() -> None:
-    """サイドバーに置く設定。チェックを変えたらその場で保存する。"""
+    """サイドバーに置く設定。チェックを変えたらその場で保存する。
+
+    ここは**サイドバー＝タブより前**に描かれるので、
+    切り替えた結果はこの回の描画からそのまま反映される。`st.rerun()` は呼ばない
+    （描画の途中で呼ぶと、そこで打ち切られて以降の要素が描かれず、
+      ウィジェットの対応がずれる）。
+    """
     st.caption(
         "使う人だけ出せるようにしています。"
         "必要になったらここで足してください（設定は保存されます）。"
     )
     current = load_enabled()
-    picked: list[str] = []
+
+    # チェックボックスの初期値は session_state に入れておき、
+    # ウィジェットには value= を渡さない。
+    # key と value を両方渡すと、どちらが正なのかが状況で変わって取り違えが起きる。
+    for name in OPTIONAL_FEATURES:
+        k = f"feat_{name}"
+        if k not in st.session_state:
+            st.session_state[k] = name in current
+
+    picked: set[str] = set()
     for name, info in OPTIONAL_FEATURES.items():
-        on = st.checkbox(
-            info["label"], value=(name in current), key=f"feat_{name}",
-            help=f"{info['desc']}\n\n{info['where']}",
-        )
-        if on:
-            picked.append(name)
+        if st.checkbox(info["label"], key=f"feat_{name}",
+                       help=f"{info['desc']}\n\n{info['where']}"):
+            picked.add(name)
         st.caption(f"　{info['where']}")
 
-    if set(picked) != current:
-        if save_enabled(picked):
-            refresh_features()
-            st.rerun()
-        else:
-            st.error(f"設定を保存できませんでした（{FEATURES_PATH}）")
+    if picked != current and not save_enabled(picked):
+        st.error(f"設定を保存できませんでした（{FEATURES_PATH}）")
+    # この回の描画からすぐ効かせる（再実行しないため）
+    st.session_state["_enabled_features"] = picked

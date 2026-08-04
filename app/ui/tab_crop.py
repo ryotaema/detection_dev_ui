@@ -79,7 +79,8 @@ def render_crop() -> None:
             "果実として扱うクラス（空なら全部）", _classes, key="cr_cls",
             help="複数クラスのモデルでは、果実だけを選んでください") if _classes else []
     with _c4:
-        _conf = st.slider("conf しきい値", 0.05, 0.95, 0.25, 0.05, key="cr_conf",
+        st.session_state.setdefault("cr_conf", 0.25)
+        _conf = st.slider("conf しきい値", 0.05, 0.95, step=0.05, key="cr_conf",
                           help="低いほど拾いますが、誤検出のクロップも増えます")
 
     if st.button("🔍 果実を検出する", type="primary", use_container_width=True,
@@ -134,15 +135,27 @@ def render_crop() -> None:
         st.warning("果実が 1 つも検出されませんでした。conf を下げてみてください。")
 
     # ── ② 切り出しの決め方 ───────────────────────────────────────────────
+    #     key= を付けたウィジェットには value= を渡さない。
+    #     両方渡すとどちらが正か状況で変わり、値を変えても反映されなくなる
+    #     （ui/widgets.py も同じ理由で使い分けている）。既定値は先に入れておく。
+    for _k, _v in {
+        "cr_ann": 2.0, "cr_tgt": 1.5, "cr_basis": "long_side",
+        "cr_out": 512, "cr_prefer_out": True, "cr_maxup": 1.5,
+        "cr_square": True, "cr_pad": "reflect", "cr_fmt": "png",
+        "cr_dedup": 0.0, "cr_prev_n": 3, "cr_tile": 1024, "cr_ovl": 0.0,
+        "cr_bg_prev_n": 4,
+    }.items():
+        st.session_state.setdefault(_k, _v)
+
     st.markdown("#### ② 切り出し方を決める")
     _s1, _s2, _s3 = st.columns(3)
     with _s1:
         _ann_scale = st.number_input(
-            "annotation_scale", 1.0, 6.0, 2.0, 0.1, key="cr_ann",
+            "annotation_scale", 1.0, 6.0, step=0.1, key="cr_ann",
             help="アノテーション用に大きめに切る倍率。あとで内側へ切り直せます")
     with _s2:
         _tgt_scale = st.number_input(
-            "target_scale", 1.0, 6.0, 1.5, 0.1, key="cr_tgt",
+            "target_scale", 1.0, 6.0, step=0.1, key="cr_tgt",
             help="学習・実機で使う想定倍率。ここでは切らず、メタに記録します")
     with _s3:
         _basis = st.selectbox(
@@ -152,14 +165,52 @@ def render_crop() -> None:
     _o1, _o2, _o3 = st.columns(3)
     with _o1:
         _out_size = st.select_slider(
-            "出力の一辺", options=[256, 384, 512, 640, 768, 1024, 1280],
-            value=1024, key="cr_out")
+            "出力の一辺（学習で使うサイズ）",
+            options=[256, 384, 512, 640, 768, 1024, 1280], key="cr_out")
     with _o2:
-        _max_up = st.number_input(
-            "max_upscale", 1.0, 4.0, 1.5, 0.1, key="cr_maxup",
-            help="これを超える拡大はしません（小さい果実の水増しを防ぐ）")
+        _prefer_out = st.checkbox(
+            "出力サイズを優先する", key="cr_prefer_out",
+            help="拡大の上限を外し、必ず指定したサイズで書き出します。"
+                 "学習時のサイズをそろえたいときはこちら")
     with _o3:
-        _square = st.checkbox("正方形にする", value=True, key="cr_square")
+        _square = st.checkbox("正方形にする", key="cr_square")
+
+    # 検出済みの果実から、いまの設定で何倍に引き伸ばされるかを実測して出す。
+    # データセットによって果実の写る大きさが違うので、既定値を当てにしない
+    _longs = sorted(max(b["bbox_xyxy"][2] - b["bbox_xyxy"][0],
+                        b["bbox_xyxy"][3] - b["bbox_xyxy"][1])
+                    for v in _found.values() for b in v)
+    if _longs:
+        _med_crop = _longs[len(_longs) // 2] * float(_ann_scale)
+        _ratio = int(_out_size) / max(1e-6, _med_crop)
+        _big = sum(1 for l in _longs
+                   if int(_out_size) / (l * float(_ann_scale)) > 3.0)
+        metric_row([
+            ("bbox 長辺の中央値", f"{_longs[len(_longs) // 2]:.0f} px"),
+            ("切り出しの中央値", f"{_med_crop:.0f} px"),
+            ("出力までの倍率", f"×{_ratio:.2f}"),
+            ("3倍超の拡大", f"{_big} / {len(_longs)} 件"),
+        ])
+        if _ratio > 3.0:
+            st.warning(
+                f"⚠ 中央値で **×{_ratio:.1f} の引き伸ばし**になります。"
+                "拡大しても細かさは増えないので、ファイルが大きくなるだけです。"
+                f"出力の一辺を {int(_med_crop // 64 * 64) or 256} 前後まで下げるか、"
+                "「出力サイズを優先する」を外すことを検討してください。"
+            )
+
+    if _prefer_out:
+        _max_up = 0.0          # 上限なし
+        st.caption(
+            "ℹ 指定したサイズで必ず書き出します（学習の入力サイズがそろいます）。"
+            "小さな果実は引き伸ばされますが、実効解像度は上がりません。"
+        )
+    else:
+        _max_up = st.number_input(
+            "max_upscale（これを超える拡大はしない）", 1.0, 8.0, step=0.1,
+            key="cr_maxup",
+            help="小さい果実の水増しを防ぎます。上限に当たったクロップは"
+                 "指定より小さい出力になります")
 
     _p1, _p2, _p3 = st.columns(3)
     with _p1:
@@ -171,12 +222,22 @@ def render_crop() -> None:
                             help="png を推奨。可逆なので細部が保てます")
     with _p3:
         _dedup = st.slider(
-            "重複除去", 0.0, 1.0, 0.0, 0.05, key="cr_dedup",
+            "重複除去", 0.0, 1.0, step=0.05, key="cr_dedup",
             help="0 なら全果実を出します。密集して重複が多いときだけ上げます")
 
     # ── ③ 下見 ──────────────────────────────────────────────────────────
     st.markdown("#### ③ 切り出しを確認する")
-    if _found and st.button("👁 3 枚だけ試す", use_container_width=True,
+    _pv1, _pv2 = st.columns([1, 3])
+    with _pv1:
+        _prev_n = st.select_slider(
+            "表示枚数", options=[1, 3, 6, 9, 12], key="cr_prev_n",
+            help="増やすと描画に時間がかかります")
+    with _pv2:
+        st.markdown(
+            '<div style="padding-top:28px; color:var(--text-muted); font-size:.82rem;">'
+            '設定を変えるとその場で作り直されます</div>', unsafe_allow_html=True)
+
+    if _found and st.button("👁 切り出しを試す", use_container_width=True,
                             key="cr_preview"):
         st.session_state["cr_prev"] = True
 
@@ -184,53 +245,96 @@ def render_crop() -> None:
         import cv2
         _shown = 0
         for _ip, _dets in sorted(_found.items()):
-            if _shown >= 3:
+            if _shown >= int(_prev_n):
                 break
             _img = cv2.imread(_ip)
             if _img is None:
                 continue
-            _crop, _g = make_crop(
-                _img, _dets[0]["bbox_xyxy"], scale=float(_ann_scale),
-                scale_basis=_basis, square=_square, pad_mode=_pad_mode,
-                out_size=int(_out_size), max_upscale=float(_max_up))
-            _tr = target_rect_in_crop(_g, float(_tgt_scale))
-            # target 範囲を枠で示す（学習時に切り直す位置）
-            _vis = _crop.copy()
-            cv2.rectangle(_vis, (int(_tr[0]), int(_tr[1])),
-                          (int(_tr[0] + _tr[2]), int(_tr[1] + _tr[3])),
-                          (78, 207, 244), max(2, int(_out_size / 250)))
-            st.caption(
-                f"`{Path(_ip).name}` — 出力 {_g['output_size'][0]}×{_g['output_size'][1]}px"
-                + ("　⚠ 拡大の上限に当たっています" if _g["max_upscale_applied"] else "")
-            )
-            st.image(cv2.cvtColor(_vis, cv2.COLOR_BGR2RGB),
-                     caption=f"青枠 = target_scale {_tgt_scale} の範囲",
-                     use_column_width=True)
-            _shown += 1
+            for _det in _dets:
+                if _shown >= int(_prev_n):
+                    break
+                _crop, _g = make_crop(
+                    _img, _det["bbox_xyxy"], scale=float(_ann_scale),
+                    scale_basis=_basis, square=_square, pad_mode=_pad_mode,
+                    out_size=int(_out_size), max_upscale=float(_max_up))
+                _tr = target_rect_in_crop(_g, float(_tgt_scale))
+                # target 範囲を枠で示す（学習時に切り直す位置）
+                _vis = _crop.copy()
+                cv2.rectangle(_vis, (int(_tr[0]), int(_tr[1])),
+                              (int(_tr[0] + _tr[2]), int(_tr[1] + _tr[3])),
+                              (244, 207, 78), max(2, int(_out_size / 250)))
+                _shown += 1
+                st.caption(
+                    f"`{Path(_ip).name}` — 切り出し {_g['crop_rect_in_source'][2]}px "
+                    f"→ 出力 {_g['output_size'][0]}×{_g['output_size'][1]}px"
+                    + ("　⚠ 拡大の上限に当たり、指定より小さくなっています"
+                       if _g["max_upscale_applied"] else "")
+                )
+                st.image(cv2.cvtColor(_vis, cv2.COLOR_BGR2RGB),
+                         caption=f"青枠 = target_scale {_tgt_scale} の範囲",
+                         use_column_width=True)
 
     # ── ④ 書き出し ──────────────────────────────────────────────────────
     st.markdown("#### ④ 書き出す")
-    _out_name = st.text_input(
-        "出力先（data/ 配下の名前）",
-        value=f"crops_{datetime.now():%Y%m%d_%H%M}", key="cr_outname")
+    st.session_state.setdefault("cr_outname",
+                                f"crops_{datetime.now():%Y%m%d_%H%M}")
+    _out_name = st.text_input("出力先（data/ 配下の名前）", key="cr_outname")
     _out_dir = DATA_DIR / _out_name.strip() if _out_name.strip() else None
     if _out_dir is None:
         st.warning("出力先の名前を入れてください。")
         return
     st.caption(f"書き出し先: `{_out_dir}`")
 
+    st.session_state.setdefault("cr_bgon", False)
     _bg_on = st.checkbox(
-        f"果実の出ない画像を背景タイルにする（{len(_bg)} 枚）",
-        value=False, key="cr_bgon",
+        f"果実の出ない画像を背景タイルにする（{len(_bg)} 枚）", key="cr_bgon",
         help="空タイルの自動除去はしません。採否は人が決めてください",
         disabled=not _bg)
+    _tile, _overlap = int(_out_size), 0.0
     if _bg_on:
-        _bg1, _bg2 = st.columns(2)
+        _bg1, _bg2, _bg3 = st.columns(3)
         with _bg1:
-            _tile = st.number_input("タイルの一辺", 128, 2048, int(_out_size),
-                                    64, key="cr_tile")
+            _tile = st.number_input("タイルの一辺", 128, 2048, step=64,
+                                    key="cr_tile")
         with _bg2:
-            _overlap = st.slider("重なり", 0.0, 0.5, 0.0, 0.05, key="cr_ovl")
+            _overlap = st.slider("重なり", 0.0, 0.5, step=0.05, key="cr_ovl")
+        with _bg3:
+            _bg_prev_n = st.select_slider(
+                "プレビュー枚数", options=[0, 2, 4, 6, 9], key="cr_bg_prev_n")
+
+        # 何枚に割れるかを先に見せる（作ってから多すぎたと気づくのを避ける）
+        if int(_bg_prev_n) > 0:
+            import cv2
+            _step = max(1, int(_tile * (1.0 - min(0.5, _overlap))))
+            _sample = cv2.imread(_bg[0])
+            if _sample is not None:
+                _sh, _sw = _sample.shape[:2]
+                _rows = len([y for y in range(0, max(1, _sh - 1), _step)
+                             if min(_sh, y + _tile) - y >= _tile // 2])
+                _cols = len([x for x in range(0, max(1, _sw - 1), _step)
+                             if min(_sw, x + _tile) - x >= _tile // 2])
+                st.caption(
+                    f"1 枚あたり {_rows}×{_cols} = {_rows * _cols} タイル"
+                    f"　→ 全体で約 {_rows * _cols * len(_bg)} タイル"
+                )
+                _shown = 0
+                _grid = st.columns(min(3, int(_bg_prev_n)))
+                for _r in range(_rows):
+                    for _c in range(_cols):
+                        if _shown >= int(_bg_prev_n):
+                            break
+                        _y, _x = _r * _step, _c * _step
+                        _t = _sample[_y:min(_sh, _y + _tile),
+                                     _x:min(_sw, _x + _tile)]
+                        if _t.size:
+                            _grid[_shown % len(_grid)].image(
+                                cv2.cvtColor(_t, cv2.COLOR_BGR2RGB),
+                                caption=f"r{_r}_c{_c}", use_column_width=True)
+                            _shown += 1
+                st.caption(
+                    "空に見えるタイルも自動では捨てません"
+                    "（枝葉の判定は誤りやすいため）。採否は人が決めてください。"
+                )
 
     if st.button(f"✂️ {_n_fruit} 件のクロップを作る", type="primary",
                  use_container_width=True, key="cr_run",
