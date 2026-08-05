@@ -7,7 +7,7 @@ import json
 
 import streamlit as st
 
-from core import MODELS_DIR
+from core import MODELS_DIR, _MODEL_OPTS
 
 
 _USER_PRESETS_FILE = MODELS_DIR / ".user_presets.json"

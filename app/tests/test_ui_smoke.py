@@ -40,6 +40,7 @@ TAB_MARKERS = {
 HEAVY_KEYS = {
     "train_start", "infer_run", "ev_run", "gd_run", "sw_run", "ap_run",
     "nt_create", "push_run", "gd_push", "gd_fo", "dep_run_btn", "aa_run",
+    "tune_start", "tune_stop",   # 探索は学習を何度も回す
     "mu_pt_btn", "mu_zip_btn", "cvat_export_run", "dataset_generate_run",
     "xml_parse_run", "cvat_fetch_tasks", "anno_fetch_tasks", "fo_launch",
     "reanno_zip", "exp_images_run", "merge_datasets_run", "pred_clear_all",
@@ -238,3 +239,33 @@ def test_preview_zoom_panel_opens_and_closes():
     [b for b in at.button if b.key == "pv_zoom_close"][0].click().run()
     _assert_all_tabs_rendered(at, "拡大パネルを閉じた")
     assert not _open(at), "パネルが閉じない"
+
+
+# ---------------------------------------------------------------------------
+# プリセット適用（_MODEL_OPTS の import 漏れで全滅していた経路）
+# ---------------------------------------------------------------------------
+def test_プリセットを適用しても落ちず値が入る():
+    """組み込みプリセットはすべて model を持つので、
+    _MODEL_OPTS が引けないと全プリセットが NameError になる。"""
+    from streamlit.testing.v1 import AppTest
+
+    from core import _MODEL_OPTS
+
+    at = AppTest.from_file(MAIN, default_timeout=300).run()
+    sel = [s for s in at.selectbox if s.key == "preset_sel"]
+    assert sel, "プリセット選択が見つからない"
+
+    targets = [o for o in sel[0].options if "速度優先" in o or "精度優先" in o]
+    assert targets, "組み込みプリセットが見つからない"
+
+    for opt in targets:
+        at = AppTest.from_file(MAIN, default_timeout=300).run()
+        s = [x for x in at.selectbox if x.key == "preset_sel"][0]
+        at = s.select(opt).run()
+        btn = [b for b in at.button if b.key == "preset_apply"]
+        assert btn, "適用ボタンが見つからない"
+        at = btn[0].click().run()
+        assert not at.exception, f"{opt}: {at.exception[0].value if at.exception else ''}"
+        # 既定値のままではなく、プリセットの値が入っていること
+        assert at.session_state["tp_model"] in _MODEL_OPTS
+        assert at.session_state["tp_epochs"] > 0

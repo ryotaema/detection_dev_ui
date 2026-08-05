@@ -40,6 +40,22 @@ def _get_train_shared() -> tuple[dict, threading.Lock]:
     )
 
 
+@st.cache_resource
+def _get_tune_shared() -> tuple[dict, threading.Lock]:
+    """ハイパーパラメータ探索の共有状態。学習と同じ作法。
+
+    探索は 1 回のイテレーションが「学習まるごと 1 回」なので、
+    数時間かかることもある。タブを離れても続くようスレッドで回す。
+    """
+    return (
+        {"log": [], "running": False, "error": None,
+         "iteration": 0, "total": 0, "best_fitness": None,
+         "best_params": None, "tune_dir": None, "history": [],
+         "stop_requested": False, "started_at": None},
+        threading.Lock(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 進捗ポーリングの予約
 #

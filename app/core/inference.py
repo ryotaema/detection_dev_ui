@@ -11,6 +11,7 @@ from typing import Optional
 
 import streamlit as st
 
+from .config import PREDICTIONS_DIR
 from .utils import _box_iou
 
 

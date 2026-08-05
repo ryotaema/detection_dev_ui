@@ -92,6 +92,11 @@ def _train_worker(
     """
     import sys
 
+    # 共有状態はここで取り出す。main.py / tab_train.py 側のモジュール変数を
+    # 参照していたが、関数のグローバルは定義元（このファイル）で解決されるため
+    # NameError になっていた（main.py の分割で混入）。
+    _train_state, _train_log_lock = _get_train_shared()
+
     def _log(msg: str) -> None:
         with _train_log_lock:
             _train_state["log"].append(msg)

@@ -22,6 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
+from core import _get_tune_shared, _fmt_dur  # noqa: F401
 from .widgets import _ckw, _nw, _ph, _selw, _sw, empty_state, metric_row, show_error
 from .presets import (_apply_preset, _BUILTIN_PRESETS, _collect_current_params,
                       _load_user_presets, _save_user_presets, _USER_PRESETS_FILE)
@@ -966,6 +967,12 @@ def render_train() -> None:
 
     # --- 既存モデル選択 ---
     # ── 学習履歴の比較（MLflow）────────────────────────────────────────────
+    # ── ⑤ ハイパーパラメータ探索 ─────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### ⑤ ハイパーパラメータを自動で探す（任意）")
+    _render_tuning(data_yaml_path, model_name)
+
+    st.markdown("---")
     with st.expander("📊 過去の学習を比較する（MLflow）", expanded=False):
         st.caption(
             "これまでの学習を並べて、設定の違いが精度にどう効いたかを確認できます。"
@@ -1110,3 +1117,190 @@ def render_train() -> None:
                 "選べる学習済みモデルがありません",
                 "上の「④ 設定を確認して学習を開始する」から学習すると、ここで選べるようになります。",
             )
+
+
+# ===========================================================================
+# ⑤ ハイパーパラメータ探索
+#
+#   1 イテレーション = 学習まるごと 1 回。10 回回せば学習 10 回分かかる。
+#   押してから「8 時間かかる」と気づくのが最悪なので、
+#   **始める前に見積もりを出す**ことを最優先にしている。
+# ===========================================================================
+def _render_tuning(data_yaml_path: str, model_name: str) -> None:
+    _st, _lock = _get_tune_shared()
+    with _lock:
+        _running = _st["running"]
+        _iter, _total = _st["iteration"], _st["total"]
+        _best_fit = _st["best_fitness"]
+        _log = list(_st["log"])
+        _err = _st["error"]
+        _tdir = _st["tune_dir"]
+        _hist = list(_st["history"])
+        _stop_req = _st["stop_requested"]
+        _started = _st["started_at"]
+
+    # ── 実行中 ──────────────────────────────────────────────────────
+    if _running:
+        st.progress(min(_iter / max(_total, 1), 1.0),
+                    text=f"探索中: {_iter} / {_total} 回目"
+                         + (f"　最良 fitness {_best_fit:.4f}" if _best_fit else ""))
+        if _started:
+            _elapsed = time.time() - _started
+            _remain = ((_elapsed / _iter) * (_total - _iter)) if _iter else None
+            st.caption(
+                f"経過 {_fmt_dur(_elapsed)}"
+                + (f"　残り 約 {_fmt_dur(_remain)}" if _remain else "")
+            )
+
+        _tc1, _tc2 = st.columns([1, 3])
+        with _tc1:
+            if st.button("⏹ 探索を停止", key="tune_stop", disabled=_stop_req,
+                         use_container_width=True):
+                request_stop_tuning()
+                st.rerun()
+        with _tc2:
+            if _stop_req:
+                st.warning("⏳ いま回している学習が終わり次第、停止します。")
+            else:
+                st.caption("停止しても、そこまでの結果は残ります。")
+
+        if _hist:
+            import pandas as _pd_t
+            _df = _pd_t.DataFrame(_hist)
+            if "fitness" in _df.columns:
+                st.markdown("**fitness の推移**")
+                st.line_chart(_df.set_index("iteration")["fitness"])
+        st.markdown(f'<div class="log-area">{"<br>".join(_log[-25:])}</div>',
+                    unsafe_allow_html=True)
+        request_rerun_poll()
+        return
+
+    if _err:
+        show_error(_err, prefix="探索に失敗しました: ")
+
+    # ── 設定 ────────────────────────────────────────────────────────
+    st.caption(
+        "設定を少しずつ変えながら学習を繰り返し、精度が良くなる組み合わせを探します。"
+        "**1 回ごとに学習をまるごと回す**ので時間がかかります。"
+    )
+
+    for _k, _v in {"tune_preset": "lr", "tune_iters": 15, "tune_epochs": 20}.items():
+        st.session_state.setdefault(_k, _v)
+
+    _p1, _p2, _p3 = st.columns([3, 1, 1])
+    with _p1:
+        _preset = st.selectbox(
+            "何を探すか", list(SEARCH_PRESETS),
+            format_func=lambda k: SEARCH_PRESETS[k]["label"], key="tune_preset")
+    with _p2:
+        _iters = st.number_input("試す回数", 2, 300, step=1, key="tune_iters")
+    with _p3:
+        _tepochs = st.number_input("1 回のエポック数", 1, 300, step=5,
+                                   key="tune_epochs")
+    st.caption(f"　{SEARCH_PRESETS[_preset]['desc']}")
+
+    _space = SEARCH_PRESETS[_preset]["space"]
+    if _space:
+        st.caption("振る項目: " + "　".join(
+            f"`{k}` {v[0]}〜{v[1]}" for k, v in _space.items()))
+    else:
+        st.caption("振る項目: Ultralytics の既定 26 項目")
+
+    # ── 見積もり（押す前に必ず出す）────────────────────────────────
+    _ds_dir = Path(data_yaml_path).parent if data_yaml_path else None
+    _est = estimate_tuning(int(_iters), int(_tepochs), _ds_dir)
+    if _est["known"]:
+        metric_row([
+            ("1 エポック", _fmt_dur(_est["per_epoch"])),
+            ("1 回の学習", _fmt_dur(_est["per_run"])),
+            ("試す回数", f"{int(_iters)} 回"),
+            ("見込み時間", _fmt_dur(_est["total"])),
+        ])
+        if _est["total"] > 6 * 3600:
+            st.warning(
+                f"⚠ **約 {_fmt_dur(_est['total'])} かかる見込みです。**"
+                "エポック数か回数を減らすことを検討してください。"
+            )
+    else:
+        st.info(f"ℹ {_est['text']}（一度学習すると見積もれるようになります）")
+
+    if int(_tepochs) >= 50:
+        st.caption(
+            "ℹ 探索用のエポック数は本番より少なくするのが定石です。"
+            "傾向がつかめれば十分なので、20 前後から試してみてください。"
+        )
+
+    _tune_name = st.text_input(
+        "結果の保存先（models/ 配下）",
+        value=f"tune_{datetime.now():%Y%m%d_%H%M}", key="tune_name")
+
+    _ready = bool(data_yaml_path) and Path(data_yaml_path).exists() \
+        and bool(_tune_name.strip())
+    if not Path(str(data_yaml_path)).exists():
+        st.warning("先に ② でデータセットを選んでください。")
+
+    if st.button(f"🔬 探索を始める（{int(_iters)} 回）", type="primary",
+                 use_container_width=True, key="tune_start", disabled=not _ready):
+        if start_tuning(data_yaml_path, model_name, int(_iters), int(_tepochs),
+                        _space, _tune_name.strip()):
+            st.rerun()
+        else:
+            st.warning("すでに探索が動いています。")
+
+    # ── 過去の結果 ──────────────────────────────────────────────────
+    _dirs = find_tune_dirs()
+    if not _dirs:
+        return
+    st.markdown("##### 📈 探索の結果")
+    _sel = st.selectbox("見る結果", [str(d.relative_to(MODELS_DIR)) for d in _dirs],
+                        key="tune_result_sel")
+    _dir = MODELS_DIR / _sel
+    _rows = read_tune_results(_dir)
+    if not _rows:
+        st.caption("結果がありません。")
+        return
+
+    _best = best_of(_rows)
+    metric_row([
+        ("試した回数", len(_rows)),
+        ("最良 fitness", f"{_best['fitness']:.4f}" if _best else "—"),
+        ("何回目", _best["iteration"] if _best else "—"),
+    ])
+
+    import pandas as _pd_r
+    _dfr = _pd_r.DataFrame(_rows)
+    if "fitness" in _dfr.columns:
+        st.line_chart(_dfr.set_index("iteration")["fitness"])
+
+    _bp = read_best_params(_dir)
+    if _bp:
+        st.markdown("**最も良かった設定**")
+        st.markdown("　".join(f"`{k}` {v}" for k, v in _bp.items()))
+
+        _r1, _r2 = st.columns(2)
+        with _r1:
+            _pname = st.text_input("プリセット名", value=f"探索 {_sel}",
+                                   key="tune_preset_name")
+        with _r2:
+            st.markdown('<div style="margin-top:28px"></div>',
+                        unsafe_allow_html=True)
+            if st.button("📋 この設定をプリセットに保存", key="tune_save_preset",
+                         use_container_width=True,
+                         disabled=not _pname.strip()):
+                _ups = _load_user_presets()
+                _ups[_pname.strip()] = params_to_preset(
+                    _bp, _collect_current_params())
+                _save_user_presets(_ups)
+                st.success(
+                    f"✅ 「{_pname.strip()}」として保存しました。"
+                    "上の「① 学習プリセット」から呼び出せます。")
+
+        st.caption(
+            "ℹ 探索は学習と同じ val で良し悪しを測っています。"
+            "回数が多いと val に寄った設定が選ばれることがあるので、"
+            "この設定で学習したあと「🔭 Step4」の評価で "
+            "**🔵 テスト用のデータセット**を使って確かめると確実です。"
+        )
+
+    with st.expander(f"全 {len(_rows)} 回の記録"):
+        st.dataframe(_dfr, use_container_width=True, hide_index=True)
