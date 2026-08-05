@@ -448,3 +448,109 @@ def test_切り出しサイズの既定はUIと実機で揃っている():
     text = ui.read_text(encoding="utf-8")
     assert f'"cr_out": {DEFAULT_OUT_SIZE}' in text, \
         "UI の初期値 (cr_out) が DEFAULT_OUT_SIZE と違う"
+
+
+# ---------------------------------------------------------------------------
+# 仕様 §5.3 bbox_model / §8 debug_overlay
+# ---------------------------------------------------------------------------
+def test_モデルの素性に重みのハッシュが入る():
+    """モデルを更新しても `models/<run>/weights/best.pt` というパスは変わらない。
+    パスだけでは「どの時点の重みで作ったクロップか」を区別できない。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import build_model_info
+
+    with tempfile.TemporaryDirectory() as d:
+        w = Path(d) / "myrun" / "weights" / "best.pt"
+        w.parent.mkdir(parents=True)
+        w.write_bytes(b"weights-v1")
+        info = build_model_info(w, infer_input_size=640, conf_threshold=0.3)
+
+        # 仕様が求める項目
+        for k in ("model_id", "weights_sha1", "infer_input_size", "inferred_at"):
+            assert info.get(k), f"{k} が無い"
+        # best.pt ではなく run 名で識別できること
+        assert info["model_id"] == "myrun"
+        assert info["conf_threshold"] == 0.3
+
+        before = info["weights_sha1"]
+        w.write_bytes(b"weights-v2")           # 重みを差し替える
+        assert build_model_info(w)["weights_sha1"] != before, \
+            "重みを変えてもハッシュが変わらない"
+
+
+def test_確認画像は全体に散らして上限内に収まる():
+    """先頭から順に出すと 1 枚目の元画像に偏る。総数から確率を決めること。"""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    import cv2
+    import numpy as np
+
+    from core.crop import generate_crops
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        det = {}
+        for k in range(20):
+            p = src / f"i{k}.png"
+            cv2.imwrite(str(p), np.zeros((480, 640, 3), np.uint8))
+            det[str(p)] = [{"bbox_xyxy": [50 + j * 60, 100, 110 + j * 60, 160],
+                            "confidence": 0.8, "label": "o", "class_id": 0}
+                           for j in range(4)]
+
+        out = Path(d) / "out"
+        shutil.rmtree(out, ignore_errors=True)
+        r = generate_crops(det, out, debug_overlay=True, debug_samples=10, seed=0)
+
+        assert r["crops"] == 80
+        assert 0 < r["debug_images"] <= 10, r["debug_images"]
+        assert (out / "debug").is_dir()
+        # 1 枚目の元画像だけに偏っていないこと
+        names = {p.name.split("_")[0] for p in (out / "debug").glob("*.png")}
+        assert len(names) > 1, f"確認画像が偏っている: {names}"
+
+
+def test_確認画像を出さないときはdebugが作られない():
+    import tempfile
+    from pathlib import Path
+
+    import cv2
+    import numpy as np
+
+    from core.crop import generate_crops
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "a.png"
+        cv2.imwrite(str(p), np.zeros((480, 640, 3), np.uint8))
+        out = Path(d) / "out"
+        r = generate_crops(
+            {str(p): [{"bbox_xyxy": [100, 100, 160, 160], "confidence": 0.9,
+                       "label": "o", "class_id": 0}]}, out)
+        assert r["debug_images"] == 0
+        assert not (out / "debug").exists()
+
+
+def test_探索の作業場はモデル一覧に出ない():
+    """探索は使い捨ての学習を何度も回す。その中間生成物 (.tuning/train-2 など) が
+    本物のモデルに紛れると、選択肢が汚れて取り違えのもとになる。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.models import model_run_dirs, model_weight_files
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        for rel in ("good_run/weights/best.pt", ".tuning/train-2/weights/best.pt",
+                    ".tuning/tune_x/weights/last.pt"):
+            f = root / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"x")
+
+        got = model_weight_files(root)
+        assert len(got) == 1 and got[0].name == "best.pt"
+        assert ".tuning" not in str(got[0])
+        assert [x.name for x in model_run_dirs(root)] == ["good_run"]

@@ -17,6 +17,7 @@ from .provenance import *      # noqa: F401,F403
 from .cvat import *            # noqa: F401,F403
 from .dataset import *         # noqa: F401,F403
 from .models import *          # noqa: F401,F403
+from .models import model_run_dirs, model_weight_files  # noqa: F401
 from .training import *        # noqa: F401,F403
 from .evaluation import *      # noqa: F401,F403
 from .inference import *       # noqa: F401,F403

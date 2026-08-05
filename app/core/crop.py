@@ -207,6 +207,64 @@ def _sha1(path: Path, limit: int = 8 * 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def build_model_info(weights_path, *, infer_input_size: int = 640,
+                     conf_threshold: Optional[float] = None) -> dict:
+    """クロップを作った BBOX モデルの素性をまとめる。
+
+    **どの重みで作ったクロップかが残らないと、モデルを更新したときに
+    「どれが古いモデル由来か」を追えなくなる。**
+    重みは差し替わるので、パスだけでなくハッシュも持つ。
+    """
+    w = Path(weights_path)
+    info = {
+        "model_id": w.parent.parent.name if w.parent.name == "weights" else w.stem,
+        "weights_path": str(w),
+        "weights_sha1": _sha1(w),
+        "infer_input_size": int(infer_input_size),
+        "inferred_at": datetime.now().astimezone().isoformat(),
+    }
+    if conf_threshold is not None:
+        info["conf_threshold"] = float(conf_threshold)
+    try:
+        info["trained_at"] = datetime.fromtimestamp(
+            w.stat().st_mtime).astimezone().isoformat()
+    except OSError:
+        pass
+    return info
+
+
+def draw_debug_overlay(crop, geom: dict, target_bbox_xyxy, others=None):
+    """確認用に、クロップへ枠を重ねた画像を作る。
+
+    切り出しが意図どおりか（対象が中心にいるか、余白が合っているか）は
+    数字を見ても分からない。仕様 §8 のサニティ確認用。
+    """
+    import cv2
+
+    out = crop.copy()
+    x1, y1, x2, y2 = [float(v) for v in target_bbox_xyxy]
+    ax1, ay1 = source_to_crop(x1, y1, geom)
+    ax2, ay2 = source_to_crop(x2, y2, geom)
+    th = max(1, int(round(min(out.shape[:2]) / 250)))
+
+    # 主対象の bbox（緑）
+    cv2.rectangle(out, (int(ax1), int(ay1)), (int(ax2), int(ay2)),
+                  (80, 220, 80), th)
+    # 学習で使う内側の範囲（青）
+    tr = geom.get("target_rect_in_crop")
+    if tr:
+        cv2.rectangle(out, (int(tr[0]), int(tr[1])),
+                      (int(tr[0] + tr[2]), int(tr[1] + tr[3])),
+                      (244, 207, 78), th)
+    # 同じクロップに写り込む他の対象（灰）
+    for o in (others or []):
+        ox1, oy1 = source_to_crop(o[0], o[1], geom)
+        ox2, oy2 = source_to_crop(o[2], o[3], geom)
+        cv2.rectangle(out, (int(ox1), int(oy1)), (int(ox2), int(oy2)),
+                      (150, 150, 150), max(1, th - 1))
+    return out
+
+
 def dedup_detections(dets: list[dict], center_dist: float) -> tuple:
     """bbox 中心が近すぎるものを間引く。0 なら何もしない。
 
@@ -258,6 +316,9 @@ def generate_crops(
     save_rejected: bool = False,
     model_info: Optional[dict] = None,
     name_prefix: str = "obj",
+    debug_overlay: bool = False,
+    debug_samples: int = 20,
+    seed: int = 0,
     on_progress=None,
 ) -> dict:
     """検出した対象ごとに 1 枚のクロップと、サイドカー json を書き出す。
@@ -277,7 +338,7 @@ def generate_crops(
     result = {
         "ok": False, "error": "", "out_dir": str(out),
         "images": 0, "crops": 0, "rejected": 0,
-        "upscale_limited": 0, "skipped": [], "errors": [],
+        "upscale_limited": 0, "debug_images": 0, "skipped": [], "errors": [],
     }
     if out.exists() and any(out.iterdir()):
         result["error"] = f"出力先が既にあります: {out.name}（別の名前にしてください）"
@@ -292,6 +353,18 @@ def generate_crops(
     (out / "meta").mkdir(parents=True, exist_ok=True)
     manifest = out / "manifest.jsonl"
     ext = "jpg" if out_format == "jpg" else "png"
+
+    # 確認画像は数枚だけ。全部出すと枚数ぶん時間と容量がかかる。
+    # 先頭から順に出すと 1 枚目の元画像に偏るので、全体に散らす。
+    # そのために総数を先に見積もって確率を決める。
+    _dbg_n = 0
+    _dbg_pick = None
+    if debug_overlay:
+        import random as _random
+        _rng = _random.Random(seed)
+        _est_total = sum(len(d) for d in detections_by_image.values() if d)
+        _p = 1.0 if _est_total <= debug_samples else debug_samples / _est_total
+        _dbg_pick = lambda: _rng.random() < _p      # noqa: E731
 
     with open(manifest, "w", encoding="utf-8") as mf:
         for n, (img_path, dets) in enumerate(sorted(targets), 1):
@@ -382,6 +455,21 @@ def generate_crops(
                     json.dumps(meta, ensure_ascii=False, indent=2),
                     encoding="utf-8")
 
+                # 確認用の重ね描き（切り出しが意図どおりかは数字では分からない）
+                if debug_overlay and _dbg_pick is not None and _dbg_n < debug_samples:
+                    if _dbg_pick():
+                        try:
+                            dbg = draw_debug_overlay(
+                                crop, meta["crop_geometry"], det["bbox_xyxy"],
+                                others=[o["bbox_xyxy"] for j, o in enumerate(kept)
+                                        if j != i and _overlaps(o["bbox_xyxy"], geom)])
+                            (out / "debug").mkdir(parents=True, exist_ok=True)
+                            cv2.imwrite(str(out / "debug" / Path(img_rel).name),
+                                        dbg, params)
+                            _dbg_n += 1
+                        except Exception as e:
+                            result["errors"].append(f"確認画像: {e}")
+
                 mf.write(json.dumps({
                     "crop_image": img_rel, "meta": meta_rel,
                     "data_type": "object_crop", "annotation_status": "raw",
@@ -393,6 +481,7 @@ def generate_crops(
 
             result["images"] += 1
 
+    result["debug_images"] = _dbg_n
     result["ok"] = result["crops"] > 0 and not result["errors"]
     if result["crops"] == 0:
         result["error"] = "クロップを 1 枚も作れませんでした"

@@ -974,7 +974,7 @@ def render_manage() -> None:
             "学習開始時点の情報を記録しています。"
         )
         _lin_rows = []
-        for _run in sorted([p for p in MODELS_DIR.iterdir() if p.is_dir()],
+        for _run in sorted(model_run_dirs(),
                            key=lambda p: p.stat().st_mtime, reverse=True) \
                 if MODELS_DIR.exists() else []:
             _pv = read_provenance(_run)
@@ -1321,7 +1321,7 @@ def _mosaic_regions_ui(ds, key: str):
             "顔やナンバーを隠したい場合は、その検出モデルを"
             "「📤 学習済みモデルをアップロード」から入れれば同じ手順で使えます。"
         )
-        _models = sorted(MODELS_DIR.rglob("*.pt"))
+        _models = model_weight_files()
         if not _models:
             empty_state("使えるモデルがありません",
                         "「🚀 Step3: モデル学習」で学習するか、"

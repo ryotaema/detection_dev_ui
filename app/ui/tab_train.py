@@ -1071,9 +1071,8 @@ def render_train() -> None:
         # MLflow が使えないときでも学習経過を見られるようにする
         st.markdown("---")
         st.markdown("**results.csv から比較（MLflow なしでも動きます）**")
-        _lc_runs = sorted([p.name for p in MODELS_DIR.iterdir()
-                           if p.is_dir() and (p / "results.csv").exists()]) \
-            if MODELS_DIR.exists() else []
+        _lc_runs = sorted([p.name for p in model_run_dirs()
+                           if (p / "results.csv").exists()])
         if not _lc_runs:
             st.caption("`models/<run>/results.csv` がまだありません。")
         else:

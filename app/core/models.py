@@ -13,6 +13,35 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # モデルファイル (.pt) のメタ情報
 # ---------------------------------------------------------------------------
+
+def model_weight_files(root=None) -> list:
+    """モデル一覧に出してよい重みだけを返す。
+
+    `.tuning/`（探索の作業場）のように、**中間生成物を混ぜないこと**。
+    探索は 1 回ごとに使い捨ての学習を回すので、そのまま列挙すると
+    「train-2」のような名前が本物のモデルに紛れる。
+    ドット始まりのディレクトリは総じて作業用とみなす。
+    """
+    from .config import MODELS_DIR
+
+    base = Path(root or MODELS_DIR)
+    if not base.exists():
+        return []
+    return sorted(p for p in base.rglob("*.pt")
+                  if not any(part.startswith(".") for part in
+                             p.relative_to(base).parts[:-1]))
+
+
+def model_run_dirs(root=None) -> list:
+    """モデルの run ディレクトリ（作業用は除く）"""
+    from .config import MODELS_DIR
+
+    base = Path(root or MODELS_DIR)
+    if not base.exists():
+        return []
+    return sorted(d for d in base.iterdir()
+                  if d.is_dir() and not d.name.startswith("."))
+
 def model_meta_path(model_path: Path) -> Path:
     """`weights/best.pt` に対する `weights/.best.pt.meta.json` を返す（rglob('*.pt') に載らない名前）"""
     return model_path.parent / f".{model_path.name}.meta.json"

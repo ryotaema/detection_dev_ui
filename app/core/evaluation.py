@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import IMG_EXTS, MODELS_DIR
+from .models import model_weight_files
 from .dataset import _yolo_txt_to_xyxy, resolve_train_data_arg
 from .state import _get_eval_shared
 from .utils import _iou, slugify_function_name
@@ -434,7 +435,7 @@ def collect_model_evals(dataset_key: Optional[str] = None) -> list[dict]:
     rows = []
     if not MODELS_DIR.exists():
         return rows
-    for mp in MODELS_DIR.rglob("*.pt"):
+    for mp in model_weight_files():
         for key, r in read_model_evals(mp).items():
             if dataset_key and key != dataset_key:
                 continue

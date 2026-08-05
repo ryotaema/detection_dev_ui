@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import streamlit as st
 
@@ -18,19 +19,26 @@ from core import _find_image_dirs  # noqa: F401
 from .widgets import empty_state, metric_row, open_folder, show_error
 
 
-def _model_meta(model_path: Path) -> dict:
-    """メタに残すモデルの素性。あとでどの重みで作ったか辿れるようにする。"""
-    info = {"model_id": model_path.stem, "weights_path": str(model_path)}
-    prov = read_provenance(model_path.parent.parent
-                           if model_path.parent.name == "weights"
-                           else model_path.parent)
+def _model_meta(model_path: Path, conf: Optional[float] = None) -> dict:
+    """メタに残すモデルの素性。あとでどの重みで作ったか辿れるようにする。
+
+    **重みのハッシュを必ず入れる。** モデルを更新しても
+    `models/<run>/weights/best.pt` というパスは変わらないので、
+    パスだけでは「どの時点の重みで作ったクロップか」を区別できない。
+    """
+    _run = (model_path.parent.parent if model_path.parent.name == "weights"
+            else model_path.parent)
+    prov = read_provenance(_run)
+    _imgsz = (prov or {}).get("params", {}).get("imgsz") or 640
+
+    info = build_model_info(model_path, infer_input_size=int(_imgsz),
+                            conf_threshold=conf)
     if prov:
-        info["imgsz"] = (prov.get("params") or {}).get("imgsz")
-        info["trained_at"] = prov.get("trained_at")
+        info["trained_at"] = prov.get("trained_at") or info.get("trained_at")
+        info["dataset"] = (prov.get("dataset") or {}).get("name")
     meta = read_model_meta(model_path)
     if meta and meta.get("ok"):
         info["classes"] = meta.get("names") or []
-    info["inferred_at"] = datetime.now().astimezone().isoformat()
     return info
 
 
@@ -48,7 +56,7 @@ def render_crop() -> None:
     )
 
     _imgs_dirs = _find_image_dirs(DATA_DIR)
-    _models = sorted(MODELS_DIR.rglob("*.pt"))
+    _models = model_weight_files()
     if not _imgs_dirs:
         empty_state("元画像が見つかりません",
                     "「📤 Step2: データ取込」でデータを入れてください。")
@@ -337,6 +345,12 @@ def render_crop() -> None:
                     "（「何も無い」の判定は対象によって変わるため）。採否は人が決めてください。"
                 )
 
+    _dbg = st.checkbox(
+        "🔎 確認用の重ね描きも出す（debug/）", key="cr_debug",
+        help="切り出しが意図どおりか（対象が中心にいるか、余白は適切か）を"
+             "目で確かめるための画像を数枚だけ出します。"
+             "緑=検出した対象　青=学習で使う内側の範囲　灰=写り込んだ他の対象")
+
     if st.button(f"✂️ {_n_obj} 件のクロップを作る", type="primary",
                  use_container_width=True, key="cr_run",
                  disabled=not _found):
@@ -352,7 +366,8 @@ def render_crop() -> None:
             scale_basis=_basis, square=_square, pad_mode=_pad_mode,
             out_size=int(_out_size), max_upscale=float(_max_up),
             dedup_center_dist=float(_dedup), out_format=_fmt,
-            model_info=_model_meta(_model), on_progress=_prog)
+            model_info=_model_meta(_model, conf=float(_conf)),
+            debug_overlay=bool(_dbg), seed=0, on_progress=_prog)
         _bar.empty()
 
         if _res["crops"]:

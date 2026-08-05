@@ -133,7 +133,7 @@ def render_annotate() -> None:
         st.markdown("---")
         st.markdown("**➕ 新しいモデルをデプロイ**")
 
-        _dep_models = sorted(MODELS_DIR.rglob("*.pt"), key=lambda p: p.stat().st_mtime,
+        _dep_models = sorted(model_weight_files(), key=lambda p: p.stat().st_mtime,
                              reverse=True) if MODELS_DIR.exists() else []
         if not _dep_models:
             st.info("models/ に .pt がありません。Step3で学習するか、データ管理タブから取り込んでください。")
