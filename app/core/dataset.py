@@ -1133,3 +1133,124 @@ def merge_datasets(
         "task_type": task_type,
     })
     return result
+
+
+# ---------------------------------------------------------------------------
+# 重複画像の検出
+#
+#   同じ画像が train と val の両方に入ると、評価が実力より高く出る。
+#   「val で 0.95 出たのに実機で使えない」の典型的な原因。
+#   統合の前後で気づけるようにする。
+#
+#   照合は中身のハッシュで行う。ファイル名は違っても中身が同じなら重複。
+# ---------------------------------------------------------------------------
+def _image_hash(path: Path, chunk: int = 1 << 20) -> Optional[str]:
+    """画像の中身のハッシュ。大きい画像でも一定のコストで済むよう分割して読む。"""
+    import hashlib
+
+    h = hashlib.md5()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(chunk)
+                if not b:
+                    break
+                h.update(b)
+    except Exception:
+        return None
+    return h.hexdigest()
+
+
+def _split_of(path: Path, dataset_dir: Path) -> str:
+    """その画像がどのスプリットに属するか（判別できなければ空）"""
+    try:
+        parts = Path(path).resolve().relative_to(Path(dataset_dir).resolve()).parts
+    except ValueError:
+        return ""
+    for sp in ("train", "val", "valid", "test"):
+        if sp in parts:
+            return "val" if sp == "valid" else sp
+    return ""
+
+
+def hash_dataset_images(dataset_dir: Path, on_progress=None) -> dict:
+    """データセット内の画像を中身のハッシュで索引する。
+
+    戻り値: {ハッシュ: [{"path": str, "split": str}, ...]}
+    """
+    ds = Path(dataset_dir)
+    imgs = [p for p in sorted(ds.rglob("*"))
+            if p.is_file() and p.suffix.lower() in IMG_EXTS
+            and "_backup_original" not in p.parts]
+
+    index: dict[str, list[dict]] = {}
+    for i, p in enumerate(imgs, 1):
+        if on_progress:
+            on_progress(i, len(imgs))
+        h = _image_hash(p)
+        if h:
+            index.setdefault(h, []).append(
+                {"path": str(p), "split": _split_of(p, ds)})
+    return index
+
+
+def find_duplicate_images(dataset_dirs, on_progress=None) -> dict:
+    """複数のデータセットにまたがる重複画像を探す。
+
+    1 つだけ渡せばそのデータセット内の重複を、
+    複数渡せばデータセット間の重複も見つける。
+
+    戻り値:
+      groups          … 同じ画像の組（2 枚以上あるものだけ）
+      cross_split     … train と val など、別のスプリットに散っている組
+      cross_dataset   … 別のデータセットにまたがっている組
+      n_images        … 調べた枚数
+      n_unique        … 中身の異なる枚数
+    """
+    dirs = [Path(d) for d in dataset_dirs]
+    merged: dict[str, list[dict]] = {}
+    total = 0
+
+    for d in dirs:
+        idx = hash_dataset_images(d, on_progress=on_progress)
+        for h, items in idx.items():
+            for it in items:
+                merged.setdefault(h, []).append({**it, "dataset": d.name})
+                total += 1
+
+    groups = []
+    for h, items in merged.items():
+        if len(items) < 2:
+            continue
+        splits = {i["split"] for i in items if i["split"]}
+        datasets = {i["dataset"] for i in items}
+        groups.append({
+            "hash": h, "items": items, "count": len(items),
+            "splits": sorted(splits), "datasets": sorted(datasets),
+            "cross_split": len(splits) > 1,
+            "cross_dataset": len(datasets) > 1,
+        })
+
+    groups.sort(key=lambda g: (-g["count"], g["hash"]))
+    return {
+        "groups": groups,
+        "cross_split": [g for g in groups if g["cross_split"]],
+        "cross_dataset": [g for g in groups if g["cross_dataset"]],
+        "n_images": total,
+        "n_unique": len(merged),
+        "n_duplicates": total - len(merged),
+    }
+
+
+def duplicate_warning(result: dict) -> str:
+    """検出結果を 1 行の警告文にする（何も無ければ空文字）"""
+    if not result["groups"]:
+        return ""
+    parts = [f"同じ画像が {result['n_duplicates']} 枚あります"]
+    if result["cross_split"]:
+        parts.append(
+            f"うち {len(result['cross_split'])} 組は **train と val にまたがっています**"
+            "（評価が実力より高く出ます）")
+    if result["cross_dataset"]:
+        parts.append(f"{len(result['cross_dataset'])} 組は別のデータセットと重複しています")
+    return "。".join(parts) + "。"

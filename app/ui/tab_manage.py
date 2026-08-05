@@ -97,11 +97,29 @@ def render_manage() -> None:
                         )
                 with col2:
                     st.text(f"{file_count} files  /  {size_mb:.1f} MB")
+                # このデータで学習したモデルを来歴から逆引きする。
+                # 「消してよいか」を判断する材料になり、新しい記録も要らない
+                _usage = dataset_usage_summary(ds)
                 with col3:
-                    if st.button("🗑", key=f"del_ds_{ds.name}", help=f"{ds.name} を削除"):
+                    if st.button("🗑", key=f"del_ds_{ds.name}",
+                                 help=(f"{ds.name} を削除"
+                                       if _usage["safe_to_delete"]
+                                       else f"⚠ {_usage['n_models']} 個のモデルが"
+                                            "このデータで学習されています")):
+                        if _usage["in_production"] and not st.session_state.get(
+                                f"del_ok_{ds.name}"):
+                            st.session_state[f"del_ok_{ds.name}"] = True
+                            st.rerun()
                         shutil.rmtree(ds)
                         st.success(f"{ds.name} を削除しました")
                         st.rerun()
+
+                if st.session_state.get(f"del_ok_{ds.name}"):
+                    st.error(
+                        "🚨 **実用中のモデルがこのデータで学習されています。**"
+                        "削除すると、そのモデルを再現・再学習できなくなります。"
+                        "もう一度 🗑 を押すと削除します。"
+                    )
                 _ds_prov = read_provenance(ds)
                 if _ds_prov:
                     _src_label = {
@@ -119,6 +137,27 @@ def render_manage() -> None:
                     )
                 else:
                     st.caption("📚 来歴の記録なし（この機能を入れる前に作られたデータセットです）")
+
+                # このデータで学習したモデル（使用実績）
+                if _usage["n_models"]:
+                    _u = _usage["models"]
+                    st.caption(
+                        f"🤖 このデータで学習したモデル: {len(_u)} 個"
+                        + ("　🚀 実用中を含みます" if _usage["in_production"] else "")
+                    )
+                    if st.checkbox("　└ 内訳を見る", key=f"usage_{ds.name}"):
+                        for _m in _u:
+                            _cnt = " / ".join(f"{k} {v}枚"
+                                              for k, v in _m["counts_at_train"].items())
+                            st.caption(
+                                f"　　・`{_m['run']}` {status_label(_m['status'], 'model')}"
+                                + (f"　{_m['trained_at']}" if _m["trained_at"] else "")
+                                + (f"　学習時: {_cnt}" if _cnt else "")
+                                + (f"　（統合データセット `{_m['via']}` 経由）"
+                                   if _m["via"] else "")
+                            )
+                else:
+                    st.caption("🤖 このデータで学習したモデルはありません")
 
                 # 統合で作られたものは、何を混ぜたのかを出す
                 for _s in ((_ds_prov or {}).get("sources") or []):
@@ -323,6 +362,17 @@ def render_manage() -> None:
                                  use_container_width=True):
                         with st.spinner(f"{ds.name} を検査中…"):
                             st.session_state[f"qc_{ds.name}"] = check_dataset_quality(ds)
+                            st.session_state[f"qcdup_{ds.name}"] = \
+                                find_duplicate_images([ds])
+
+                    _qd = st.session_state.get(f"qcdup_{ds.name}")
+                    if _qd is not None:
+                        _qmsg = duplicate_warning(_qd)
+                        if not _qmsg:
+                            st.caption("✅ 重複している画像はありません")
+                        else:
+                            (st.error if _qd["cross_split"] else st.warning)(
+                                ("🚨 " if _qd["cross_split"] else "⚠ ") + _qmsg)
 
                     _qc = st.session_state.get(f"qc_{ds.name}")
                     if _qc:
@@ -965,6 +1015,50 @@ def render_manage() -> None:
                     f"　クラス: {', '.join(dataset_class_names(_d)) or '—'}"
                 )
             st.markdown("\n".join(_mg_info))
+
+        # 同じ画像が train と val に散ると評価が実力より高く出る。
+        # 混ぜる前に気づけるようにする
+        if len(merge_targets) >= 2:
+            if st.button("🔍 重複画像を調べる", key="merge_dupcheck",
+                         use_container_width=True):
+                _dbar = st.progress(0.0, text="照合しています…")
+
+                def _dprog(done, total):
+                    if total:
+                        _dbar.progress(min(done / total, 1.0),
+                                       text=f"{done} / {total} 枚")
+
+                st.session_state["merge_dup"] = find_duplicate_images(
+                    [DATA_DIR / n for n in merge_targets], on_progress=_dprog)
+                _dbar.empty()
+
+            _dup = st.session_state.get("merge_dup")
+            if _dup is not None:
+                _msg = duplicate_warning(_dup)
+                if not _msg:
+                    st.success("✅ 重複している画像はありませんでした。")
+                else:
+                    (st.error if _dup["cross_split"] else st.warning)(
+                        ("🚨 " if _dup["cross_split"] else "⚠ ") + _msg)
+                    with st.expander(
+                            f"重複の内訳（{len(_dup['groups'])} 組）", expanded=False):
+                        for _g in _dup["groups"][:30]:
+                            st.caption(
+                                f"・{_g['count']} 枚が同一"
+                                + (f"　split: {', '.join(_g['splits'])}"
+                                   if _g["splits"] else "")
+                                + f"　データセット: {', '.join(_g['datasets'])}"
+                            )
+                            for _it in _g["items"][:4]:
+                                st.caption(f"　　- `{Path(_it['path']).name}`"
+                                           f"（{_it['dataset']} / {_it['split'] or '—'}）")
+                        if len(_dup["groups"]) > 30:
+                            st.caption(f"…他 {len(_dup['groups']) - 30} 組")
+                    if _dup["cross_split"]:
+                        st.caption(
+                            "対処: 片方のデータセットだけを使うか、統合後に"
+                            "「✂️ 分け直す」で train/val を割り当て直してください。"
+                        )
 
         _mg1, _mg2 = st.columns([3, 2])
         with _mg1:

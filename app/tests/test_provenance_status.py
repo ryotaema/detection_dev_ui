@@ -246,3 +246,96 @@ def test_使われているタグを集める(tmp_path):
         update_provenance(d, tags=tags)
         dirs.append(d)
     assert collect_tags(dirs) == sorted(["屋内", "屋外", "ペッパー"])
+
+
+# ---------------------------------------------------------------------------
+# 使用実績の逆引き（このデータセットは消してよいか）
+# ---------------------------------------------------------------------------
+from core.provenance import (  # noqa: E402
+    dataset_usage_summary, models_using_dataset,
+)
+
+
+def _make_run(models_root, name, dataset_name, sources=None, status=None):
+    run = models_root / name
+    run.mkdir(parents=True, exist_ok=True)
+    prov = {
+        "trained_at": "2026-08-04 10:00:00",
+        "run": name,
+        "base_model": "/x/yolo11s.pt",
+        "dataset": {
+            "name": dataset_name,
+            "counts_at_train": {"train": 100, "val": 20},
+            "provenance": {"sources": sources} if sources else {},
+        },
+    }
+    if status:
+        prov["status"] = status
+    write_provenance(run, prov)
+    return run
+
+
+def test_そのデータで学習したモデルを見つける(tmp_path):
+    models = tmp_path / "models"
+    _make_run(models, "run_a", "ds1")
+    _make_run(models, "run_b", "ds2")
+
+    got = models_using_dataset(tmp_path / "data" / "ds1", models_root=models)
+    assert [m["run"] for m in got] == ["run_a"]
+    assert got[0]["counts_at_train"] == {"train": 100, "val": 20}
+    assert got[0]["via"] == ""
+
+
+def test_統合の親としても拾う(tmp_path):
+    """統合データセットで学習した場合、親も「使われている」"""
+    models = tmp_path / "models"
+    _make_run(models, "run_m", "merged", sources=[{"name": "ds1"}, {"name": "ds2"}])
+
+    got = models_using_dataset(tmp_path / "data" / "ds1", models_root=models)
+    assert len(got) == 1
+    assert got[0]["via"] == "merged", "統合経由だと分かること"
+
+
+def test_使われていなければ空(tmp_path):
+    models = tmp_path / "models"
+    _make_run(models, "run_a", "ds1")
+    assert models_using_dataset(tmp_path / "data" / "ない", models_root=models) == []
+
+
+def test_来歴の無いrunは無視する(tmp_path):
+    models = tmp_path / "models"
+    (models / "no_prov").mkdir(parents=True)
+    assert models_using_dataset(tmp_path / "data" / "ds1", models_root=models) == []
+
+
+def test_モデルの状態も一緒に返す(tmp_path):
+    models = tmp_path / "models"
+    run = _make_run(models, "run_a", "ds1")
+    update_provenance(run, kind="model", status="production")
+    got = models_using_dataset(tmp_path / "data" / "ds1", models_root=models)
+    assert got[0]["status"] == "production"
+
+
+def test_削除してよいかの要約(tmp_path, monkeypatch):
+    """使われていなければ消してよい、実用モデルが使っていれば消せない"""
+    import core.config as cfg
+    import core.provenance as pv
+
+    models = tmp_path / "models"
+    models.mkdir()
+    monkeypatch.setattr(cfg, "MODELS_DIR", models)
+    monkeypatch.setattr(pv, "MODELS_DIR", models, raising=False)
+
+    ds = tmp_path / "data" / "ds1"
+    ds.mkdir(parents=True)
+
+    s = dataset_usage_summary(ds)
+    assert s["n_models"] == 0 and s["safe_to_delete"] is True
+
+    run = _make_run(models, "run_a", "ds1")
+    update_provenance(run, kind="model", status="production")
+
+    s2 = dataset_usage_summary(ds)
+    assert s2["n_models"] == 1, "使われているのに 0 件と出ている"
+    assert s2["safe_to_delete"] is False
+    assert [m["run"] for m in s2["in_production"]] == ["run_a"]

@@ -305,3 +305,60 @@ def record_model_provenance(
     }
     write_provenance(Path(run_dir), prov)
     return prov
+
+
+def models_using_dataset(dataset_dir: Path, models_root: Optional[Path] = None) -> list[dict]:
+    """そのデータセットで学習されたモデルを探す（来歴の逆引き）。
+
+    「このデータセットは消してよいか」「どのモデルがこのデータに依存しているか」
+    を判断するためのもの。既に記録してある来歴を辿るだけで、新しい記録は要らない。
+
+    統合データセットの親として使われている場合も拾う。
+    """
+    from .config import MODELS_DIR
+
+    root = Path(models_root or MODELS_DIR)
+    name = Path(dataset_dir).name
+    if not root.exists():
+        return []
+
+    out: list[dict] = []
+    for run in sorted((p for p in root.iterdir() if p.is_dir()),
+                      key=lambda p: p.stat().st_mtime, reverse=True):
+        prov = read_provenance(run)
+        if not prov:
+            continue
+        ds = prov.get("dataset") or {}
+        direct = ds.get("name") == name
+
+        # 統合データセットで学習した場合、親として混ざっていることがある
+        via = ""
+        if not direct:
+            for src in ((ds.get("provenance") or {}).get("sources") or []):
+                if src.get("name") == name:
+                    via = ds.get("name") or ""
+                    break
+        if not direct and not via:
+            continue
+
+        out.append({
+            "run": run.name,
+            "dir": str(run),
+            "trained_at": prov.get("trained_at", ""),
+            "base_model": Path(prov.get("base_model", "")).name,
+            "counts_at_train": ds.get("counts_at_train") or {},
+            "status": read_status(run, "model"),
+            "via": via,                # 統合データセット経由ならその名前
+        })
+    return out
+
+
+def dataset_usage_summary(dataset_dir: Path) -> dict:
+    """データセットの使われ方をまとめる（削除の判断材料）"""
+    models = models_using_dataset(dataset_dir)
+    return {
+        "models": models,
+        "n_models": len(models),
+        "in_production": [m for m in models if m["status"] == "production"],
+        "safe_to_delete": not models,
+    }
