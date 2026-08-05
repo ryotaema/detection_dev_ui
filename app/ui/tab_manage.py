@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import empty_state, show_error
+from .widgets import empty_state, metric_row, show_error
 from .features import feature_enabled
 
 
@@ -32,6 +32,15 @@ def render_manage() -> None:
     import shutil
 
     st.markdown('<div class="section-head"><h3>📁 データ管理</h3></div>', unsafe_allow_html=True)
+
+    # 片付けは「普段は畳んでよい」ものだが、放置すると効いてくるので
+    # 候補があるときは件数を見出しに出して気づけるようにする
+    _cl = cleanup_summary()
+    with st.expander(
+            f"🧹 片付け（{_cl['n_items']} 件 / {_fmt_size(_cl['total_size'])}）"
+            if _cl["n_items"] else "🧹 片付け（なし）",
+            expanded=False):
+        _render_cleanup()
 
     # --- data/ データセット一覧 ---
     st.markdown("#### 学習データセット (`data/`)")
@@ -1469,3 +1478,165 @@ def _render_mosaic(ds) -> None:
         if _res["images"]:
             st.session_state.pop(f"{_key}_found", None)
             st.session_state.pop(f"{_key}_prev", None)
+
+
+# ===========================================================================
+# 🧹 片付け
+#
+#   使えないもの・作り直せるものをまとめて見せる。
+#   数だけ増えて中身が伴わないと「次に何をすべきか」が読み取れなくなるため。
+#   **自動では何も消さない。** 候補と材料を出して、判断は人に委ねる。
+# ===========================================================================
+def _fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def _render_cleanup() -> None:
+    st.caption(
+        "使えないもの・作り直せるものを集めました。"
+        "**自動では何も消しません。** 中身を確かめてから消してください。"
+    )
+    _sum = cleanup_summary()
+    if _sum["n_items"] == 0:
+        st.success("✅ 片付けるものはありません。")
+        return
+
+    metric_row([
+        ("未完成のデータセット", f"{len(_sum['incomplete_datasets'])} 件"),
+        ("重みの無い学習", f"{len(_sum['runs_without_weights'])} 件"),
+        ("一時ファイル", f"{len(_sum['temp_files'])} 件"),
+        ("合計サイズ", _fmt_size(_sum["total_size"])),
+    ])
+
+    # ── ① 未完成のデータセット ──────────────────────────────────────────
+    _inc = _sum["incomplete_datasets"]
+    if _inc:
+        st.markdown(f"##### ⚠ 学習に使えないデータセット（{len(_inc)} 件）")
+        st.caption(
+            "`data.yaml` が無いものです。一覧には並びますが学習には使えません。"
+        )
+        _pick_ds = []
+        for _d in _inc:
+            _u = _d["usage"]
+            with st.container(border=True):
+                _c1, _c2 = st.columns([5, 1])
+                with _c1:
+                    st.markdown(f"**`{_d['name']}`**　{status_label(_d['status'])}")
+                    st.caption(
+                        f"{_d['reason']}　画像 {_d['images']} 枚 / "
+                        f"{_fmt_size(_d['size'])}")
+                    st.caption(f"💡 {_d['hint']}")
+                    if _u["n_models"]:
+                        st.warning(
+                            f"⚠ このデータで学習したモデルが {_u['n_models']} 個あります"
+                            + ("（**実用中を含む**）" if _u["in_production"] else "")
+                            + "。消すと再学習できなくなります。"
+                        )
+                with _c2:
+                    if st.checkbox("消す", key=f"cl_ds_{_d['name']}"):
+                        _pick_ds.append(_d["dir"])
+
+        if _pick_ds and st.button(
+                f"🗑 データセット {len(_pick_ds)} 件を削除",
+                key="cl_del_ds", type="primary", use_container_width=True):
+            _r = delete_paths(_pick_ds, guard_root=DATA_DIR)
+            if _r["ok"]:
+                st.success(f"✅ {len(_r['deleted'])} 件を削除しました")
+                st.rerun()
+            else:
+                show_error(_r["error"], prefix="❌ ")
+
+    # ── ② 重みの無い学習 run ────────────────────────────────────────────
+    _runs = _sum["runs_without_weights"]
+    if _runs:
+        st.markdown(f"##### ⚠ 重みの残っていない学習（{len(_runs)} 件）")
+        st.caption(
+            "学習が途中で終わり `.pt` が残らなかったものです。"
+            "モデル一覧には出ませんが `models/` を占めています。"
+            "プロットや設定（args.yaml）は残っているので、"
+            "条件を確認したいものは残しておけます。"
+        )
+        import pandas as _pd_cl
+        st.dataframe(
+            _pd_cl.DataFrame([{
+                "run": r["name"],
+                "学習日時": r["trained_at"] or "—",
+                "使ったデータ": r["dataset"] or "—",
+                "進んだエポック": r["epochs"] if r["epochs"] is not None else "—",
+                "ファイル数": r["files"],
+                "サイズ": _fmt_size(r["size"]),
+            } for r in _runs]),
+            use_container_width=True, hide_index=True)
+
+        if st.checkbox(f"上の {len(_runs)} 件をすべて削除する", key="cl_runs_ok"):
+            if st.button(f"🗑 {len(_runs)} 件を削除", key="cl_del_runs",
+                         type="primary", use_container_width=True):
+                _r = delete_paths([r["dir"] for r in _runs], guard_root=MODELS_DIR)
+                if _r["ok"]:
+                    st.success(f"✅ {len(_r['deleted'])} 件を削除しました")
+                    st.rerun()
+                else:
+                    show_error(_r["error"], prefix="❌ ")
+
+    # ── ③ 一時ファイル ─────────────────────────────────────────────────
+    _temps = _sum["temp_files"]
+    if _temps:
+        st.markdown(f"##### 📦 作り直せる一時ファイル（{_fmt_size(sum(t['size'] for t in _temps))}）")
+        st.caption("消しても必要になればまた作られます。")
+        _pick_t = []
+        for _t in _temps:
+            if st.checkbox(
+                    f"`{_t['name']}` — {_t['desc']}"
+                    f"（{_t['files']} ファイル / {_fmt_size(_t['size'])}）",
+                    key=f"cl_t_{_t['name']}"):
+                _pick_t.append(_t["dir"])
+        if _pick_t and st.button(
+                f"🗑 {len(_pick_t)} 件をクリア", key="cl_del_t",
+                type="primary", use_container_width=True):
+            _r = delete_paths(_pick_t, guard_root=PREDICTIONS_DIR)
+            if _r["ok"]:
+                st.success(f"✅ {len(_r['deleted'])} 件をクリアしました")
+                st.rerun()
+            else:
+                show_error(_r["error"], prefix="❌ ")
+
+    # ── ④ 重複しているデータセット ─────────────────────────────────────
+    st.markdown("##### 🔁 重複しているデータセット")
+    st.caption(
+        "同じ画像を持つデータセットを探します。"
+        "統合すると train と val に同じ画像が入り、評価が実力より高く出ます。"
+    )
+    _ds_all = [d for d in sorted(DATA_DIR.iterdir())
+               if d.is_dir() and (d / "data.yaml").exists()] if DATA_DIR.exists() else []
+    if len(_ds_all) < 2:
+        st.caption("比べられるデータセットが 2 件未満です。")
+    elif st.button("🔍 重複を調べる", key="cl_dup", use_container_width=True):
+        _b = st.progress(0.0, text="照合しています…")
+        _r = find_duplicate_images(
+            _ds_all,
+            on_progress=lambda d, t: _b.progress(min(d / t, 1.0),
+                                                 text=f"{d} / {t} 枚") if t else None)
+        _b.empty()
+        st.session_state["cl_dup_result"] = _r
+
+    _dupr = st.session_state.get("cl_dup_result")
+    if _dupr:
+        _msg = duplicate_warning(_dupr)
+        if not _msg:
+            st.success("✅ 重複している画像はありません。")
+        else:
+            st.warning("⚠ " + _msg)
+            _pairs: dict = {}
+            for _g in _dupr["cross_dataset"]:
+                _key = " ∩ ".join(_g["datasets"])
+                _pairs[_key] = _pairs.get(_key, 0) + 1
+            for _k, _v in sorted(_pairs.items(), key=lambda x: -x[1]):
+                st.caption(f"・{_k} … {_v} 枚が同一")
+            st.caption(
+                "対処: 片方を `⚪ 保管` にするか削除してください。"
+                "削除前に、そのデータで学習したモデルが無いか確認できます。"
+            )
