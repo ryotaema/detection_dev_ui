@@ -1126,6 +1126,29 @@ def render_train() -> None:
 #   押してから「8 時間かかる」と気づくのが最悪なので、
 #   **始める前に見積もりを出す**ことを最優先にしている。
 # ===========================================================================
+_BASELINE_HYP = baseline_hyp()
+
+
+def _tune_table(df):
+    """各回の成績を、狭い幅でも読める形に絞る。
+
+    ndjson には振った項目が全部入るので、そのまま出すと横に長すぎる。
+    fitness と、実際に動いている項目だけを残す。
+    """
+    _cols = ["iteration", "fitness"]
+    for _c in df.columns:
+        if _c in _cols or str(_c).startswith("_"):
+            continue
+        # 全部同じ値の列（＝振っていない項目）は落とす
+        if df[_c].nunique(dropna=True) > 1:
+            _cols.append(_c)
+    _out = df[[c for c in _cols if c in df.columns]].copy()
+    if "fitness" in _out.columns and len(_out):
+        _best_i = _out["fitness"].idxmax()
+        _out.insert(0, "", ["🏆" if i == _best_i else "" for i in _out.index])
+    return _out.round(5).iloc[::-1]      # 新しい回を上に
+
+
 def _render_tuning(data_yaml_path: str, model_name: str) -> None:
     _st, _lock = _get_tune_shared()
     with _lock:
@@ -1138,19 +1161,40 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
         _hist = list(_st["history"])
         _stop_req = _st["stop_requested"]
         _started = _st["started_at"]
+        _cur_params = _st["current_params"]
+        _cur_ep, _cur_tot = _st["current_epoch"], _st["current_total_epochs"]
+        _cur_metrics = _st["current_metrics"]
+        _iter_started = _st["iter_started_at"]
 
     # ── 実行中 ──────────────────────────────────────────────────────
     if _running:
-        st.progress(min(_iter / max(_total, 1), 1.0),
-                    text=f"探索中: {_iter} / {_total} 回目"
-                         + (f"　最良 fitness {_best_fit:.4f}" if _best_fit else ""))
+        # 全体の進み具合（イテレーション単位）
+        _done = _iter
+        st.progress(min(_done / max(_total, 1), 1.0),
+                    text=f"探索中: {min(_done + 1, _total)} / {_total} 回目"
+                         + (f"　　これまでの最良 fitness {_best_fit:.4f}"
+                            if _best_fit else ""))
         if _started:
             _elapsed = time.time() - _started
-            _remain = ((_elapsed / _iter) * (_total - _iter)) if _iter else None
+            _remain = ((_elapsed / _done) * (_total - _done)) if _done else None
             st.caption(
                 f"経過 {_fmt_dur(_elapsed)}"
-                + (f"　残り 約 {_fmt_dur(_remain)}" if _remain else "")
+                + (f"　残り 約 {_fmt_dur(_remain)}" if _remain
+                   else "　残り時間は 1 回目が終わると出ます")
             )
+
+        # いま回している学習の中身（1 回が数分〜数十分かかるので、
+        # ここが動いていないと「固まった」ように見える）
+        if _cur_ep and _cur_tot:
+            _ep_txt = f"いまの学習: {_cur_ep} / {_cur_tot} エポック"
+            if _iter_started:
+                _ep_txt += f"（この回の経過 {_fmt_dur(time.time() - _iter_started)}）"
+            st.progress(min(_cur_ep / max(_cur_tot, 1), 1.0), text=_ep_txt)
+        elif _iter_started:
+            st.caption("いまの学習: 準備中…（データの読み込み・ウォームアップ）")
+
+        if _cur_metrics:
+            metric_row([(k, f"{v:.4f}") for k, v in list(_cur_metrics.items())[:4]])
 
         _tc1, _tc2 = st.columns([1, 3])
         with _tc1:
@@ -1164,14 +1208,36 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
             else:
                 st.caption("停止しても、そこまでの結果は残ります。")
 
+        # いま試している設定
+        if _cur_params:
+            with st.expander(f"🎛 いま試している設定（{min(_done + 1, _total)} 回目）",
+                             expanded=True):
+                _pc = st.columns(min(4, len(_cur_params)))
+                for _i, (_k, _v) in enumerate(_cur_params.items()):
+                    with _pc[_i % len(_pc)]:
+                        _base = _BASELINE_HYP.get(_k)
+                        _delta = None
+                        if isinstance(_base, (int, float)) and _base:
+                            _delta = f"{(_v - _base) / abs(_base) * 100:+.0f}% (既定 {_base:g})"
+                        st.metric(_k, f"{_v:.4g}", _delta, delta_color="off")
+
+        # 各回の成績
         if _hist:
             import pandas as _pd_t
             _df = _pd_t.DataFrame(_hist)
             if "fitness" in _df.columns:
-                st.markdown("**fitness の推移**")
-                st.line_chart(_df.set_index("iteration")["fitness"])
-        st.markdown(f'<div class="log-area">{"<br>".join(_log[-25:])}</div>',
-                    unsafe_allow_html=True)
+                _c1, _c2 = st.columns([2, 3])
+                with _c1:
+                    st.markdown("**fitness の推移**")
+                    st.line_chart(_df.set_index("iteration")["fitness"])
+                with _c2:
+                    st.markdown("**これまでの成績**")
+                    st.dataframe(_tune_table(_df), use_container_width=True,
+                                 hide_index=True, height=240)
+
+        with st.expander("📜 ログ", expanded=not bool(_cur_params)):
+            st.markdown(f'<div class="log-area">{"<br>".join(_log[-40:])}</div>',
+                        unsafe_allow_html=True)
         request_rerun_poll()
         return
 
@@ -1199,12 +1265,70 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
                                    key="tune_epochs")
     st.caption(f"　{SEARCH_PRESETS[_preset]['desc']}")
 
-    _space = SEARCH_PRESETS[_preset]["space"]
-    if _space:
-        st.caption("振る項目: " + "　".join(
-            f"`{k}` {v[0]}〜{v[1]}" for k, v in _space.items()))
+    # ── 探し方（回数によって向き不向きが変わる）──────────────────────
+    _rec = recommend_method(int(_iters))
+    _opts = list(SEARCH_METHODS)
+    st.session_state.setdefault("tune_method", _rec)
+    _m1, _m2 = st.columns([3, 2])
+    with _m1:
+        _method = st.selectbox(
+            "探し方", _opts,
+            format_func=lambda k: SEARCH_METHODS[k]["label"]
+            + ("（推奨）" if k == _rec else ""),
+            key="tune_method")
+    with _m2:
+        if _method == METHOD_TPE and not optuna_available():
+            st.warning("Optuna が未導入です。遺伝的アルゴリズムで動きます。")
+        elif _method != _rec:
+            st.info(f"{int(_iters)} 回なら "
+                    f"**{SEARCH_METHODS[_rec]['label']}** のほうが有利です。")
+    st.caption(f"　{SEARCH_METHODS[_method]['desc']}"
+               f"　⚠ {SEARCH_METHODS[_method]['caveat']}")
+
+    # ── 振る項目と、固定する項目 ────────────────────────────────────
+    _all_space = default_space()
+    if SEARCH_PRESETS[_preset].get("custom"):
+        _picked = st.multiselect(
+            "振る項目を選ぶ", list(_all_space), key="tune_custom_keys",
+            default=list(SEARCH_PRESETS["lr"]["space"]),
+            help="1 回ごとに学習をまるごと回すので、増やすほど回数が要ります。"
+                 "3〜5 個に絞るのが目安です。")
+        _full_space = {k: _all_space[k] for k in _picked}
+        if not _picked:
+            st.warning("項目を 1 つ以上選んでください。")
+        elif len(_picked) > MANY_PARAMS_WARN:
+            st.warning(
+                f"⚠ {len(_picked)} 項目は多めです。"
+                f"同じ回数なら項目が少ないほど良い設定に届きます"
+                f"（実測: 4 項目 10 回 > 26 項目 80 回）。")
     else:
-        st.caption("振る項目: Ultralytics の既定 26 項目")
+        _full_space = SEARCH_PRESETS[_preset]["space"] or _all_space
+    _pin_keys = st.multiselect(
+        "🔒 固定する項目（選ぶと探索から外し、指定した値で学習します）",
+        list(_full_space), key="tune_pins",
+        help="いつも同じ値で回したいものを選びます。"
+             "探索の対象が減るぶん、残りを試す回数が増えます。")
+
+    _pinned: dict = {}
+    if _pin_keys:
+        _pcols = st.columns(min(4, len(_pin_keys)))
+        for _i, _k in enumerate(_pin_keys):
+            _lo, _hi = float(_full_space[_k][0]), float(_full_space[_k][1])
+            _dv = float(_BASELINE_HYP.get(_k, (_lo + _hi) / 2))
+            _dv = min(max(_dv, _lo), _hi)
+            with _pcols[_i % len(_pcols)]:
+                _pinned[_k] = st.number_input(
+                    _k, min_value=_lo, max_value=_hi, value=_dv,
+                    step=max((_hi - _lo) / 100, 1e-5), format="%.5f",
+                    key=f"tune_pin_{_k}")
+
+    _space = {k: v for k, v in _full_space.items() if k not in _pinned}
+    if not _space:
+        st.error("すべて固定されています。1 つ以上は探索の対象に残してください。")
+    else:
+        st.caption(f"振る項目（{len(_space)}）: " + "　".join(
+            f"`{k}` {v[0]}〜{v[1]}" for k, v in list(_space.items())[:10])
+            + ("　…" if len(_space) > 10 else ""))
 
     # ── 見積もり（押す前に必ず出す）────────────────────────────────
     _ds_dir = Path(data_yaml_path).parent if data_yaml_path else None
@@ -1230,6 +1354,21 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
             "傾向がつかめれば十分なので、20 前後から試してみてください。"
         )
 
+    # ── 本番の学習と条件を揃える ────────────────────────────────────
+    #   揃えないと、探索で見つけた値が本番で再現しない
+    #   （AdamW と SGD では適切な lr0 が一桁ずれる）
+    _cond = {
+        "optimizer": st.session_state.get("tp_optimizer", "auto"),
+        "imgsz": int(st.session_state.get("tp_imgsz", 640)),
+        "batch": int(st.session_state.get("tp_batch", 8)),
+        "workers": int(st.session_state.get("tp_workers", 8)),
+    }
+    st.caption(
+        "探索は ③ 詳細設定と同じ条件で回します（"
+        + "　".join(f"`{k}` {v}" for k, v in _cond.items())
+        + "）。条件が違うと、見つけた値が本番で再現しません。"
+    )
+
     _tune_name = st.text_input(
         "結果の保存先（models/ 配下）",
         value=f"tune_{datetime.now():%Y%m%d_%H%M}", key="tune_name")
@@ -1240,9 +1379,11 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
         st.warning("先に ② でデータセットを選んでください。")
 
     if st.button(f"🔬 探索を始める（{int(_iters)} 回）", type="primary",
-                 use_container_width=True, key="tune_start", disabled=not _ready):
+                 use_container_width=True, key="tune_start",
+                 disabled=not _ready or not _space):
         if start_tuning(data_yaml_path, model_name, int(_iters), int(_tepochs),
-                        _space, _tune_name.strip()):
+                        _space, _tune_name.strip(), extra=_cond,
+                        method=_method, pinned=_pinned):
             st.rerun()
         else:
             st.warning("すでに探索が動いています。")

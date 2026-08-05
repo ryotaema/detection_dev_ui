@@ -429,3 +429,22 @@ def test_ファイル名の接頭辞を変えられる(src, tmp_path):
                    name_prefix="fruit")
     assert (out / "images" / "IMG_0_fruit00.png").exists()
     assert (out / "meta" / "IMG_0_fruit00.json").exists()
+
+
+def test_切り出しサイズの既定はUIと実機で揃っている():
+    """UI が 512 で作った学習データに対し、実機が 1024 で切り出すと
+    対象の写る大きさが変わって精度が落ちる。既定値は 1 か所に持つこと。"""
+    import inspect
+
+    from core.crop import DEFAULT_OUT_SIZE, generate_crops, make_crop
+
+    for fn in (make_crop, generate_crops):
+        assert inspect.signature(fn).parameters["out_size"].default == DEFAULT_OUT_SIZE, \
+            f"{fn.__name__} の既定が DEFAULT_OUT_SIZE とずれている"
+
+    # UI の初期値とも一致していること
+    src = (inspect.getsourcefile(make_crop) or "")
+    ui = __import__("pathlib").Path(src).parent.parent / "ui" / "tab_crop.py"
+    text = ui.read_text(encoding="utf-8")
+    assert f'"cr_out": {DEFAULT_OUT_SIZE}' in text, \
+        "UI の初期値 (cr_out) が DEFAULT_OUT_SIZE と違う"

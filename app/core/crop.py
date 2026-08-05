@@ -37,6 +37,19 @@ PAD_MODES = {
 }
 
 
+# 切り出しの既定サイズ。
+#
+#   **UI と実機で必ず同じ値にすること。** 学習データを 512 で作ったのに
+#   実機が 1024 で切り出すと、対象の写る大きさが変わって精度が落ちる。
+#   以前は UI が 512、この関数の既定が 1024 で食い違っていた。
+#
+#   512 なのは実測から。ある実データ（640×480・bbox 長辺の中央値 92px）では
+#   1024 にすると ×5.6 の引き伸ばしになり、情報量が増えないまま
+#   ファイルだけ大きくなる。データセットによって対象の写る大きさが違うので、
+#   UI は検出結果から実際の倍率を出す（この既定値を当てにさせない）。
+DEFAULT_OUT_SIZE = 512
+
+
 # ---------------------------------------------------------------------------
 # コア（実機と共通。ここだけは絶対に分岐させない）
 # ---------------------------------------------------------------------------
@@ -48,7 +61,7 @@ def make_crop(
     square: bool = True,
     pad_mode: str = "reflect",
     pad_value: int = 0,
-    out_size: int = 1024,
+    out_size: int = DEFAULT_OUT_SIZE,
     max_upscale: float = 1.5,
 ):
     """bbox の周りを切り出して out_size にそろえる。
@@ -237,7 +250,7 @@ def generate_crops(
     square: bool = True,
     pad_mode: str = "reflect",
     pad_value: int = 0,
-    out_size: int = 1024,
+    out_size: int = DEFAULT_OUT_SIZE,
     max_upscale: float = 1.5,
     dedup_center_dist: float = 0.0,
     out_format: str = "png",

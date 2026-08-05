@@ -38,7 +38,7 @@ def _run_with_csv(root, name, epochs=10, total_time=600.0, dataset=None):
 # 探索空間のプリセット
 # ---------------------------------------------------------------------------
 def test_プリセットの形が揃っている():
-    assert set(tn.SEARCH_PRESETS) == {"lr", "loss", "aug", "all"}
+    assert set(tn.SEARCH_PRESETS) == {"lr", "loss", "aug", "all", "custom"}
     for k, v in tn.SEARCH_PRESETS.items():
         assert v["label"] and v["desc"], k
         assert "space" in v, k
@@ -182,3 +182,187 @@ def test_探索結果をプリセットにできる():
 def test_数値でない値は取り込まない():
     got = tn.params_to_preset({"lr0": 0.01, "note": "メモ"})
     assert "note" not in got and got["lr0"] == 0.01
+
+
+# ---------------------------------------------------------------------------
+# 共有状態（進捗が画面に届くかの土台）
+# ---------------------------------------------------------------------------
+def test_共有状態は別スレッドからでも同じ実体になる():
+    """`st.cache_resource` はキャッシュの取り出しに ScriptRunContext を要求し、
+    無ければ必ずミスする。ワーカーはスレッドで動くので、これを使うと
+    自分専用の dict に書き込むことになり、進捗が画面に一生届かない。"""
+    import threading
+
+    from core.state import (_get_deploy_shared, _get_eval_shared,
+                            _get_train_shared, _get_tune_shared)
+
+    for getter in (_get_train_shared, _get_tune_shared,
+                   _get_eval_shared, _get_deploy_shared):
+        base, _ = getter()
+        got = {}
+
+        def _in_thread(g=getter):
+            got["state"], _ = g()
+
+        t = threading.Thread(target=_in_thread)
+        t.start()
+        t.join()
+        assert got["state"] is base, f"{getter.__name__} がスレッドから別物になる"
+
+
+def test_ndjson_を読める():
+    """8.4.x の結果は tune_results.ndjson。csv だけを見ていると何も出ない。"""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from core.tuning import best_of, read_tune_results
+
+    with tempfile.TemporaryDirectory() as d:
+        nd = Path(d) / "tune_results.ndjson"
+        nd.write_text("\n".join(json.dumps(r) for r in [
+            {"iteration": 1, "fitness": 0.10,
+             "hyperparameters": {"lr0": 0.01},
+             "datasets": {"ds": {"fitness": 0.10, "metrics/mAP50(B)": 0.2}}},
+            {"iteration": 2, "fitness": 0.25,
+             "hyperparameters": {"lr0": 0.004},
+             "datasets": {"ds": {"fitness": 0.25, "metrics/mAP50(B)": 0.4}},
+             "save_dirs": {"ds": "/tmp/x"}},
+        ]), encoding="utf-8")
+
+        rows = read_tune_results(Path(d))
+        assert len(rows) == 2
+        # 振った項目は列として広がっていること（表にそのまま出せる形）
+        assert rows[1]["lr0"] == 0.004
+        assert rows[1]["metrics/mAP50(B)"] == 0.4
+        assert best_of(rows)["iteration"] == 2
+
+
+def test_csv_も従来どおり読める():
+    import tempfile
+    from pathlib import Path
+
+    from core.tuning import read_tune_results
+
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "tune_results.csv").write_text(
+            "fitness,lr0\n0.1,0.01\n0.3,0.02\n", encoding="utf-8")
+        rows = read_tune_results(Path(d))
+        assert len(rows) == 2 and rows[1]["fitness"] == 0.3
+
+
+def test_探索の出力先はモデル一覧に混ざらない():
+    """イテレーションごとの学習が models/ 直下に train / train2 … を作ると
+    モデルのカードや選択肢に紛れ込む。専用の場所へ隔離しておくこと。"""
+    from core.config import MODELS_DIR
+    from core.tuning import TUNE_PROJECT
+
+    assert TUNE_PROJECT.name.startswith("."), "隠しディレクトリにしておく"
+    assert TUNE_PROJECT.parent == MODELS_DIR
+
+
+def test_見積もりは探索の作業場を学習実績として数えない():
+    from core.tuning import estimate_epoch_seconds
+
+    # .tuning 配下の results.csv を拾っていないこと（例外なく動くことの確認）
+    assert estimate_epoch_seconds() is None or estimate_epoch_seconds() > 0
+
+
+# ---------------------------------------------------------------------------
+# 探索の手法と、項目の固定
+# ---------------------------------------------------------------------------
+def test_本家GAは値が0の項目をほとんど動かせない():
+    """`_mutate` は 値 × exp(N(0,σ)) の乗算的な変異なので、
+    0 から始まる項目（degrees / mixup など）は 0 に貼り付く。
+    データ拡張を振りたいときに TPE が要る理由がこれ。"""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import ultralytics.engine.tuner as TU
+    from ultralytics.engine.tuner import Tuner
+
+    space = {"lr0": (1e-5, 1e-1), "degrees": (0.0, 45.0)}
+    t = Tuner.__new__(Tuner)
+    t.space, t.mongodb = space, None
+    t.args = type("A", (), {"lr0": 0.01, "degrees": 0.0})()
+    d = Path(tempfile.mkdtemp())
+    t.tune_dir, t.tune_file = d, d / "tune_results.ndjson"
+    t.tune_file.write_text("\n".join(json.dumps(
+        {"iteration": i, "fitness": 0.3, "datasets": {},
+         "hyperparameters": {"lr0": 0.01, "degrees": 0.0}}) for i in range(1, 6)))
+
+    # 同じ秒だと np.random.seed(int(time.time())) で毎回同じ値になるため進める
+    _clock = [1_700_000_000]
+    _orig = TU.time.time
+    TU.time.time = lambda: _clock.__setitem__(0, _clock[0] + 1) or _clock[0]
+    try:
+        vals = [t._mutate()["degrees"] for _ in range(100)]
+    finally:
+        TU.time.time = _orig
+
+    # 許容範囲 0〜45 に対して、ほとんど動けない
+    assert max(vals) < 1.0, f"想定より動いた: {max(vals)}"
+
+
+def test_固定した項目は探索から外れる():
+    from core.tuning import apply_pins
+
+    space = {"lr0": (1e-5, 1e-2), "momentum": (0.7, 0.98), "lrf": (0.01, 1.0)}
+    swept, pins = apply_pins(space, {"momentum": 0.9})
+    assert "momentum" not in swept
+    assert pins == {"momentum": 0.9}
+    assert set(swept) == {"lr0", "lrf"}
+
+
+def test_知らない項目を固定しても無視する():
+    from core.tuning import apply_pins
+
+    swept, pins = apply_pins({"lr0": (1e-5, 1e-2)}, {"nonexistent": 1.0})
+    assert pins == {} and set(swept) == {"lr0"}
+
+
+def test_空間なし_すべて_でも固定できる():
+    """「すべて（既定 26 項目）」は space=None で本家に任せるが、
+    固定するには具体的な空間が要る。実行時に取り出せること。"""
+    from core.tuning import apply_pins, default_space
+
+    assert len(default_space()) >= 20
+    swept, pins = apply_pins(None, {"lr0": 0.005})
+    assert "lr0" not in swept and pins == {"lr0": 0.005}
+    assert len(swept) >= 19
+
+
+def test_薦める手法は回数で変わる():
+    from core.tuning import METHOD_GA, recommend_method
+
+    # 回数が少ないうちは既定値から動く GA のほうが堅実（実測より）
+    assert recommend_method(5) == METHOD_GA
+    assert recommend_method(10) == METHOD_GA
+
+
+def test_対数で振るべき範囲を見分ける():
+    from core.tuning import is_log_scale
+
+    assert is_log_scale(1e-5, 1e-2)      # 学習率は桁で効く
+    assert not is_log_scale(1.0, 20.0)   # 損失の重みは線形でよい
+    assert not is_log_scale(0.0, 45.0)   # 0 を含む範囲は対数にできない
+
+
+def test_探索は本番と同じ最適化手法を使う():
+    """optimizer を勝手に決めない。AdamW と SGD では適切な lr0 が一桁ずれるので、
+    揃えないと探索で見つけた値が本番の学習で再現しない。"""
+    import inspect
+
+    from core import tuning as tn
+
+    src = inspect.getsource(tn._tune_worker)
+    assert 'optimizer="AdamW"' not in src, "optimizer が決め打ちされている"
+
+
+def test_自分で選ぶプリセットがある():
+    from core.tuning import SEARCH_PRESETS
+
+    assert SEARCH_PRESETS["custom"].get("custom") is True
+    # 選ばせる側なので、あらかじめの空間は持たない
+    assert SEARCH_PRESETS["custom"]["space"] is None

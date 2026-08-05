@@ -269,3 +269,89 @@ def test_プリセットを適用しても落ちず値が入る():
         # 既定値のままではなく、プリセットの値が入っていること
         assert at.session_state["tp_model"] in _MODEL_OPTS
         assert at.session_state["tp_epochs"] > 0
+
+
+# ---------------------------------------------------------------------------
+# 探索中の表示
+#
+#   1 イテレーション = 学習 1 回なので、切れ目でしか更新しないと
+#   数分〜数十分なにも動かず「固まった」ように見える。
+#   いまどこで・何を試していて・どうだったかが出ていること。
+# ---------------------------------------------------------------------------
+def test_探索中は現在の設定と進捗が出る():
+    import time
+
+    from streamlit.testing.v1 import AppTest
+
+    import ui.tab_train as tt
+    from core.state import _get_tune_shared
+
+    state, lock = _get_tune_shared()
+    with lock:
+        _backup = dict(state)
+        state.update({
+            "running": True, "total": 15, "iteration": 3, "best_fitness": 0.4821,
+            "started_at": time.time() - 900, "iter_started_at": time.time() - 120,
+            "current_params": {"lr0": 0.00432, "momentum": 0.8912},
+            "current_epoch": 7, "current_total_epochs": 20,
+            "current_metrics": {"mAP50(B)": 0.41},
+            "history": [{"iteration": i, "fitness": 0.3 + i * 0.05,
+                         "lr0": 0.01 - i * 0.001} for i in (1, 2, 3)],
+            "log": ["[10:01:00] 1 / 15 回目を開始"],
+            "tune_dir": "/workspace/models/.tuning/demo",
+        })
+
+    # 実行中は再描画を予約するので、検査では止めておく（無限に走るため）
+    _orig_poll = tt.request_rerun_poll
+    tt.request_rerun_poll = lambda *a, **k: None
+    try:
+        at = AppTest.from_file(MAIN, default_timeout=300).run()
+        assert not at.exception, at.exception[0].value if at.exception else ""
+
+        _prog = [str(getattr(p, "text", "") or "") for p in at.get("progress")]
+        assert any("4 / 15 回目" in t for t in _prog), f"全体の進捗が出ていない: {_prog}"
+        assert any("7 / 20 エポック" in t for t in _prog), \
+            f"いま回している学習の進捗が出ていない: {_prog}"
+
+        _exp = [str(getattr(e, "label", "") or "") for e in at.get("expander")]
+        assert any("いま試している設定" in t for t in _exp), _exp
+
+        # 既定からどれだけ振れているかが添えてあること
+        _m = {m.label: m for m in at.metric}
+        assert "lr0" in _m and _m["lr0"].delta, "既定との差が出ていない"
+
+        assert any(b.key == "tune_stop" for b in at.button), "停止ボタンがない"
+    finally:
+        tt.request_rerun_poll = _orig_poll
+        with lock:
+            state.clear()
+            state.update(_backup)
+
+
+def test_探索の項目を自分で選べる():
+    """既定のプリセットは 4 項目だが、26 項目から自由に選べること。
+    1 回が学習まるごと 1 回なので、増やしすぎには警告を出す。"""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(MAIN, default_timeout=300).run()
+    sel = [s for s in at.selectbox if s.key == "tune_preset"][0]
+    at = sel.select("custom").run()
+    assert not at.exception, at.exception[0].value if at.exception else ""
+
+    ms = [m for m in at.multiselect if m.key == "tune_custom_keys"]
+    assert ms, "項目を選ぶ欄がない"
+    assert len(ms[0].options) >= 20, f"選べる項目が少なすぎる: {len(ms[0].options)}"
+
+    at = ms[0].select("box").select("cls").select("degrees").run()
+    assert not at.exception, at.exception[0].value if at.exception else ""
+    assert any("項目は多めです" in str(w.value) for w in at.warning), \
+        "項目を増やしすぎたときの注意が出ていない"
+
+
+def test_探索は学習タブの条件を引き継ぐ():
+    """探索だけ imgsz や optimizer が違うと、見つけた値が本番で再現しない。"""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(MAIN, default_timeout=300).run()
+    _cap = " ".join(str(c.value) for c in at.caption)
+    assert "③ 詳細設定と同じ条件" in _cap, "条件を引き継ぐ旨の表示がない"
