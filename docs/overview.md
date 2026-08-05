@@ -148,7 +148,27 @@ git clone https://github.com/ryotaema/anno_dataset_tools
 | | 何が起きるか | 準備 |
 |---|---|---|
 | 常に | ホスト側のパスを表示する。コピーすればどこでも使える | 不要 |
-| 任意 | ボタン 1 つでファイルアプリが開く | ホストで `./tools/open_folder_watcher.sh` を動かしておく |
+| 任意 | ボタン 1 つでファイルアプリが開く | 下記の常駐を動かしておく |
+
+いまどちらの状態かは、**サイドバー**に出ます（`📂 フォルダを開く: ✅ 使えます`）。
+
+#### ワンクリックで開けるようにする
+
+ホスト側で一度だけ実行すれば、以降はログインのたびに自動で動きます。
+
+```bash
+./tools/install_folder_watcher.sh            # 登録して開始
+./tools/install_folder_watcher.sh --status   # 状態を見る
+./tools/install_folder_watcher.sh --uninstall # 解除
+```
+
+systemd のユーザーサービスとして登録します（`systemd --user` が無い環境では、
+デスクトップの「自動起動するアプリ」に `tools/open_folder_watcher.sh` を
+登録してください）。その場だけ動かすなら直接実行するだけでも構いません。
+
+```bash
+./tools/open_folder_watcher.sh
+```
 
 ホスト側のパスは `docker inspect` でマウント表を引いて求めます
 （決め打ちにすると、別の場所に clone した人の環境で外れるため）。

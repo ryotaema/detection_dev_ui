@@ -481,3 +481,14 @@ deploy:
 | [MLflow](https://github.com/mlflow/mlflow)                     | Apache 2.0 |
 | [FiftyOne](https://github.com/voxel51/fiftyone)                | Apache 2.0 |
 | [Streamlit](https://github.com/streamlit/streamlit)            | Apache 2.0 |
+
+## 任意: UI からフォルダを開けるようにする
+
+データセットやモデルのカードから、OS のファイルアプリでフォルダを開けます。
+UI はコンテナ内で動いていて画面を持たないため、ホスト側に小さな常駐を置きます。
+
+```bash
+./tools/install_folder_watcher.sh     # 一度だけ。以降はログイン時に自動で動く
+```
+
+動かさなくても、UI はホスト側のパスを表示するのでコピーして開けます。

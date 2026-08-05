@@ -28,6 +28,7 @@ from core import (  # アンダースコア始まりは * で入らないので�
 # 使う人だけ出すオプション機能
 from ui.features import (OPTIONAL_FEATURES, enabled_tab_features,
                          feature_enabled, render_feature_settings)
+from ui.widgets import folder_watcher_status
 # 配色の定義は ui/theme.py に集約している
 from ui.theme import (AUTO_THEME_NAME, DEFAULT_THEME_NAME, PRESET_THEMES,
                       THEME_EDIT_FIELDS, active_theme, build_auto_theme_vars,
@@ -526,6 +527,8 @@ with st.sidebar:
             f"predictions/ {PREDICTIONS_DIR}",
             language="text",
         )
+
+    folder_watcher_status()
 
     with st.expander("🧰 使う機能", expanded=False):
         render_feature_settings()

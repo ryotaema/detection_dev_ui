@@ -170,3 +170,33 @@ def open_folder(container_path, key: str, label: str = "📂 フォルダを開�
         if st.session_state.get(f"openfd_show_{key}"):
             st.caption("端末から開く場合:")
             st.code(open_command(container_path), language="bash")
+
+
+def folder_watcher_status() -> None:
+    """「📂 開く」がワンクリックで効く状態か、サイドバー等に出す。
+
+    動いていないときに何をすればよいかまで示す
+    （動かなくてもパス表示は使えるので、必須ではないことも伝える）。
+    """
+    from core.hostpath import host_path_available, watcher_running
+
+    if not host_path_available():
+        st.caption("📂 ホスト側のパスを特定できません（フォルダを開く機能は使えません）")
+        return
+
+    if watcher_running():
+        st.caption("📂 フォルダを開く: ✅ 使えます")
+        return
+
+    st.caption("📂 フォルダを開く: パス表示のみ")
+    with st.popover("ワンクリックで開くには"):
+        st.markdown(
+            "この UI はコンテナの中で動いていて画面を持たないため、"
+            "自分でファイルアプリを起動できません。\n\n"
+            "ホスト側で次を一度だけ実行すると、"
+            "以降はログインのたびに自動で動きます。"
+        )
+        st.code("./tools/install_folder_watcher.sh", language="bash")
+        st.caption("その場だけ動かす場合:")
+        st.code("./tools/open_folder_watcher.sh", language="bash")
+        st.caption("解除: `./tools/install_folder_watcher.sh --uninstall`")
