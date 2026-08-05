@@ -647,6 +647,153 @@ def apply_selection(bg_dir, adopt: list) -> dict:
             "unused": sum(1 for s in cur if s not in want)}
 
 
+# ---------------------------------------------------------------------------
+# コンタクトシート（仕様 §7.3）
+#
+#   タイルを縮小して 1 枚に並べる。画面を延々スクロールするより、
+#   一覧で見て「これとこれを外す」と番号を控えるほうが速い場面がある
+#   （紙に出す・別の端末で見る・複数人で確認する、など）。
+#
+#   **番号の対応表を必ず残す。** 番号だけ控えてもらっても、
+#   作り直したときに順番が変われば意味がなくなる。
+# ---------------------------------------------------------------------------
+CONTACT_DIR = "contact_sheet"
+
+
+def build_contact_sheet(bg_dir, names: Optional[list] = None, *,
+                        cols: int = 6, rows: int = 8, thumb: int = 160,
+                        out_format: str = "png") -> dict:
+    """背景タイルを縮小して並べたシートを作る。
+
+    採用中のものは緑、未採用は灰の枠で囲む（いまの状態が見えるように）。
+    左上に通し番号を焼き込み、対応表を `index.json` に残す。
+    """
+    import cv2
+    import numpy as np
+
+    out = Path(bg_dir)
+    result = {"ok": False, "error": "", "sheets": [], "index": {}, "total": 0}
+
+    state = read_tile_selection(out)
+    if not state:
+        result["error"] = "背景タイルがありません"
+        return result
+
+    targets = sorted(names) if names is not None else sorted(state)
+    targets = [t for t in targets if t in state]
+    if not targets:
+        result["error"] = "並べる対象がありません"
+        return result
+
+    sheet_dir = out / CONTACT_DIR
+    if sheet_dir.exists():
+        for f in sheet_dir.glob("*"):
+            f.unlink(missing_ok=True)
+    sheet_dir.mkdir(parents=True, exist_ok=True)
+
+    label_h = max(16, thumb // 8)
+    cell_w, cell_h = thumb, thumb + label_h
+    per = max(1, cols * rows)
+    ext = "jpg" if out_format == "jpg" else "png"
+    index: dict = {}
+
+    for page in range((len(targets) - 1) // per + 1):
+        chunk = targets[page * per: (page + 1) * per]
+        n_rows = (len(chunk) - 1) // cols + 1
+        sheet = np.full((n_rows * cell_h, cols * cell_w, 3), 32, np.uint8)
+
+        for i, stem in enumerate(chunk):
+            num = page * per + i + 1
+            index[str(num)] = stem
+            adopted = state.get(stem, False)
+
+            base = out if adopted else out / "_unused"
+            hit = list((base / "images").glob(f"{stem}.*"))
+            r, c = divmod(i, cols)
+            x0, y0 = c * cell_w, r * cell_h
+
+            if hit:
+                im = cv2.imread(str(hit[0]))
+                if im is not None:
+                    im = cv2.resize(im, (thumb, thumb),
+                                    interpolation=cv2.INTER_AREA)
+                    sheet[y0:y0 + thumb, x0:x0 + thumb] = im
+
+            # 採用中かどうかが一目で分かるように枠を付ける
+            color = (80, 220, 80) if adopted else (110, 110, 110)
+            cv2.rectangle(sheet, (x0 + 1, y0 + 1), (x0 + thumb - 2, y0 + thumb - 2),
+                          color, 2 if adopted else 1)
+            cv2.putText(sheet, str(num), (x0 + 6, y0 + thumb + label_h - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, thumb / 400, color,
+                        max(1, thumb // 120), cv2.LINE_AA)
+
+        f = sheet_dir / f"sheet_{page + 1:02d}.{ext}"
+        cv2.imwrite(str(f), sheet)
+        result["sheets"].append(str(f))
+
+    (sheet_dir / "index.json").write_text(
+        json.dumps({"created_at": datetime.now().astimezone().isoformat(),
+                    "cols": cols, "rows": rows, "thumb": thumb,
+                    "index": index}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+
+    result["index"] = index
+    result["total"] = len(targets)
+    result["ok"] = True
+    return result
+
+
+def read_contact_index(bg_dir) -> dict:
+    """コンタクトシートの番号 → タイル名"""
+    f = Path(bg_dir) / CONTACT_DIR / "index.json"
+    if not f.exists():
+        return {}
+    try:
+        return dict((json.loads(f.read_text(encoding="utf-8")).get("index") or {}))
+    except Exception:
+        return {}
+
+
+def parse_selection_list(text: str, index: Optional[dict] = None) -> tuple:
+    """控えてきた採否リストを解釈する。
+
+    番号（`3`）・範囲（`5-12`）・ファイル名のどれでも受ける。
+    区切りは空白・改行・カンマ・読点。人が手で書くものなので緩く読む。
+    戻り値: (タイル名のリスト, 解釈できなかった語のリスト)
+    """
+    import re
+
+    index = index or {}
+    names, bad = [], []
+    for tok in re.split(r"[\s,、]+", (text or "").strip()):
+        if not tok:
+            continue
+        m = re.fullmatch(r"(\d+)\s*[-–~〜]\s*(\d+)", tok)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            for n in range(min(a, b), max(a, b) + 1):
+                if str(n) in index:
+                    names.append(index[str(n)])
+                else:
+                    bad.append(str(n))
+            continue
+        if tok.isdigit():
+            (names.append(index[tok]) if tok in index else bad.append(tok))
+            continue
+        stem = Path(tok).stem
+        if not index or stem in index.values():
+            names.append(stem)
+        else:
+            bad.append(tok)
+    # 重複は落とす（同じ番号を 2 回書いても困らないように）
+    seen, uniq = set(), []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    return uniq, bad
+
+
 def generate_background_tiles(
     image_paths,
     out_dir: Path,

@@ -802,3 +802,86 @@ def test_選別は元の状態が無いと何もしない():
     with tempfile.TemporaryDirectory() as d:
         r = apply_selection(Path(d), ["a", "b"])
         assert not r["ok"] and "manifest" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# 仕様 §7.3 コンタクトシート
+# ---------------------------------------------------------------------------
+def test_コンタクトシートは番号の対応表を残す():
+    """番号だけ控えてもらっても、作り直して順番が変われば意味がなくなる。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import (build_contact_sheet, generate_background_tiles,
+                           read_contact_index)
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        out = Path(d) / "bg"
+        generate_background_tiles(_make_bg(src, n=3), out, tile_size=256,
+                                  background_ratio=0.0, bg_sampling="all")
+
+        r = build_contact_sheet(out, cols=4, rows=3, thumb=96)
+        assert r["ok"] and r["sheets"]
+        # 収まらないぶんは複数枚に分かれる
+        assert len(r["sheets"]) == (r["total"] - 1) // 12 + 1
+        for f in r["sheets"]:
+            assert Path(f).exists()
+
+        index = read_contact_index(out)
+        assert len(index) == r["total"]
+        assert index["1"] in read_contact_index(out).values()
+        # 番号は 1 から連番
+        assert sorted(int(k) for k in index) == list(range(1, r["total"] + 1))
+
+
+def test_採否リストは番号も範囲もファイル名も読める():
+    """人が手で書くものなので緩く読む。読めなかったものは黙って捨てない。"""
+    from core.crop import parse_selection_list
+
+    index = {str(i): f"img_tile_r0_c{i}" for i in range(1, 21)}
+
+    names, bad = parse_selection_list("1 3 5", index)
+    assert names == ["img_tile_r0_c1", "img_tile_r0_c3", "img_tile_r0_c5"]
+    assert not bad
+
+    names, _ = parse_selection_list("5-8", index)
+    assert len(names) == 4
+
+    # 区切りは空白・カンマ・読点どれでも
+    names, _ = parse_selection_list("1,2、3", index)
+    assert len(names) == 3
+
+    # ファイル名でも指定できる
+    names, _ = parse_selection_list("img_tile_r0_c4.png", index)
+    assert names == ["img_tile_r0_c4"]
+
+    # 重複は 1 つに
+    names, _ = parse_selection_list("2 2 3-4 4", index)
+    assert len(names) == len(set(names)) == 3
+
+    # 読めなかったものは報告する
+    names, bad = parse_selection_list("99 abc 2", index)
+    assert names == ["img_tile_r0_c2"]
+    assert set(bad) == {"99", "abc"}
+
+
+def test_コンタクトシートは作り直すと古いシートを残さない():
+    """枚数が減ったときに前のシートが残ると、番号がずれたまま見てしまう。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import build_contact_sheet, generate_background_tiles
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        out = Path(d) / "bg"
+        generate_background_tiles(_make_bg(src, n=4), out, tile_size=256,
+                                  background_ratio=0.0, bg_sampling="all")
+
+        many = build_contact_sheet(out, cols=2, rows=2, thumb=96)   # 4枚/シート
+        few = build_contact_sheet(out, cols=8, rows=8, thumb=96)    # 1シート
+        assert len(many["sheets"]) > len(few["sheets"])
+        assert len(list((out / "contact_sheet").glob("sheet_*"))) == len(few["sheets"])

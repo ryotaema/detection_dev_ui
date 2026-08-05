@@ -516,6 +516,8 @@ def _render_bg_selection() -> None:
         "見直す出力先", [str(d.parent.relative_to(DATA_DIR)) for d in _dirs],
         key="bgsel_dir")
     _bgdir = DATA_DIR / _sel / "background"
+    for _k, _v in {"cs_cols": 6, "cs_rows": 6, "cs_thumb": 140}.items():
+        st.session_state.setdefault(_k, _v)
     _state = read_tile_selection(_bgdir)
     if not _state:
         st.caption("タイルがありません。")
@@ -591,3 +593,83 @@ def _render_bg_selection() -> None:
             st.rerun()
         else:
             show_error(_r["error"], prefix="⚠ 反映できません: ")
+
+    _render_contact_sheet(_bgdir, _state)
+
+
+def _render_contact_sheet(bgdir, state: dict) -> None:
+    """一覧を 1 枚の画像にまとめ、番号で採否を受け取る（仕様 §7.3）。
+
+    画面でスクロールしながら選ぶより、紙に出す・別の端末で見る・
+    複数人で確認するときに向く。
+    """
+    with st.expander("📄 コンタクトシート（番号で控えて採否を渡す）"):
+        st.caption(
+            "タイルを縮小して 1 枚に並べます。緑枠 = いま採用中、灰枠 = 未採用。"
+            "番号を控えて、下の欄に書いてください。"
+        )
+        _s1, _s2, _s3, _s4 = st.columns(4)
+        with _s1:
+            _cs_cols = st.select_slider("列数", options=[4, 6, 8, 10],
+                                        key="cs_cols")
+        with _s2:
+            _cs_rows = st.select_slider("1 枚の行数", options=[4, 6, 8, 12],
+                                        key="cs_rows")
+        with _s3:
+            _cs_thumb = st.select_slider("縮小後の一辺", options=[96, 140, 200, 260],
+                                         key="cs_thumb")
+        with _s4:
+            _cs_which = st.radio("並べる対象", ["すべて", "採用ぶん", "未採用ぶん"],
+                                 key="cs_which")
+
+        if st.button("📄 シートを作る", key="cs_build", use_container_width=True):
+            _names = (None if _cs_which == "すべて"
+                      else [k for k, v in state.items()
+                            if v == (_cs_which == "採用ぶん")])
+            _r = build_contact_sheet(bgdir, _names, cols=int(_cs_cols),
+                                     rows=int(_cs_rows), thumb=int(_cs_thumb))
+            if _r["ok"]:
+                st.success(f"✅ {_r['total']} 枚を {len(_r['sheets'])} 枚の"
+                           f"シートにまとめました")
+            else:
+                show_error(_r["error"], prefix="⚠ シートを作れません: ")
+
+        _sheets = sorted((bgdir / CONTACT_DIR).glob("sheet_*"))
+        if _sheets:
+            for _f in _sheets:
+                st.image(str(_f), use_column_width=True, caption=_f.name)
+                st.download_button(f"⬇ {_f.name}", _f.read_bytes(),
+                                   file_name=_f.name, key=f"cs_dl_{_f.name}")
+
+        _index = read_contact_index(bgdir)
+        if not _index:
+            return
+
+        st.markdown("**控えた番号を反映する**")
+        _txt = st.text_area(
+            "番号（`3` / 範囲 `5-12` / ファイル名 も可）", key="cs_list",
+            placeholder="例）1 3 5-12, 20", height=80)
+        _mode = st.radio("扱い", ["書いた番号だけを採用にする", "書いた番号を採用から外す"],
+                         key="cs_mode", horizontal=True)
+
+        _picked, _bad = parse_selection_list(_txt, _index)
+        if _bad:
+            st.warning("読み取れなかったもの: " + "　".join(_bad[:20]))
+        if _picked:
+            _n = (len(_picked) if _mode.startswith("書いた番号だけ")
+                  else sum(1 for k, v in state.items() if v and k not in _picked))
+            st.caption(f"適用すると採用は **{_n} 枚** になります。")
+
+        if st.button("✅ この内容にする", key="cs_apply", type="primary",
+                     disabled=not _picked, use_container_width=True):
+            if _mode.startswith("書いた番号だけ"):
+                _final = list(_picked)
+            else:
+                _final = [k for k, v in state.items() if v and k not in _picked]
+            _r = apply_selection(bgdir, _final)
+            if _r["ok"]:
+                st.success(f"✅ 採用 {_r['adopted']} 枚 / 未採用 {_r['unused']} 枚に"
+                           f"更新しました")
+                st.rerun()
+            else:
+                show_error(_r["error"], prefix="⚠ 反映できません: ")
