@@ -500,12 +500,32 @@ def _overlaps(bbox, geom) -> bool:
 # ---------------------------------------------------------------------------
 # 背景タイル
 # ---------------------------------------------------------------------------
+def target_tile_count(n_object_crops: int, background_ratio: float) -> int:
+    """背景タイルを何枚採るか。
+
+    `background_ratio` は「最終的なデータセットに占める背景の割合」なので、
+    対象クロップ N 枚に対して T/(N+T) = r となる T を返す。
+    枚数そのものではなく割合で指定するのは、
+    対象クロップの枚数が撮り足すたびに変わるため。
+    """
+    r = min(0.95, max(0.0, float(background_ratio)))
+    if r <= 0 or n_object_crops <= 0:
+        return 0
+    return int(round(n_object_crops * r / (1.0 - r)))
+
+
 def generate_background_tiles(
     image_paths,
     out_dir: Path,
     tile_size: int = 1024,
     tile_overlap: float = 0.0,
     out_format: str = "png",
+    jpg_quality: int = 95,
+    background_ratio: float = 0.15,
+    bg_sampling: str = "random",
+    keep_unused_tiles: bool = True,
+    n_object_crops: int = 0,
+    seed: int = 0,
     on_progress=None,
 ) -> dict:
     """対象の検出されない画像をタイルに分割する。
@@ -513,6 +533,10 @@ def generate_background_tiles(
     中身が薄いタイルを機械的に捨てることはしない。
     「何も無い」の判定は対象領域によって大きく変わり、誤ると必要な背景を失う。
     全タイルを出し、採否は人が決める。
+
+    そのうえで、**枚数は `background_ratio` で調整する**。
+    背景ばかりが増えると、対象の学習に使える割合が下がるため。
+    採らなかったタイルは `_unused/` に置く（消さない。後から足せるように）。
     """
     import cv2
 
@@ -528,7 +552,9 @@ def generate_background_tiles(
     (out / "images").mkdir(parents=True, exist_ok=True)
     (out / "meta").mkdir(parents=True, exist_ok=True)
     ext = "jpg" if out_format == "jpg" else "png"
+    params = ([cv2.IMWRITE_JPEG_QUALITY, int(jpg_quality)] if ext == "jpg" else [])
     step = max(1, int(tile_size * (1.0 - min(0.5, max(0.0, tile_overlap)))))
+    made: list[str] = []          # 作った順のタイル名（採否の振り分けに使う）
 
     for n, p in enumerate(paths, 1):
         if on_progress:
@@ -546,7 +572,8 @@ def generate_background_tiles(
                 if tile.shape[0] < tile_size // 2 or tile.shape[1] < tile_size // 2:
                     continue          # 端の細切れは捨てる
                 stem = f"{p.stem}_tile_r{r}_c{c}"
-                cv2.imwrite(str(out / "images" / f"{stem}.{ext}"), tile)
+                cv2.imwrite(str(out / "images" / f"{stem}.{ext}"), tile, params)
+                made.append(stem)
                 (out / "meta" / f"{stem}.json").write_text(json.dumps({
                     "schema_version": SCHEMA_VERSION,
                     "data_type": "background_tile",
@@ -559,8 +586,57 @@ def generate_background_tiles(
                 result["tiles"] += 1
         result["images"] += 1
 
-    result["ok"] = result["tiles"] > 0
-    if not result["tiles"]:
+    # ── 採否を決める（枚数は割合から求める）──────────────────────────
+    # 割合を計算する材料が無いとき（割合の指定なし・対象クロップ数が不明）は
+    # **全部採用する**。黙って `_unused` に送ると、作ったのに 0 枚に見える。
+    # 一方、材料があって計算結果が 0 枚になるのは正しい答えなので、そのまま従う
+    # （対象が 1 件しかなければ、割合 0.15 に見合う背景は 0 枚）。
+    _no_basis = (bg_sampling == "all" or background_ratio <= 0
+                 or n_object_crops <= 0)
+    want = (len(made) if _no_basis
+            else min(len(made), target_tile_count(n_object_crops, background_ratio)))
+
+    if want >= len(made):
+        adopted = list(made)
+    else:
+        import random as _random
+        # seed 固定で毎回同じ選び方になるようにする（再現性）
+        adopted = sorted(_random.Random(seed).sample(made, want))
+    adopted_set = set(adopted)
+
+    unused_dir = out / "_unused"
+    for stem in made:
+        if stem in adopted_set:
+            continue
+        src_img = out / "images" / f"{stem}.{ext}"
+        if keep_unused_tiles:
+            (unused_dir / "images").mkdir(parents=True, exist_ok=True)
+            (unused_dir / "meta").mkdir(parents=True, exist_ok=True)
+            src_img.replace(unused_dir / "images" / src_img.name)
+            (out / "meta" / f"{stem}.json").replace(
+                unused_dir / "meta" / f"{stem}.json")
+        else:
+            src_img.unlink(missing_ok=True)
+            (out / "meta" / f"{stem}.json").unlink(missing_ok=True)
+
+    with open(out / "manifest.jsonl", "w", encoding="utf-8") as mf:
+        for stem in made:
+            ok = stem in adopted_set
+            base = "" if ok else "_unused/"
+            mf.write(json.dumps({
+                "crop_image": f"{base}images/{stem}.{ext}",
+                "meta": f"{base}meta/{stem}.json",
+                "data_type": "background_tile",
+                "annotation_status": "raw",
+                "adopted": ok,
+            }, ensure_ascii=False) + "\n")
+
+    result["tiles"] = len(adopted)
+    result["generated"] = len(made)
+    result["unused"] = len(made) - len(adopted)
+    result["target"] = want
+    result["ok"] = len(made) > 0
+    if not made:
         result["error"] = "タイルを 1 枚も作れませんでした"
     return result
 

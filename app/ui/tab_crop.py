@@ -75,9 +75,25 @@ def render_crop() -> None:
         _dir_sel = st.selectbox("元画像のディレクトリ", _dir_labels, key="cr_dir")
         _src_dir = DATA_DIR / _dir_sel
     with _c2:
-        _mmap = {str(p.relative_to(MODELS_DIR)): p for p in _models}
-        _msel = st.selectbox("BBOX 検出モデル", list(_mmap), key="cr_model")
+        # 名前順に並べると、1 エポックだけ回した試し撃ちのモデルが
+        # 先頭に来てしまい、既定のまま押すと 1 件も検出しない（実際に起きた）。
+        # 精度のあるものを先に出す。
+        _ranked = sort_models(_models, how="recommended")
+        _mmap, _labels = {}, []
+        for _it in _ranked:
+            _k = str(_it["key"])
+            _mmap[_k] = MODELS_DIR / _k
+            _m = _it.get("map")
+            _labels.append(
+                f"{_k}　{'⭐ ' if _it.get('favorite') else ''}"
+                + (f"mAP50-95 {_m:.3f}" if _m is not None else "評価まだ"))
+        _lab2key = dict(zip(_labels, _mmap))
+        _msel_lab = st.selectbox("BBOX 検出モデル", _labels, key="cr_model")
+        _msel = _lab2key[_msel_lab]
         _model = _mmap[_msel]
+        if _ranked and _ranked[[l for l in _labels].index(_msel_lab)].get("map") is None:
+            st.caption("⚠ このモデルはまだ評価していません。"
+                       "検出が 0 件なら、精度のあるモデルを選び直してください。")
 
     _meta = read_model_meta(_model)
     _classes = (_meta or {}).get("names") or []
@@ -311,6 +327,30 @@ def render_crop() -> None:
             _bg_prev_n = st.select_slider(
                 "プレビュー枚数", options=[0, 2, 4, 6, 9], key="cr_bg_prev_n")
 
+        _bg4, _bg5 = st.columns([2, 1])
+        with _bg4:
+            st.session_state.setdefault("cr_bg_ratio", 0.15)
+            _bg_ratio = st.slider(
+                "背景がデータセットに占める割合", 0.0, 0.5, step=0.05,
+                key="cr_bg_ratio",
+                help="全タイルを作ったうえで、この割合になるぶんだけ採用します。"
+                     "背景ばかり増えると対象の学習に使える割合が下がります。"
+                     "0 にすると全部採用します")
+        with _bg5:
+            st.session_state.setdefault("cr_bg_keep", True)
+            _bg_keep = st.checkbox("採らなかったぶんも残す", key="cr_bg_keep",
+                                   help="`background/_unused/` に置きます。"
+                                        "あとから足せます")
+
+        # 何枚採ることになるかを先に出す
+        _n_obj_est = sum(len(v) for v in (_found or {}).values())
+        _n_bg_want = target_tile_count(_n_obj_est, float(_bg_ratio))
+        st.caption(
+            f"対象クロップ {_n_obj_est} 件に対し、背景は "
+            + (f"**{_n_bg_want} 枚**を採用します（残りは "
+               + ("`_unused/` へ" if _bg_keep else "破棄") + "）"
+               if _bg_ratio > 0 else "**全タイルを採用**します"))
+
         # 何枚に割れるかを先に見せる（作ってから多すぎたと気づくのを避ける）
         if int(_bg_prev_n) > 0:
             import cv2
@@ -393,9 +433,17 @@ def render_crop() -> None:
         if _bg_on and _bg:
             _b = generate_background_tiles(
                 _bg, _out_dir / "background", tile_size=int(_tile),
-                tile_overlap=float(_overlap), out_format=_fmt)
+                tile_overlap=float(_overlap), out_format=_fmt,
+                background_ratio=float(_bg_ratio),
+                bg_sampling="all" if float(_bg_ratio) <= 0 else "random",
+                keep_unused_tiles=bool(_bg_keep),
+                n_object_crops=int(_res.get("crops", 0)), seed=0)
             if _b["ok"]:
-                st.success(f"✅ 背景タイルを {_b['tiles']} 枚作りました")
+                st.success(
+                    f"✅ 背景タイルを {_b['generated']} 枚作り、"
+                    f"うち {_b['tiles']} 枚を採用しました"
+                    + (f"（{_b['unused']} 枚は `background/_unused/` に残しています）"
+                       if _b.get("unused") else ""))
             else:
                 show_error(_b["error"], prefix="⚠ 背景タイル: ")
 

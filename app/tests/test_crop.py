@@ -554,3 +554,175 @@ def test_探索の作業場はモデル一覧に出ない():
         assert len(got) == 1 and got[0].name == "best.pt"
         assert ".tuning" not in str(got[0])
         assert [x.name for x in model_run_dirs(root)] == ["good_run"]
+
+
+def test_モデル選択の既定は評価済みのものが先に来る():
+    """名前順に並べると、1 エポックだけ回した試し撃ちのモデルが先頭に来る。
+    既定のまま押すと 1 件も検出せず「壊れた」ように見える（実際に起きた）。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.model_prefs import sort_models
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        paths = []
+        for name in ("aaa_試し撃ち", "zzz_本命"):
+            f = root / name / "weights" / "best.pt"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"x")
+            paths.append(f)
+        # 本命だけ評価結果を持たせる
+        (paths[1].parent / ".best.pt.eval.json").write_text(
+            '{"ds:val": {"ok": true, "map50_95": 0.76, "map50": 0.9}}',
+            encoding="utf-8")
+
+        ranked = sort_models(paths, how="recommended")
+        assert "zzz_本命" in str(ranked[0]["key"]), \
+            f"評価済みが先頭に来ていない: {[r['key'] for r in ranked]}"
+
+
+# ---------------------------------------------------------------------------
+# 仕様 §7.1/§7.2 背景タイルの採否
+# ---------------------------------------------------------------------------
+def test_背景の枚数は割合から決まる():
+    """枚数ではなく割合で指定する。対象クロップの枚数は撮り足すたびに変わるため。"""
+    from core.crop import target_tile_count
+
+    # T/(N+T) = r になる T
+    for n, r in ((100, 0.15), (240, 0.15), (100, 0.5), (37, 0.2)):
+        t = target_tile_count(n, r)
+        assert abs(t / (n + t) - r) < 0.02, f"{n},{r} → {t}"
+
+    assert target_tile_count(100, 0.0) == 0
+    assert target_tile_count(0, 0.15) == 0
+
+
+def _make_bg(dirpath, n=6):
+    import cv2
+    import numpy as np
+
+    out = []
+    for k in range(n):
+        p = dirpath / f"bg{k}.png"
+        cv2.imwrite(str(p), np.random.randint(0, 200, (480, 640, 3), np.uint8))
+        out.append(str(p))
+    return out
+
+
+def test_採らなかったタイルは捨てずに残せる():
+    """「後から足せるように」残す。空タイルの判定は人がするので、
+    機械が消してしまうと取り返しがつかない。"""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import generate_background_tiles
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        paths = _make_bg(src)
+
+        out = Path(d) / "o1"
+        r = generate_background_tiles(paths, out, tile_size=256,
+                                      background_ratio=0.15,
+                                      keep_unused_tiles=True,
+                                      n_object_crops=100, seed=0)
+        assert r["generated"] > r["tiles"] > 0
+        assert r["unused"] == r["generated"] - r["tiles"]
+        assert len(list((out / "images").glob("*.png"))) == r["tiles"]
+        assert len(list((out / "_unused" / "images").glob("*.png"))) == r["unused"]
+        # メタも一緒に移ること（画像だけ移すと対応が崩れる）
+        assert len(list((out / "_unused" / "meta").glob("*.json"))) == r["unused"]
+
+        # manifest は採否がわかる形で全件を持つ
+        rows = [json.loads(x) for x in
+                (out / "manifest.jsonl").read_text().splitlines()]
+        assert len(rows) == r["generated"]
+        assert sum(1 for x in rows if x["adopted"]) == r["tiles"]
+        assert all(x["data_type"] == "background_tile" for x in rows)
+
+
+def test_残さない指定なら未採用は消える():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import generate_background_tiles
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        out = Path(d) / "o"
+        r = generate_background_tiles(_make_bg(src), out, tile_size=256,
+                                      background_ratio=0.15,
+                                      keep_unused_tiles=False,
+                                      n_object_crops=100, seed=0)
+        assert r["unused"] > 0
+        assert not (out / "_unused").exists()
+        assert len(list((out / "images").glob("*.png"))) == r["tiles"]
+
+
+def test_割合0なら全部採用する():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import generate_background_tiles
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        out = Path(d) / "o"
+        r = generate_background_tiles(_make_bg(src), out, tile_size=256,
+                                      background_ratio=0.0, bg_sampling="all",
+                                      n_object_crops=100, seed=0)
+        assert r["tiles"] == r["generated"] and r["unused"] == 0
+
+
+def test_seed_を固定すれば同じ選び方になる():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import generate_background_tiles
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        paths = _make_bg(src)
+        picks = []
+        for i in range(2):
+            out = Path(d) / f"o{i}"
+            generate_background_tiles(paths, out, tile_size=256,
+                                      background_ratio=0.15,
+                                      n_object_crops=100, seed=7)
+            picks.append(sorted(p.name for p in (out / "images").glob("*.png")))
+        assert picks[0] == picks[1]
+
+
+def test_割合の材料が無いときと計算結果が0のときを区別する():
+    """材料が無い（対象クロップ数が不明）→ 全採用。
+    材料があって 0 枚と出た → その 0 に従う。
+    ここを一緒にすると、画面の予告と実際の枚数が食い違う。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import generate_background_tiles
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        paths = _make_bg(src, n=4)
+
+        # 対象クロップ数が不明 → 全採用（作ったのに 0 枚に見えるのを防ぐ）
+        out = Path(d) / "a"
+        r = generate_background_tiles(paths, out, tile_size=256,
+                                      background_ratio=0.15,
+                                      n_object_crops=0, seed=0)
+        assert r["tiles"] == r["generated"] and r["unused"] == 0
+
+        # 対象が 1 件しかなければ、割合 0.15 に見合う背景は 0 枚
+        out = Path(d) / "b"
+        r = generate_background_tiles(paths, out, tile_size=256,
+                                      background_ratio=0.15,
+                                      n_object_crops=1, seed=0)
+        assert r["tiles"] == 0 and r["unused"] == r["generated"]
