@@ -480,14 +480,23 @@ st.markdown(f"""
 # --- サイドバー ---
 with st.sidebar:
     st.markdown("### 📊 現在の状態")
-    _ds_count  = len([d for d in DATA_DIR.iterdir() if d.is_dir()]) if DATA_DIR.exists() else 0
+    # 「使えるもの」を数える。ディレクトリの数を出すと、
+    # 中身の無いものや未変換のものまで含まれて「揃っている」ように見えてしまう
+    _ds_all    = len([d for d in DATA_DIR.iterdir() if d.is_dir()]) if DATA_DIR.exists() else 0
+    _ds_count  = len(list(DATA_DIR.rglob("data.yaml"))) if DATA_DIR.exists() else 0
     _mdl_count = len(list(MODELS_DIR.rglob("*.pt"))) if MODELS_DIR.exists() else 0
     _prd_count = len(list(PREDICTIONS_DIR.glob("*.json"))) if PREDICTIONS_DIR.exists() else 0
+    _ds_disp   = (f"{_ds_count} <span style='color:var(--text-muted);font-size:.8em'>"
+                  f"/ {_ds_all}</span>" if _ds_all != _ds_count else str(_ds_count))
     st.markdown(f"""
-<div class="sidebar-stat"><span class="ss-label">📂 データセット</span><span class="ss-value">{_ds_count}</span></div>
+<div class="sidebar-stat"><span class="ss-label">📂 データセット</span><span class="ss-value">{_ds_disp}</span></div>
 <div class="sidebar-stat"><span class="ss-label">🤖 学習済みモデル</span><span class="ss-value">{_mdl_count}</span></div>
 <div class="sidebar-stat"><span class="ss-label">📋 推論結果</span><span class="ss-value">{_prd_count}</span></div>
 """, unsafe_allow_html=True)
+    if _ds_all != _ds_count:
+        st.caption(
+            f"　{_ds_all - _ds_count} 件は学習に使えません"
+            "（「📁 データ管理」の 🧹 片付けで確認できます）")
     # よく使うものほど上に置く。設定・参照情報は下の折りたたみへ回す
     st.markdown("---")
     st.markdown("#### 🔗 クイックリンク")

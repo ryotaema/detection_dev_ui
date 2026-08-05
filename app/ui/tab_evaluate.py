@@ -27,6 +27,30 @@ from .widgets import empty_state, metric_row, show_error
 
 
 
+def _toggle_flag(json_path, flagged_now: bool) -> None:
+    """再アノテーションのフラグを切り替え、データセット側にも残す。
+
+    session_state だけだと再読み込みで消える。5000 枚を見る作業では
+    致命的なので、画像の属するデータセットに記録する。
+    """
+    import json as _json
+
+    name = Path(json_path).name
+    if flagged_now:
+        st.session_state.reanno_set.discard(name)
+    else:
+        st.session_state.reanno_set.add(name)
+
+    # 画像がデータセットの中にあるときだけ記録できる
+    try:
+        img = _json.loads(Path(json_path).read_text()).get("image_path", "")
+    except Exception:
+        return
+    ds = dataset_of_image(img) if img else None
+    if ds is not None:
+        mark(ds, Path(img).name, flagged=not flagged_now)
+
+
 def render_evaluate() -> None:
     _mdl_count3 = len(list(MODELS_DIR.rglob("*.pt")))
     _prev_info3 = (f"← 前のステップ: ✅ 学習済みモデルが {_mdl_count3} 件あります"
@@ -37,6 +61,20 @@ def render_evaluate() -> None:
       <div class="sb-prev">{_prev_info3}</div>
       <div class="sb-desc">→ ここでやること: ①推論する → ②精度を測る → ③結果を深掘りする</div>
     </div>""", unsafe_allow_html=True)
+
+    # データセット側に残した精査の記録を、この画面の集合へ読み込む。
+    # session_state だけだと再読み込みで消えてしまうため。
+    if not st.session_state.get("_reanno_loaded"):
+        import json as _json_ld
+        for _jf in sorted(PREDICTIONS_DIR.glob("*.json")):
+            try:
+                _ip = _json_ld.loads(_jf.read_text()).get("image_path", "")
+            except Exception:
+                continue
+            _d = dataset_of_image(_ip) if _ip else None
+            if _d is not None and is_flagged(_d, Path(_ip).name):
+                st.session_state.reanno_set.add(_jf.name)
+        st.session_state["_reanno_loaded"] = True
 
     # 3つの内部タブで共通して使う情報。ここで一度だけ集める
     current_model = st.session_state.last_model_path or ""
@@ -473,10 +511,7 @@ def render_evaluate() -> None:
                                 "🚩 フラグ解除" if _zf else "🚩 再アノテーション要",
                                 key="pv_zoom_flag", type="primary",
                                 use_container_width=True):
-                            if _zf:
-                                st.session_state.reanno_set.discard(_zjf.name)
-                            else:
-                                st.session_state.reanno_set.add(_zjf.name)
+                            _toggle_flag(_zjf, _zf)
                             st.rerun()
                     with _zn3:
                         if st.button("次の画像 →", key="pv_zoom_next",
@@ -509,10 +544,7 @@ def render_evaluate() -> None:
                             if st.button(_flag_label, key=f"prev_flag_{_jf.name}",
                                          use_container_width=True,
                                          type="secondary"):
-                                if _is_flagged:
-                                    st.session_state.reanno_set.discard(_jf.name)
-                                else:
-                                    st.session_state.reanno_set.add(_jf.name)
+                                _toggle_flag(_jf, _is_flagged)
                                 st.rerun()
             if len(_pred_jsons) > int(_pv_n):
                 st.caption(f"（他 {len(_pred_jsons) - int(_pv_n)} 件は省略。"
@@ -598,10 +630,7 @@ def render_evaluate() -> None:
                             _flag_lbl_sel = "🚩 解除" if _is_flagged_sel else "🚩 要再アノテ"
                             if st.button(_flag_lbl_sel, key=f"sel_flag_{_cur_page}_{_jf.name}",
                                          use_container_width=True, type="secondary"):
-                                if _is_flagged_sel:
-                                    st.session_state.reanno_set.discard(_jf.name)
-                                else:
-                                    st.session_state.reanno_set.add(_jf.name)
+                                _toggle_flag(_jf, _is_flagged_sel)
                                 st.rerun()
 
                 # ── ページネーション ──

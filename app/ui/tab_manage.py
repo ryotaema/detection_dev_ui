@@ -98,6 +98,10 @@ def render_manage() -> None:
                     _split_counts = dataset_split_counts(ds)
                     if _split_counts:
                         st.caption(" / ".join(f"{k} {v}枚" for k, v in _split_counts.items()))
+                    # 精査がどこまで進んだか（Step4 で確認した記録から）
+                    _rp = progress_label(ds)
+                    if _rp:
+                        st.caption(_rp)
                     _ds_tags = read_tags(ds)
                     if _ds_tags:
                         st.markdown(
@@ -200,6 +204,26 @@ def render_manage() -> None:
                         "状態は「いまどの段階か」を1つだけ選びます。"
                         "タグは性格づけ（撮影場所・被写体・用途など）を自由に付けられます。"
                     )
+                    _prog = review_progress(ds)
+                    if _prog["reviewed"]:
+                        metric_row([
+                            ("確認した枚数", f"{_prog['reviewed']} / {_prog['total']}"),
+                            ("これでよい", _prog["ok"]),
+                            ("要修正", _prog["flagged"]),
+                            ("残り", _prog["remaining"]),
+                        ])
+                        if _prog["done"] and read_status(ds) != "reviewed":
+                            st.info(
+                                "ℹ すべての画像を確認済みです。"
+                                "問題が無ければ状態を **🟢 精査済み** にしておくと、"
+                                "学習に使ってよいデータだと分かります。"
+                            )
+                    else:
+                        st.caption(
+                            "👀 まだ精査の記録がありません。"
+                            "「🔭 Step4」で推論結果を見ながら 🚩 を付けると、"
+                            "ここに進み具合が出ます。"
+                        )
                     _st_keys = list(DATASET_STATUSES)
                     _cur_st = read_status(ds)
                     _new_st = st.radio(

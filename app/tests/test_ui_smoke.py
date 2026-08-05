@@ -48,6 +48,10 @@ HEAVY_KEYS = {
 HEAVY_PREFIXES = (
     # mz_ はモザイク。検出（推論が走る）・適用・復元はいずれも押させない
     "mz_",
+    # 再アノテーションのフラグ。以前は session_state だけだったが、
+    # データセットの .review_state.json に残るようになったので、
+    # 検査で押すと実データの精査記録を汚してしまう
+    "prev_flag_", "sel_flag_", "pv_zoom_flag",
     "rs_run_", "fx_run_", "cls_run_", "ex_build_", "qc_run_", "redeploy_",
     "delfn_", "del_model_", "del_ds_", "mkbundle_", "insp_model_", "use_model_",
     "dl_", "add_btn_", "ul_zip_btn", "ul_imgs_btn",
