@@ -49,3 +49,6 @@ app/.face_models/
 
 # 仕様書の元ファイル（開発方針の扱い。roadmap.md と同じく配布しない）
 docs/*.docx
+
+# フォルダを開く依頼（ホスト側のウォッチャーとのやり取り）
+predictions/.open_requests/

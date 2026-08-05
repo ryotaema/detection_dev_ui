@@ -15,7 +15,7 @@ import streamlit as st
 
 from core import *  # noqa: F401,F403
 from core import _find_image_dirs  # noqa: F401
-from .widgets import empty_state, metric_row, show_error
+from .widgets import empty_state, metric_row, open_folder, show_error
 
 
 def _model_meta(model_path: Path) -> dict:
@@ -90,6 +90,7 @@ def render_crop() -> None:
             shutil.rmtree(_tmp)
         _tmp.mkdir(parents=True, exist_ok=True)
         with st.spinner("検出しています…"):
+            record_use(_model, "crop")
             _saved = run_inference(str(_model), _src_dir, _tmp,
                                    conf_threshold=float(_conf))
         _found: dict = {}
@@ -367,6 +368,7 @@ def render_crop() -> None:
                 "`images/` `meta/` `manifest.jsonl` ができています。"
                 "`images/` を CVAT のタスクにしてセグメンテーションを付けてください。"
             )
+            open_folder(_out_dir, "crop_out", "📂 書き出し先を開く")
         else:
             show_error(_res["error"], prefix="❌ 作れませんでした: ")
 

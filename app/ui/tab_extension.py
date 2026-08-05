@@ -15,7 +15,7 @@ from core.extensions import (
     PLACEHOLDERS, load_streamlit_action, resolve_command, run_extension_command,
     scaffold_manifest,
 )
-from .widgets import empty_state, show_error
+from .widgets import empty_state, open_folder, show_error
 
 
 def render_extension_placeholder() -> None:
@@ -138,6 +138,7 @@ def render_extension(ext: dict) -> None:
     st.caption("　".join(_meta))
     if ext.get("url"):
         st.caption(f"🔗 {ext['url']}")
+    open_folder(Path(ext["dir"]), f"ext_{ext['dir_name']}", "📂 開く", inline=True)
 
     if not ext.get("has_own_manifest"):
         st.info(

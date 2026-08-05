@@ -29,6 +29,8 @@ from .extensions import *      # noqa: F401,F403
 from .mosaic import *          # noqa: F401,F403
 from .crop import *            # noqa: F401,F403
 from .cleanup import *         # noqa: F401,F403
+from .model_prefs import *     # noqa: F401,F403
+from .hostpath import *        # noqa: F401,F403
 
 # `import *` はアンダースコア始まりを取り込まないため、明示的に公開する
 from .config import (  # noqa: F401

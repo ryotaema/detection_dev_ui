@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import empty_state, metric_row, show_error
+from .widgets import empty_state, metric_row, open_folder, show_error
 from .features import feature_enabled
 
 
@@ -106,6 +106,7 @@ def render_manage() -> None:
                         )
                 with col2:
                     st.text(f"{file_count} files  /  {size_mb:.1f} MB")
+                    open_folder(ds, f"ds_{ds.name}", "📂 開く", inline=True)
                 # このデータで学習したモデルを来歴から逆引きする。
                 # 「消してよいか」を判断する材料になり、新しい記録も要らない
                 _usage = dataset_usage_summary(ds)
@@ -673,7 +674,78 @@ def render_manage() -> None:
         _fn_states = {f["name"]: f for f in cached_nuclio_functions()} if serverless_ready() else {}
         _def_by_run = {d["model_run"]: d for d in list_serverless_defs() if d["model_run"]}
 
-        for mp in model_files:
+        # ── 作ったのにまだ使っていないモデル ──────────────────────────
+        #   一覧の下に埋もれて「学習したのに適用し忘れた」が起きやすいので、
+        #   別枠で先に知らせる
+        # 消えたモデルの記録は残しておいても意味がないので、ここで落とす
+        prune_prefs(model_files)
+        _prefs = load_prefs()
+        _new = unused_new_models(model_files, _prefs)
+        if _new:
+            with st.container(border=True):
+                st.markdown(f"##### 🆕 まだ使っていないモデル（{len(_new)} 件）")
+                st.caption(
+                    "学習・取り込みはしたものの、推論にも評価にも使われていません。"
+                    "使うつもりだったものが埋もれていないか確認してください。"
+                )
+                for _n in _new:
+                    _np = Path(_n["path"])
+                    _nc1, _nc2, _nc3 = st.columns([5, 2, 2])
+                    with _nc1:
+                        st.markdown(f"`{_np.relative_to(MODELS_DIR)}`")
+                        st.caption(
+                            f"{_n['age_days']:.0f} 日前に作成"
+                            + (f"　mAP50-95 {_n['map']:.4f}" if _n["map"] is not None
+                               else "　未評価")
+                            + f"　{status_label(_n['status'], 'model')}")
+                    with _nc2:
+                        if st.button("✅ これを使う", key=f"newuse_{_np}",
+                                     use_container_width=True):
+                            record_use(_np, "select")
+                            st.session_state.last_model_path = str(_np)
+                            st.rerun()
+                    with _nc3:
+                        if st.button("🙈 今は使わない", key=f"newskip_{_np}",
+                                     use_container_width=True,
+                                     help="この一覧から外します（使用回数に1を記録）"):
+                            record_use(_np, "dismiss")
+                            st.rerun()
+
+        # ── 絞り込みと並べ替え ────────────────────────────────────────
+        _mf1, _mf2, _mf3 = st.columns([2, 2, 2])
+        with _mf1:
+            _sort = st.selectbox(
+                "並べ方", list(SORT_OPTIONS),
+                format_func=lambda k: SORT_OPTIONS[k], key="mdl_sort")
+        with _mf2:
+            _fstatus = st.multiselect(
+                "状態で絞り込む", list(MODEL_STATUSES),
+                format_func=lambda v: status_label(v, "model"),
+                key="mdl_fstatus", placeholder="すべて")
+        with _mf3:
+            _fonly = st.multiselect(
+                "さらに絞り込む",
+                ["⭐ お気に入りだけ", "📊 評価済みだけ", "🆕 未使用だけ"],
+                key="mdl_fonly", placeholder="なし")
+
+        _sorted = sort_models(model_files, _sort, _prefs)
+        if _fstatus:
+            _sorted = [x for x in _sorted if x["status"] in _fstatus]
+        if "⭐ お気に入りだけ" in _fonly:
+            _sorted = [x for x in _sorted if x["favorite"]]
+        if "📊 評価済みだけ" in _fonly:
+            _sorted = [x for x in _sorted if x["map"] is not None]
+        if "🆕 未使用だけ" in _fonly:
+            _sorted = [x for x in _sorted if x["uses"] == 0]
+
+        if len(_sorted) != len(model_files):
+            st.caption(f"{len(_sorted)} / {len(model_files)} 件を表示中")
+        if not _sorted:
+            st.info("条件に合うモデルがありません。絞り込みを外してください。")
+
+        _info_by_path = {x["path"]: x for x in _sorted}
+        for mp in [Path(x["path"]) for x in _sorted]:
+            _minfo = _info_by_path[str(mp)]
             size_mb  = mp.stat().st_size / (1024 * 1024)
             mod_time = datetime.fromtimestamp(mp.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
             is_current = (str(mp) == st.session_state.last_model_path)
@@ -701,9 +773,20 @@ def render_manage() -> None:
                 with _label_col:
                     if is_current:
                         st.markdown("⭐ **現在使用中**")
-                    st.markdown(f"`{mp.relative_to(MODELS_DIR)}`　"
-                                f"{status_label(read_status(_run_dir, 'model'), 'model')}")
-                    st.caption(mod_time)
+                    st.markdown(
+                        ("⭐ " if _minfo["favorite"] else "")
+                        + f"`{mp.relative_to(MODELS_DIR)}`　"
+                        + f"{status_label(read_status(_run_dir, 'model'), 'model')}"
+                        + ("　🆕" if _minfo["is_new"] else ""))
+                    # 使用状況を出す。どれが現役かが一覧で分かるようにする
+                    st.caption(
+                        mod_time
+                        + (f"　使用 {_minfo['uses']} 回" if _minfo["uses"]
+                           else "　**未使用**")
+                        + (f"（最後: {_minfo['last_used'][:16]}）"
+                           if _minfo["last_used"] else "")
+                        + (f"　mAP50-95 {_minfo['map']:.4f}"
+                           if _minfo["map"] is not None else ""))
                     _md_tags = read_tags(_run_dir)
                     if _md_tags:
                         st.markdown(
@@ -766,6 +849,7 @@ def render_manage() -> None:
                     elif mp.name == "best.pt":
                         st.caption("○ 自動アノテーション未デプロイ — 「🏷 アノテーション」タブから追加できます")
                 with _size_col:
+                    open_folder(_run_dir, f"mdl_{mp}", "📂 開く", inline=True)
                     st.metric("サイズ", f"{size_mb:.1f} MB")
                 with _map_col:
                     if _map50_val is not None:
@@ -773,8 +857,14 @@ def render_manage() -> None:
                     else:
                         st.caption("mAP50: -")
                 with _use_col:
+                    if st.button("⭐ 解除" if _minfo["favorite"] else "☆ お気に入り",
+                                 key=f"fav_{mp}", use_container_width=True,
+                                 help="よく使うモデルに印を付けます（おすすめ順で先頭に来ます）"):
+                        toggle_favorite(mp)
+                        st.rerun()
                     if st.button("✅ 使用", key=f"use_model_{mp}", use_container_width=True,
                                  type="primary" if not is_current else "secondary"):
+                        record_use(mp, "select")
                         st.session_state.last_model_path = str(mp)
                         st.rerun()
                 with _del_col:
@@ -987,6 +1077,7 @@ def render_manage() -> None:
 
     # --- predictions/ 一括クリア ---
     st.markdown("#### 推論結果 (`predictions/`)")
+    open_folder(PREDICTIONS_DIR, "predictions", "📂 predictions/ を開く")
     pred_files = list(PREDICTIONS_DIR.glob("*.json")) if PREDICTIONS_DIR.exists() else []
     if not pred_files:
         empty_state(
@@ -1236,6 +1327,7 @@ def _mosaic_regions_ui(ds, key: str):
                 # predictions/ を汚さないよう、専用の場所へ書き出して読み捨てる
                 _saved = []
                 for _d in sorted({p.parent for p in _imgs}):
+                    record_use(_mmap[_msel], "mosaic")
                     _saved += run_inference(str(_mmap[_msel]), _d, _tmp,
                                             conf_threshold=float(_conf))
             st.session_state[f"{key}_found"] = regions_from_predictions(

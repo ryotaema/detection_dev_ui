@@ -126,3 +126,47 @@ def empty_state(what: str, next_step: str, hint: str = "") -> None:
 # パイプライン状態ヘルパー
 # ---------------------------------------------------------------------------
 
+
+
+def open_folder(container_path, key: str, label: str = "📂 フォルダを開く",
+                inline: bool = False) -> None:
+    """そのフォルダを OS のファイルアプリで開く導線を出す。
+
+    この UI はコンテナの中で動いていて画面を持たないので、
+    自分でファイルアプリを起動することはできない。そこで:
+      - ホスト側のパスを必ず表示する（コピーすればどこでも使える）
+      - `tools/open_folder_watcher.sh` が動いていればボタンで実際に開く
+
+    inline=True にすると、ボタンだけを出して説明は押したときに見せる
+    （カードの中など、場所が限られるところ向け）。
+    """
+    from core.hostpath import (
+        host_path_available, open_command, request_open, to_host_path,
+        watcher_running,
+    )
+
+    host = to_host_path(container_path)
+    if host is None:
+        if not inline:
+            st.caption(f"📁 `{container_path}`（コンテナ内のパス）")
+        return
+
+    if st.button(label, key=f"openfd_{key}", use_container_width=inline,
+                 help=f"{host}\n\nホスト側のパスです"):
+        res = request_open(container_path)
+        if res["ok"]:
+            st.success("✅ ファイルアプリで開きました")
+        else:
+            # ウォッチャーが動いていなくても詰まらないよう、必ず手段を示す
+            st.info(
+                f"ℹ {res['error']}。下のパスをコピーして開いてください。\n\n"
+                "常時ワンクリックで開きたい場合は、ホスト側で "
+                "`./tools/open_folder_watcher.sh` を動かしておいてください。"
+            )
+        st.session_state[f"openfd_show_{key}"] = True
+
+    if st.session_state.get(f"openfd_show_{key}") or not inline:
+        st.code(host, language="text")
+        if st.session_state.get(f"openfd_show_{key}"):
+            st.caption("端末から開く場合:")
+            st.code(open_command(container_path), language="bash")

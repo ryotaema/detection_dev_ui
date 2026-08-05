@@ -234,6 +234,7 @@ def render_evaluate() -> None:
                         for model_rel in selected_compare_models:
                             model_abs = _model_map[model_rel]
                             with st.spinner(f"推論中: {model_rel}…"):
+                                record_use(model_abs, "infer")
                                 saved = run_inference(
                                     model_abs,
                                     img_dir,
@@ -265,6 +266,7 @@ def render_evaluate() -> None:
                             st.dataframe(df_cmp, use_container_width=True, hide_index=True)
                     else:
                         with st.spinner("推論中…"):
+                            record_use(current_model, "infer")
                             saved = run_inference(
                                 current_model,
                                 img_dir,
@@ -831,6 +833,8 @@ def render_evaluate() -> None:
             if st.button(f"📊 {len(_ev_models_sel)} 件のモデルを評価",
                          type="primary", use_container_width=True,
                          disabled=_ev_running or not _ev_models_sel, key="ev_run"):
+                for _m in _ev_models_sel:
+                    record_use(_model_map[_m], "eval")
                 start_evaluation(
                     [_model_map[m] for m in _ev_models_sel],
                     _ev_yaml_path, _ev_split, int(_ev_imgsz),
