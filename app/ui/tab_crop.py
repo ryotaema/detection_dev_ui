@@ -43,6 +43,17 @@ def _model_meta(model_path: Path, conf: Optional[float] = None) -> dict:
 
 
 def render_crop() -> None:
+    """クロップ生成タブ。
+
+    生成と選別は分けて呼ぶ。生成側は「検出していない」等で途中 return するが、
+    **選別は検出をやり直さずに開けなければならない**
+    （あとから採否を見直すのが本来の使い方のため）。
+    """
+    _render_generate()
+    _render_bg_selection()
+
+
+def _render_generate() -> None:
     st.markdown(
         '<div class="section-head"><h3>✂️ クロップ生成</h3></div>',
         unsafe_allow_html=True)
@@ -327,6 +338,21 @@ def render_crop() -> None:
             _bg_prev_n = st.select_slider(
                 "プレビュー枚数", options=[0, 2, 4, 6, 9], key="cr_bg_prev_n")
 
+        _bg6, _bg7 = st.columns([2, 1])
+        with _bg6:
+            st.session_state.setdefault("cr_bg_how", "even")
+            _bg_how = st.radio(
+                "選び方", list(BG_SAMPLING), horizontal=True, key="cr_bg_how",
+                format_func=lambda k: BG_SAMPLING[k],
+                help="「元画像ごとに均等」は、同じ場所を写した 1 枚から"
+                     "大量に採ってしまうのを防ぎます")
+        with _bg7:
+            st.session_state.setdefault("cr_bg_seed", 0)
+            _bg_seed = st.number_input(
+                "抽選の種", 0, 9999, step=1, key="cr_bg_seed",
+                help="同じ種なら毎回同じ選び方になります。"
+                     "選び直したいときは数字を変えてください")
+
         _bg4, _bg5 = st.columns([2, 1])
         with _bg4:
             st.session_state.setdefault("cr_bg_ratio", 0.15)
@@ -347,9 +373,10 @@ def render_crop() -> None:
         _n_bg_want = target_tile_count(_n_obj_est, float(_bg_ratio))
         st.caption(
             f"対象クロップ {_n_obj_est} 件に対し、背景は "
-            + (f"**{_n_bg_want} 枚**を採用します（残りは "
+            + (f"**{_n_bg_want} 枚**を{BG_SAMPLING[_bg_how]}で採用します（残りは "
                + ("`_unused/` へ" if _bg_keep else "破棄") + "）"
-               if _bg_ratio > 0 else "**全タイルを採用**します"))
+               if _bg_ratio > 0 else "**全タイルを採用**します")
+            + "　作ったあとで下の「⑤ 背景タイルを選別する」から人の目で直せます。")
 
         # 何枚に割れるかを先に見せる（作ってから多すぎたと気づくのを避ける）
         if int(_bg_prev_n) > 0:
@@ -435,9 +462,9 @@ def render_crop() -> None:
                 _bg, _out_dir / "background", tile_size=int(_tile),
                 tile_overlap=float(_overlap), out_format=_fmt,
                 background_ratio=float(_bg_ratio),
-                bg_sampling="all" if float(_bg_ratio) <= 0 else "random",
+                bg_sampling=("all" if float(_bg_ratio) <= 0 else _bg_how),
                 keep_unused_tiles=bool(_bg_keep),
-                n_object_crops=int(_res.get("crops", 0)), seed=0)
+                n_object_crops=int(_res.get("crops", 0)), seed=int(_bg_seed))
             if _b["ok"]:
                 st.success(
                     f"✅ 背景タイルを {_b['generated']} 枚作り、"
@@ -467,3 +494,100 @@ def render_crop() -> None:
                     }
                 })
             st.session_state.pop("cr_prev", None)
+
+
+
+def _bg_dirs() -> list:
+    """背景タイルを持つ出力先を新しい順に返す"""
+    return sorted((p.parent for p in DATA_DIR.glob("*/background/manifest.jsonl")),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _render_bg_selection() -> None:
+    import cv2
+
+    st.markdown("#### ⑤ 背景タイルを選別する")
+    _dirs = _bg_dirs()
+    if not _dirs:
+        st.caption("背景タイルを作ると、ここで採否を見直せます。")
+        return
+
+    _sel = st.selectbox(
+        "見直す出力先", [str(d.parent.relative_to(DATA_DIR)) for d in _dirs],
+        key="bgsel_dir")
+    _bgdir = DATA_DIR / _sel / "background"
+    _state = read_tile_selection(_bgdir)
+    if not _state:
+        st.caption("タイルがありません。")
+        return
+
+    _adopted = [k for k, v in _state.items() if v]
+    _unused = [k for k, v in _state.items() if not v]
+    metric_row([("全タイル", len(_state)), ("採用", len(_adopted)),
+                ("未採用", len(_unused))])
+
+    _c1, _c2, _c3 = st.columns([2, 1, 1])
+    with _c1:
+        _view = st.radio("表示", ["採用ぶん", "未採用ぶん", "すべて"],
+                         horizontal=True, key="bgsel_view")
+    with _c2:
+        _per = st.select_slider("1 ページの枚数", options=[6, 12, 24, 48],
+                                key="bgsel_per")
+    with _c3:
+        _cols_n = st.select_slider("列数", options=[3, 4, 6], key="bgsel_cols")
+
+    _names = sorted(_adopted if _view == "採用ぶん"
+                    else _unused if _view == "未採用ぶん" else _state)
+    if not _names:
+        st.caption("表示するタイルがありません。")
+        return
+
+    _pages = (len(_names) - 1) // int(_per) + 1
+    _page = st.number_input(f"ページ（全 {_pages}）", 1, _pages, step=1,
+                            key="bgsel_page") if _pages > 1 else 1
+    _shown = _names[(int(_page) - 1) * int(_per): int(_page) * int(_per)]
+
+    # チェックの初期値は現在の採否。ここで触ったものだけ上書きする
+    _edits = st.session_state.setdefault("bgsel_edits", {})
+    if st.session_state.get("bgsel_dir_prev") != _sel:
+        _edits.clear()
+        st.session_state["bgsel_dir_prev"] = _sel
+
+    _cols = st.columns(int(_cols_n))
+    for _i, _stem in enumerate(_shown):
+        _cur = _edits.get(_stem, _state.get(_stem, False))
+        _base = _bgdir if _state.get(_stem) else _bgdir / "_unused"
+        _hit = list((_base / "images").glob(f"{_stem}.*"))
+        with _cols[_i % int(_cols_n)]:
+            if _hit:
+                _im = cv2.imread(str(_hit[0]))
+                if _im is not None:
+                    st.image(cv2.cvtColor(_im, cv2.COLOR_BGR2RGB),
+                             use_column_width=True)
+            _new = st.checkbox(f"採用　`{_stem[-22:]}`", value=_cur,
+                               key=f"bgsel_cb_{_sel}_{_stem}")
+            if _new != _state.get(_stem, False):
+                _edits[_stem] = _new
+            else:
+                _edits.pop(_stem, None)
+
+    _changed = len(_edits)
+    _a1, _a2 = st.columns([1, 3])
+    with _a1:
+        _apply = st.button(f"✅ 反映する（{_changed} 件の変更）", key="bgsel_apply",
+                           type="primary", use_container_width=True,
+                           disabled=not _changed)
+    with _a2:
+        st.caption("外したタイルは消えず `_unused/` に移るだけなので、"
+                   "何度でもやり直せます。")
+
+    if _apply:
+        _final = [k for k in _state if _edits.get(k, _state[k])]
+        _r = apply_selection(_bgdir, _final)
+        if _r["ok"]:
+            _edits.clear()
+            st.success(f"✅ 採用 {_r['adopted']} 枚 / 未採用 {_r['unused']} 枚に"
+                       f"更新しました（{_r['moved']} 枚を移動）")
+            st.rerun()
+        else:
+            show_error(_r["error"], prefix="⚠ 反映できません: ")

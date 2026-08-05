@@ -726,3 +726,79 @@ def test_割合の材料が無いときと計算結果が0のときを区別す�
                                       background_ratio=0.15,
                                       n_object_crops=1, seed=0)
         assert r["tiles"] == 0 and r["unused"] == r["generated"]
+
+
+# ---------------------------------------------------------------------------
+# 仕様 §7.3 抽選のうえで人が選別する
+# ---------------------------------------------------------------------------
+def test_均等抽選は元画像の偏りを避ける():
+    """ランダムだと、たまたま同じ場所を写した 1 枚から大量に採ってしまい、
+    背景の種類が偏る。"""
+    from collections import Counter
+
+    from core.crop import sample_tiles
+
+    names = [f"big_tile_r{r}_c{c}" for r in range(6) for c in range(8)]
+    names += [f"small{i}_tile_r0_c{c}" for i in range(4) for c in range(2)]
+
+    even = sample_tiles(names, 10, how="even", seed=0)
+    src = Counter(n.split("_tile_")[0] for n in even)
+    assert len(src) == 5, f"元画像が散らばっていない: {dict(src)}"
+    assert max(src.values()) <= 3, f"1 枚に偏っている: {dict(src)}"
+
+
+def test_抽選は種を変えると選び方が変わる():
+    from core.crop import sample_tiles
+
+    names = [f"img{i}_tile_r0_c{c}" for i in range(6) for c in range(4)]
+    a = sample_tiles(names, 8, how="random", seed=0)
+    assert a == sample_tiles(names, 8, how="random", seed=0)   # 同じ種なら同じ
+    assert a != sample_tiles(names, 8, how="random", seed=7)   # 種を変えれば違う
+
+
+def test_人の選別を反映してもやり直せる():
+    """外したタイルは消さず `_unused/` に移すだけ。何度でも戻せること。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import (apply_selection, generate_background_tiles,
+                           read_tile_selection)
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        src.mkdir()
+        out = Path(d) / "bg"
+        generate_background_tiles(_make_bg(src, n=4), out, tile_size=256,
+                                  background_ratio=0.15, bg_sampling="even",
+                                  n_object_crops=100, seed=0)
+
+        state = read_tile_selection(out)
+        first = sorted(k for k, v in state.items() if v)
+        unused = sorted(k for k, v in state.items() if not v)
+        assert first and unused
+
+        # 採用を 2 件外し、未採用を 3 件採る
+        want = first[2:] + unused[:3]
+        r = apply_selection(out, want)
+        assert r["ok"] and r["adopted"] == len(want)
+
+        after = read_tile_selection(out)
+        assert sorted(k for k, v in after.items() if v) == sorted(want)
+        # manifest と実ファイルが食い違わないこと
+        assert len(list((out / "images").glob("*.png"))) == len(want)
+        assert len(list((out / "meta").glob("*.json"))) == len(want)
+
+        # 元に戻せる
+        assert apply_selection(out, first)["adopted"] == len(first)
+        assert sorted(k for k, v in read_tile_selection(out).items() if v) == first
+
+
+def test_選別は元の状態が無いと何もしない():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import apply_selection
+
+    with tempfile.TemporaryDirectory() as d:
+        r = apply_selection(Path(d), ["a", "b"])
+        assert not r["ok"] and "manifest" in r["error"]

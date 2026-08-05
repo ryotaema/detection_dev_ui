@@ -514,6 +514,139 @@ def target_tile_count(n_object_crops: int, background_ratio: float) -> int:
     return int(round(n_object_crops * r / (1.0 - r)))
 
 
+BG_SAMPLING = {
+    "random": "🎲 ランダム",
+    "even":   "⚖️ 元画像ごとに均等",
+    "all":    "📥 全部採用",
+}
+
+
+def _source_of(stem: str) -> str:
+    """タイル名から元画像の stem を取り出す（`xxx_tile_r0_c1` → `xxx`）"""
+    i = stem.rfind("_tile_r")
+    return stem[:i] if i > 0 else stem
+
+
+def sample_tiles(names: list, want: int, how: str = "random",
+                 seed: int = 0) -> list:
+    """背景タイルから採用ぶんを選ぶ。
+
+    `even` は**元画像ごとに順番に採る**。ランダムだと、たまたま同じ場所を
+    写した 1 枚から大量に採ってしまい、背景の種類が偏ることがある。
+    どちらも seed 固定で毎回同じ選び方になる（再現性）。
+    """
+    import random as _random
+
+    names = list(names)
+    if how == "all" or want >= len(names):
+        return sorted(names)
+    if want <= 0:
+        return []
+
+    rng = _random.Random(seed)
+    if how != "even":
+        return sorted(rng.sample(names, want))
+
+    groups: dict = {}
+    for n in names:
+        groups.setdefault(_source_of(n), []).append(n)
+    for g in groups.values():
+        rng.shuffle(g)
+
+    picked, keys = [], sorted(groups)
+    while len(picked) < want:
+        moved = False
+        for k in keys:
+            if groups[k]:
+                picked.append(groups[k].pop())
+                moved = True
+                if len(picked) >= want:
+                    break
+        if not moved:
+            break
+    return sorted(picked)
+
+
+def read_tile_selection(bg_dir) -> dict:
+    """いまの採否を {タイル名: 採用か} で返す"""
+    rows = {}
+    mf = Path(bg_dir) / "manifest.jsonl"
+    if not mf.exists():
+        return rows
+    for line in mf.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        stem = Path(r.get("crop_image", "")).stem
+        if stem:
+            rows[stem] = bool(r.get("adopted"))
+    return rows
+
+
+def apply_selection(bg_dir, adopt: list) -> dict:
+    """人が決めた採否を反映する（`images/` と `_unused/` を入れ替える）。
+
+    抽選はあくまで下ごしらえで、**最終判断は人**。
+    捨てずに `_unused/` へ動かすだけなので、何度でもやり直せる。
+    """
+    out = Path(bg_dir)
+    cur = read_tile_selection(out)
+    if not cur:
+        return {"ok": False, "error": "manifest.jsonl がありません",
+                "adopted": 0, "unused": 0, "moved": 0}
+
+    want = set(adopt)
+    unused = out / "_unused"
+    moved = 0
+
+    for stem, was in cur.items():
+        now = stem in want
+        if now == was:
+            continue
+        # ここに来るのは採否が変わったものだけ
+        src_base, dst_base = (out, unused) if was else (unused, out)
+        for sub, ext_glob in (("images", "*"), ("meta", ".json")):
+            if sub == "images":
+                cands = list((src_base / "images").glob(f"{stem}.*"))
+            else:
+                cands = [src_base / "meta" / f"{stem}.json"]
+            for f in cands:
+                if not f.exists():
+                    continue
+                (dst_base / sub).mkdir(parents=True, exist_ok=True)
+                f.replace(dst_base / sub / f.name)
+                if sub == "images":
+                    moved += 1
+
+    # manifest を書き直す（採否の正本はここ）
+    ext = {}
+    for stem in cur:
+        for base in (out, unused):
+            hit = list((base / "images").glob(f"{stem}.*"))
+            if hit:
+                ext[stem] = hit[0].suffix.lstrip(".")
+                break
+    with open(out / "manifest.jsonl", "w", encoding="utf-8") as mf:
+        for stem in sorted(cur):
+            ok = stem in want
+            base = "" if ok else "_unused/"
+            e = ext.get(stem, "png")
+            mf.write(json.dumps({
+                "crop_image": f"{base}images/{stem}.{e}",
+                "meta": f"{base}meta/{stem}.json",
+                "data_type": "background_tile",
+                "annotation_status": "raw",
+                "adopted": ok,
+            }, ensure_ascii=False) + "\n")
+
+    return {"ok": True, "error": "", "moved": moved,
+            "adopted": sum(1 for s in cur if s in want),
+            "unused": sum(1 for s in cur if s not in want)}
+
+
 def generate_background_tiles(
     image_paths,
     out_dir: Path,
@@ -596,12 +729,7 @@ def generate_background_tiles(
     want = (len(made) if _no_basis
             else min(len(made), target_tile_count(n_object_crops, background_ratio)))
 
-    if want >= len(made):
-        adopted = list(made)
-    else:
-        import random as _random
-        # seed 固定で毎回同じ選び方になるようにする（再現性）
-        adopted = sorted(_random.Random(seed).sample(made, want))
+    adopted = sample_tiles(made, want, how=bg_sampling, seed=seed)
     adopted_set = set(adopted)
 
     unused_dir = out / "_unused"
