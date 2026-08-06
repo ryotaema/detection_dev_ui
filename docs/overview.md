@@ -159,6 +159,16 @@ Step1 のアノテーション作業そのものが速くなり、この流れ�
 実機では約 2/3 を占めることになり、写る大きさがずれます。ラベルも一緒に移り、
 枠の外に出たものは落とされます。
 
+クロップを作ると、出力先に `crop_log.txt`（どの設定で何枚作ったか）と
+`crop_config.json`（切り出しの規則）が残ります。実機側は次のように読み込めば、
+学習データと同じ規則で切り出せます。
+
+```python
+from core.crop import make_crop, load_crop_config
+cfg = load_crop_config("data/crops_20260806_1200")
+crop, geom = make_crop(frame, bbox_xyxy, **cfg)
+```
+
 設定は保存されるので、一度オンにすれば次回から出たままです。
 
 ### 拡張機能

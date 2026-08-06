@@ -458,6 +458,7 @@ def _render_generate() -> None:
         for _p, _why in _res["skipped"][:20]:
             st.caption(f"・{Path(_p).name} — {_why}")
 
+        _b = None
         if _bg_on and _bg:
             _b = generate_background_tiles(
                 _bg, _out_dir / "background", tile_size=int(_tile),
@@ -474,6 +475,30 @@ def _render_generate() -> None:
                        if _b.get("unused") else ""))
             else:
                 show_error(_b["error"], prefix="⚠ 背景タイル: ")
+
+        # 何をどう作ったかを出力先に残す（画面の表示は次の操作で消えるため）
+        _params = {
+            "source_dir": str(_src_dir), "model": str(_model),
+            "conf_threshold": float(_conf),
+            "annotation_scale": float(_ann_scale),
+            "target_scale": float(_tgt_scale),
+            "scale_basis": _basis, "square": bool(_square),
+            "pad_mode": _pad_mode, "out_size": int(_out_size),
+            "max_upscale": float(_max_up), "out_format": _fmt,
+            "dedup_center_dist": float(_dedup),
+        }
+        write_crop_log(_out_dir, _res, _params, _b)
+        _cfg = write_crop_config(_out_dir, _params)
+        if _cfg:
+            st.caption(
+                f"📄 `crop_log.txt` と `{CROP_CONFIG}` を書き出しました。"
+                "実機側は次のように読み込むと、切り出しの規則が確実にそろいます:"
+            )
+            st.code(
+                "from core.crop import make_crop, load_crop_config\n"
+                f"cfg = load_crop_config(r\"{_out_dir}\")\n"
+                "crop, geom = make_crop(frame, bbox_xyxy, **cfg)",
+                language="python")
 
         if _res["crops"]:
             record_dataset_provenance(

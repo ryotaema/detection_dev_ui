@@ -1080,3 +1080,116 @@ def recut_dataset(src_dir, out_dir, from_scale: float, to_scale: float,
     if not result["images"]:
         result["error"] = "1 枚も切り直せませんでした"
     return result
+
+
+# ---------------------------------------------------------------------------
+# 処理ログ（仕様 §8）と、実機へ渡す設定
+# ---------------------------------------------------------------------------
+def write_crop_log(out_dir, result: dict, params: dict,
+                   bg_result: Optional[dict] = None) -> Optional[Path]:
+    """何をどう作ったかを出力先に残す（仕様 §8）。
+
+    画面の表示は次の操作で消える。あとから
+    「このデータはどの設定で作ったか」を確かめられるようにする。
+    """
+    out = Path(out_dir)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        lines = [
+            f"# クロップ生成ログ  {datetime.now().astimezone().isoformat()}",
+            "",
+            "## 設定",
+        ]
+        lines += [f"  {k:20} {v}" for k, v in params.items()]
+        lines += [
+            "",
+            "## 結果",
+            f"  入力画像           {result.get('images', 0)}",
+            f"  生成クロップ       {result.get('crops', 0)}",
+            f"  重複除去で落とした {result.get('rejected', 0)}",
+            f"  拡大上限が効いた   {result.get('upscale_limited', 0)}",
+            f"  確認画像           {result.get('debug_images', 0)}",
+        ]
+        if bg_result:
+            lines += [
+                "",
+                "## 背景タイル",
+                f"  生成               {bg_result.get('generated', 0)}",
+                f"  採用               {bg_result.get('tiles', 0)}",
+                f"  未採用             {bg_result.get('unused', 0)}",
+            ]
+        skipped = list(result.get("skipped") or [])
+        errors = list(result.get("errors") or [])
+        if skipped or errors:
+            lines += ["", "## 問題（処理は止めていない）"]
+            for p, why in skipped[:200]:
+                lines.append(f"  skip  {p} — {why}")
+            for e in errors[:200]:
+                lines.append(f"  error {e}")
+
+        f = out / "crop_log.txt"
+        f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return f
+    except Exception:
+        return None
+
+
+CROP_CONFIG = "crop_config.json"
+
+
+def write_crop_config(out_dir, params: dict) -> Optional[Path]:
+    """実機がそのまま読める形で、切り出しの規則を書き出す。
+
+    **学習データを作った設定と実機の設定がずれると精度が壊れる。**
+    人が値を書き写す運用にすると、いつか必ずずれるので、
+    ファイルにして渡せるようにしておく。
+    実機は `target_scale` で 1 回切る（アノテーション用の 2 段倍率は使わない）。
+    """
+    try:
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": datetime.now().astimezone().isoformat(),
+            "note": "実機は make_crop(frame, bbox, **runtime) で 1 回切る",
+            "runtime": {
+                "scale": float(params.get("target_scale", 1.5)),
+                "scale_basis": params.get("scale_basis", "long_side"),
+                "square": bool(params.get("square", True)),
+                "pad_mode": params.get("pad_mode", "reflect"),
+                "pad_value": int(params.get("pad_value", 0)),
+                "out_size": int(params.get("out_size", DEFAULT_OUT_SIZE)),
+                "max_upscale": float(params.get("max_upscale", 1.5)),
+            },
+            "annotation": {
+                "scale": float(params.get("annotation_scale", 2.0)),
+            },
+        }
+        f = out / CROP_CONFIG
+        f.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+        return f
+    except Exception:
+        return None
+
+
+def load_crop_config(path) -> dict:
+    """`crop_config.json` から実機用の引数を読む。
+
+    使い方:
+        cfg = load_crop_config("data/crops_xxx")
+        crop, geom = make_crop(frame, bbox_xyxy, **cfg)
+    """
+    p = Path(path)
+    if p.is_dir():
+        p = p / CROP_CONFIG
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    rt = data.get("runtime") or {}
+    allowed = {"scale", "scale_basis", "square", "pad_mode",
+               "pad_value", "out_size", "max_upscale"}
+    return {k: v for k, v in rt.items() if k in allowed}

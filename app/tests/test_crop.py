@@ -1019,3 +1019,62 @@ def test_切り直しは既存の出力先を上書きしない():
         r = recut_dataset(src, out, from_scale=2.0, to_scale=1.5)
         assert not r["ok"] and "既に" in r["error"]
         assert (out / "images" / "x.png").read_bytes() == b"keep"
+
+
+# ---------------------------------------------------------------------------
+# 仕様 §8 ログ / 実機へ渡す設定
+# ---------------------------------------------------------------------------
+def test_処理ログに設定と結果が残る():
+    """画面の表示は次の操作で消える。あとから
+    「このデータはどの設定で作ったか」を確かめられること。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import write_crop_log
+
+    with tempfile.TemporaryDirectory() as d:
+        f = write_crop_log(
+            Path(d),
+            {"images": 12, "crops": 30, "rejected": 2, "upscale_limited": 5,
+             "debug_images": 3, "skipped": [("x.png", "画像を読めません")],
+             "errors": []},
+            {"annotation_scale": 2.0, "target_scale": 1.5, "out_size": 512},
+            {"generated": 40, "tiles": 6, "unused": 34})
+        assert f and f.exists()
+        text = f.read_text(encoding="utf-8")
+        for must in ("annotation_scale", "target_scale", "30", "背景タイル",
+                     "34", "画像を読めません"):
+            assert must in text, must
+
+
+def test_実機用の設定はそのままmake_cropに渡せる():
+    """人が値を書き写す運用にすると、いつか必ずずれる。
+    学習データを作った設定と実機の設定がずれると精度が壊れる。"""
+    import inspect
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+
+    from core.crop import (load_crop_config, make_crop, write_crop_config)
+
+    with tempfile.TemporaryDirectory() as d:
+        write_crop_config(Path(d), {
+            "annotation_scale": 2.0, "target_scale": 1.5, "out_size": 512,
+            "max_upscale": 1.5, "scale_basis": "long_side", "square": True,
+            "pad_mode": "reflect", "pad_value": 0})
+
+        cfg = load_crop_config(Path(d))
+        # make_crop の引数名と食い違わないこと
+        assert set(cfg) <= set(inspect.signature(make_crop).parameters)
+        # 実機は target_scale で 1 回切る（アノテーション用の 2.0 ではない）
+        assert cfg["scale"] == 1.5
+
+        frame = np.zeros((480, 640, 3), np.uint8)
+        _, geom = make_crop(frame, (250, 200, 330, 280), **cfg)
+        assert geom["scale"] == 1.5
+
+        # ディレクトリでもファイルでも読めること
+        assert load_crop_config(Path(d) / "crop_config.json") == cfg
+        # 無ければ空（落とさない）
+        assert load_crop_config(Path(d) / "nope") == {}
