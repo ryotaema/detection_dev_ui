@@ -885,3 +885,137 @@ def test_コンタクトシートは作り直すと古いシートを残さな�
         few = build_contact_sheet(out, cols=8, rows=8, thumb=96)    # 1シート
         assert len(many["sheets"]) > len(few["sheets"])
         assert len(list((out / "contact_sheet").glob("sheet_*"))) == len(few["sheets"])
+
+
+# ---------------------------------------------------------------------------
+# 学習用への切り直し（アノテーション倍率 → target 倍率）
+# ---------------------------------------------------------------------------
+def _seg_dataset(root, n=2, size=512):
+    """中央に対象がある segment 形式の小さなデータセットを作る"""
+    import cv2
+    import numpy as np
+
+    for sp in ("train", "val"):
+        (root / "images" / sp).mkdir(parents=True, exist_ok=True)
+        (root / "labels" / sp).mkdir(parents=True, exist_ok=True)
+        for i in range(n):
+            im = np.full((size, size, 3), 40, np.uint8)
+            cv2.rectangle(im, (int(size * .32), int(size * .32)),
+                          (int(size * .68), int(size * .68)), (60, 60, 220), -1)
+            cv2.imwrite(str(root / "images" / sp / f"c{i}.png"), im)
+            (root / "labels" / sp / f"c{i}.txt").write_text(
+                "0 0.32 0.32 0.68 0.32 0.68 0.68 0.32 0.68\n", encoding="utf-8")
+    (root / "data.yaml").write_text(
+        "path: .\ntrain: images/train\nval: images/val\nnc: 1\n"
+        "names: [o]\ntask: segment\n", encoding="utf-8")
+
+
+def test_切り直すと学習と実機の画角が一致する():
+    """**これが揃わないと精度が壊れる。**
+    アノテーション用 2.0 のまま学習すると、対象は画面の約 1/2 を占めるが、
+    実機は target_scale 1.5 なので約 2/3 を占める。"""
+    import cv2
+    import numpy as np
+
+    from core.crop import make_crop
+
+    W, H = 640, 480
+    src = np.full((H, W, 3), 40, np.uint8)
+    bbox = (260, 200, 340, 280)
+    cv2.rectangle(src, bbox[:2], bbox[2:], (60, 60, 220), -1)
+
+    def frac(img):
+        m = (img[:, :, 2] > 150) & (img[:, :, 0] < 120)
+        ys, xs = np.where(m)
+        return (xs.max() - xs.min() + 1) / img.shape[1]
+
+    ann, _ = make_crop(src, bbox, scale=2.0, out_size=512, max_upscale=0.0)
+    tgt, _ = make_crop(src, bbox, scale=1.5, out_size=512, max_upscale=0.0)
+
+    # アノテ用を内側 75%（1.5/2.0）に切り直す
+    w = ann.shape[1]
+    rw = w * (1.5 / 2.0)
+    rx = int(round((w - rw) / 2))
+    recut = ann[rx:rx + int(round(rw)), rx:rx + int(round(rw))]
+
+    assert abs(frac(recut) - frac(tgt)) < 0.01, \
+        f"切り直しても実機と揃わない: {frac(recut):.3f} vs {frac(tgt):.3f}"
+    assert abs(frac(ann) - frac(tgt)) > 0.1, \
+        "切り直さなくても揃ってしまう（テストの前提が壊れている）"
+
+
+def test_切り直しでラベルも移る():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import recut_dataset
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        out = Path(d) / "out"
+        _seg_dataset(src)
+
+        r = recut_dataset(src, out, from_scale=2.0, to_scale=1.5)
+        assert r["ok"] and r["images"] == 4
+
+        vals = [float(v) for v in
+                (out / "labels" / "train" / "c0.txt").read_text().split()[1:]]
+        # 0.32 → (0.32*512 - 64) / 384 = 0.26
+        assert abs(vals[0] - 0.26) < 0.01, vals[:2]
+        # 対象の占める幅が 1/0.75 = 1.33 倍になっていること
+        before, after = 0.68 - 0.32, max(vals[0::2]) - min(vals[0::2])
+        assert abs(after / before - 1 / 0.75) < 0.05, (before, after)
+
+        assert (out / "data.yaml").exists(), "data.yaml が引き継がれていない"
+
+
+def test_枠の外に出たラベルは落とす():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import recut_dataset
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        out = Path(d) / "out"
+        _seg_dataset(src, n=1)
+        # 隅にある対象を足す（内側 75% には入らない）
+        p = src / "labels" / "train" / "c0.txt"
+        p.write_text(p.read_text() + "0 0.01 0.01 0.05 0.01 0.05 0.05 0.01 0.05\n",
+                     encoding="utf-8")
+
+        r = recut_dataset(src, out, from_scale=2.0, to_scale=1.5)
+        assert r["dropped"] >= 1
+        assert len((out / "labels" / "train" / "c0.txt").read_text()
+                   .strip().splitlines()) == 1
+
+
+def test_切り直しは倍率の向きを間違えたら止まる():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import recut_dataset
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        _seg_dataset(src, n=1)
+        r = recut_dataset(src, Path(d) / "o1", from_scale=1.5, to_scale=2.0)
+        assert not r["ok"] and "小さく" in r["error"]
+
+
+def test_切り直しは既存の出力先を上書きしない():
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import recut_dataset
+
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "src"
+        _seg_dataset(src, n=1)
+        out = Path(d) / "out"
+        (out / "images").mkdir(parents=True)
+        (out / "images" / "x.png").write_bytes(b"keep")
+
+        r = recut_dataset(src, out, from_scale=2.0, to_scale=1.5)
+        assert not r["ok"] and "既に" in r["error"]
+        assert (out / "images" / "x.png").read_bytes() == b"keep"

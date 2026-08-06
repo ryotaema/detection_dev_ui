@@ -51,6 +51,7 @@ def render_crop() -> None:
     """
     _render_generate()
     _render_bg_selection()
+    _render_recut()
 
 
 def _render_generate() -> None:
@@ -673,3 +674,102 @@ def _render_contact_sheet(bgdir, state: dict) -> None:
                 st.rerun()
             else:
                 show_error(_r["error"], prefix="⚠ 反映できません: ")
+
+
+def _render_recut() -> None:
+    """アノテーション倍率で切ったものを、学習（＝実機）の倍率へ切り直す。
+
+    ここを飛ばすと、学習では対象が画面の 1/2、実機では 2/3 を占めることになる。
+    実測では占有率が 0.506 対 0.672 と食い違った。
+    """
+    st.markdown("#### ⑥ 学習用に切り直す")
+    st.caption(
+        "アノテーション用は周りが見えるよう大きめ（annotation_scale）に切っています。"
+        "**学習は実機と同じ倍率（target_scale）に揃える**必要があるので、"
+        "セグメンテーションを付け終えたら、ここで内側へ切り直してください。"
+    )
+
+    _dss = sorted([d for d in DATA_DIR.iterdir()
+                   if d.is_dir() and (d / "data.yaml").exists()],
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    if not _dss:
+        st.caption("切り直せるデータセットがありません。")
+        return
+
+    _c1, _c2, _c3 = st.columns([3, 1, 1])
+    with _c1:
+        _src_name = st.selectbox("切り直すデータセット",
+                                 [d.name for d in _dss], key="rc_src")
+    _src = DATA_DIR / _src_name
+
+    # 作ったときの倍率が残っていれば、それを初期値にする
+    _prov = (read_provenance(_src) or {}).get("crop") or {}
+    with _c2:
+        _from = st.number_input("いまの倍率", 1.0, 6.0, step=0.1, format="%.2f",
+                                value=float(_prov.get("annotation_scale", 2.0)),
+                                key="rc_from")
+    with _c3:
+        _to = st.number_input("学習で使う倍率", 1.0, 6.0, step=0.1, format="%.2f",
+                              value=float(_prov.get("target_scale", 1.5)),
+                              key="rc_to")
+
+    if _prov:
+        st.caption(f"　このデータセットは annotation_scale "
+                   f"{_prov.get('annotation_scale')} / target_scale "
+                   f"{_prov.get('target_scale')} で作られています。")
+    else:
+        st.caption("　作成時の倍率が記録されていません。値を確かめてください。")
+
+    _c4, _c5 = st.columns([2, 2])
+    with _c4:
+        _keep = st.checkbox("実機の出力サイズに合わせてリサイズする", value=True,
+                            key="rc_resize",
+                            help="実機が out_size で出すなら合わせておくと、"
+                                 "見た目の質感まで揃います")
+    with _c5:
+        _rsize = st.number_input("そのサイズ", 128, 2048, step=64,
+                                 value=int(_prov.get("out_size", DEFAULT_OUT_SIZE)),
+                                 key="rc_size", disabled=not _keep)
+
+    if _to >= _from:
+        st.warning("学習で使う倍率は、いまの倍率より小さくしてください。")
+        return
+
+    _shrink = float(_to) / float(_from)
+    st.caption(f"内側 **{_shrink * 100:.0f}%** を切り出します"
+               f"（対象は相対的に {1 / _shrink:.2f} 倍の大きさに写ります）。")
+
+    _out_name = st.text_input("出力先（data/ 配下の名前）",
+                              value=f"{_src_name}_t{_to:g}".replace(".", ""),
+                              key="rc_out")
+    _out = DATA_DIR / _out_name.strip() if _out_name.strip() else None
+
+    if st.button("✂️ 切り直す", key="rc_run", type="primary",
+                 use_container_width=True, disabled=_out is None):
+        _bar = st.progress(0.0, text="切り直しています…")
+
+        def _p(done, total):
+            if total:
+                _bar.progress(min(done / total, 1.0), text=f"{done} / {total} 枚")
+
+        _r = recut_dataset(_src, _out, float(_from), float(_to),
+                           out_size=int(_rsize) if _keep else None,
+                           on_progress=_p)
+        _bar.empty()
+        if _r["ok"]:
+            st.success(
+                f"✅ {_r['images']} 枚を切り直しました"
+                f"（ラベル {_r['labels']} 件"
+                + (f"　枠の外に出た {_r['dropped']} 件は落としました" if _r["dropped"] else "")
+                + f"）→ `{_out.name}`")
+            record_dataset_provenance(
+                _out, source="recut", task_type=dataset_task_type(_src) or "segment",
+                labels=[], status="draft", tags=["クロップ", "切り直し"],
+                extra={"recut": {"from": str(_src), "from_scale": float(_from),
+                                 "target_scale": float(_to),
+                                 "out_size": int(_rsize) if _keep else None,
+                                 "images": _r["images"]}})
+        else:
+            show_error(_r["error"], prefix="⚠ 切り直せません: ")
+        for _p2, _why in _r["skipped"][:10]:
+            st.caption(f"・{Path(_p2).name} — {_why}")

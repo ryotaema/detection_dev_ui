@@ -931,3 +931,152 @@ def read_manifest(out_dir: Path) -> list[dict]:
         except Exception:
             continue
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 学習用への切り直し（アノテーション倍率 → target 倍率）
+#
+#   アノテーション用は大きめ（annotation_scale=2.0）に切る。
+#   周りが見えていたほうが、どこまでが対象かを判断しやすいため。
+#   しかし**学習は実機と同じ画角（target_scale=1.5）でなければならない**。
+#   切り直さないまま学習すると、学習では対象が画面の 1/2、
+#   実機では 2/3 を占めることになり、写る大きさがずれる。
+#
+#   切り出しは正方形で中心ぞろえなので、倍率の比だけで内側の矩形が決まる
+#   （メタが無くても切り直せる）。ラベルも同じ変換で移す。
+# ---------------------------------------------------------------------------
+def _recut_label_line(line: str, rx: float, ry: float, rw: float, rh: float,
+                      W: int, H: int) -> Optional[str]:
+    """ラベル 1 行を、切り直した矩形の座標系へ移す。
+
+    枠から出た部分は切り詰める。完全に外に出たものは None（＝落とす）。
+    """
+    parts = line.split()
+    if len(parts) < 5:
+        return None
+    cls = parts[0]
+    try:
+        vals = [float(v) for v in parts[1:]]
+    except ValueError:
+        return None
+
+    if len(vals) == 4:      # detect: cx cy w h
+        cx, cy, bw, bh = vals
+        x1, y1 = (cx - bw / 2) * W, (cy - bh / 2) * H
+        x2, y2 = (cx + bw / 2) * W, (cy + bh / 2) * H
+        nx1, ny1 = max(x1, rx), max(y1, ry)
+        nx2, ny2 = min(x2, rx + rw), min(y2, ry + rh)
+        if nx2 - nx1 <= 1 or ny2 - ny1 <= 1:
+            return None
+        ncx = ((nx1 + nx2) / 2 - rx) / rw
+        ncy = ((ny1 + ny2) / 2 - ry) / rh
+        return (f"{cls} {ncx:.6f} {ncy:.6f} "
+                f"{(nx2 - nx1) / rw:.6f} {(ny2 - ny1) / rh:.6f}")
+
+    if len(vals) < 6 or len(vals) % 2:
+        return None
+
+    pts = [(vals[i] * W, vals[i + 1] * H) for i in range(0, len(vals), 2)]
+    inside = [p for p in pts
+              if rx <= p[0] <= rx + rw and ry <= p[1] <= ry + rh]
+    if not inside:
+        return None         # まるごと枠の外
+
+    moved = []
+    for x, y in pts:
+        nx = min(max(x, rx), rx + rw)
+        ny = min(max(y, ry), ry + rh)
+        moved.append(((nx - rx) / rw, (ny - ry) / rh))
+    # 潰れた（面積が無い）ものは落とす
+    xs = [p[0] for p in moved]
+    ys = [p[1] for p in moved]
+    if max(xs) - min(xs) < 1e-3 or max(ys) - min(ys) < 1e-3:
+        return None
+    return cls + " " + " ".join(f"{x:.6f} {y:.6f}" for x, y in moved)
+
+
+def recut_dataset(src_dir, out_dir, from_scale: float, to_scale: float,
+                  out_size: Optional[int] = None, on_progress=None) -> dict:
+    """アノテーション倍率で切ったデータセットを、target 倍率へ切り直す。
+
+    画像は中心を保ったまま内側を切り、ラベルも同じ変換で移す。
+    `out_size` を渡すと最後に一度だけリサイズする（実機の出力と揃えたいとき）。
+    """
+    import cv2
+
+    src, out = Path(src_dir), Path(out_dir)
+    result = {"ok": False, "error": "", "images": 0, "labels": 0,
+              "dropped": 0, "skipped": [], "out_dir": str(out)}
+
+    if not src.exists():
+        result["error"] = f"元のデータセットがありません: {src}"
+        return result
+    if out.exists() and any(out.iterdir()):
+        result["error"] = f"出力先が既にあります: {out.name}（別の名前にしてください）"
+        return result
+    ratio = float(to_scale) / max(1e-6, float(from_scale))
+    if not (0 < ratio < 1):
+        result["error"] = (f"target 倍率 ({to_scale}) は "
+                           f"アノテーション倍率 ({from_scale}) より小さくしてください")
+        return result
+
+    imgs = [p for p in src.rglob("images/*/*") if p.suffix.lower() in IMG_EXTS]
+    if not imgs:
+        result["error"] = "画像が見つかりません"
+        return result
+
+    for n, ip in enumerate(imgs, 1):
+        if on_progress:
+            on_progress(n, len(imgs))
+        img = cv2.imread(str(ip))
+        if img is None:
+            result["skipped"].append((str(ip), "画像を読めません"))
+            continue
+        H, W = img.shape[:2]
+        rw, rh = W * ratio, H * ratio
+        rx, ry = (W - rw) / 2, (H - rh) / 2
+        ix, iy = int(round(rx)), int(round(ry))
+        ix2, iy2 = int(round(rx + rw)), int(round(ry + rh))
+        cut = img[iy:iy2, ix:ix2]
+        if cut.size == 0:
+            result["skipped"].append((str(ip), "切り直せません"))
+            continue
+        if out_size:
+            cut = cv2.resize(cut, (int(out_size), int(out_size)),
+                             interpolation=(cv2.INTER_AREA
+                                            if cut.shape[0] > out_size
+                                            else cv2.INTER_LINEAR))
+
+        rel = ip.relative_to(src)
+        dst = out / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(dst), cut)
+        result["images"] += 1
+
+        lp = Path(str(ip).replace("/images/", "/labels/")).with_suffix(".txt")
+        if not lp.exists():
+            continue
+        lines = []
+        for line in lp.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            moved = _recut_label_line(line, rx, ry, rw, rh, W, H)
+            if moved:
+                lines.append(moved)
+            else:
+                result["dropped"] += 1
+        lo = out / lp.relative_to(src)
+        lo.parent.mkdir(parents=True, exist_ok=True)
+        lo.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        result["labels"] += len(lines)
+
+    for extra in ("data.yaml", "classes.txt"):
+        f = src / extra
+        if f.exists():
+            (out / extra).write_text(f.read_text(encoding="utf-8"),
+                                     encoding="utf-8")
+
+    result["ok"] = result["images"] > 0
+    if not result["images"]:
+        result["error"] = "1 枚も切り直せませんでした"
+    return result
