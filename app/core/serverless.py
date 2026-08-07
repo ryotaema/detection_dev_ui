@@ -91,6 +91,34 @@ def cached_nuclio_functions() -> list[dict]:
     return list_nuclio_functions()
 
 
+def _read_deployed(fn_dir: Path) -> dict:
+    """`.deployed.json`（どの重みで焼いたか）を読む。無ければ空。"""
+    f = Path(fn_dir) / ".deployed.json"
+    if not f.exists():
+        return {}
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _weights_sha1(path) -> str:
+    """重みの照合用ハッシュ。先頭だけで足りる（差し替われば必ず変わる）。"""
+    import hashlib
+
+    p = Path(path)
+    if not p.exists():
+        return ""
+    try:
+        h = hashlib.sha1()
+        with open(p, "rb") as f:
+            h.update(f.read(8 * 1024 * 1024))
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
 def list_serverless_defs() -> list[dict]:
     """serverless/custom/ 配下の関数定義（未デプロイのものも含む）"""
     defs = []
@@ -114,6 +142,17 @@ def list_serverless_defs() -> list[dict]:
         if not model_weights and model_run:
             model_weights = f"{model_run}/weights/best.pt"
 
+        # 重みはビルド時にコンテナへ焼き込まれる。models/ 側を差し替えても
+        # 再デプロイするまで古いままなので、デプロイ時の記録と突き合わせる
+        dep = _read_deployed(d)
+        wp = MODELS_DIR / model_weights if model_weights else None
+        cur_sha = _weights_sha1(wp) if wp else ""
+        cur_size = wp.stat().st_size if wp and wp.exists() else 0
+        changed = bool(
+            dep.get("sha1") and cur_sha
+            and (dep["sha1"] != cur_sha
+                 or (dep.get("size") and dep["size"] != cur_size)))
+
         fn_name, fn_display = "", ""
         y = d / "function.yaml"
         if y.exists():
@@ -129,6 +168,9 @@ def list_serverless_defs() -> list[dict]:
             "dir": d.name,
             "model_run": model_run,
             "model_weights": model_weights,
+            "deployed_sha1": dep.get("sha1", ""),
+            "deployed_at": dep.get("deployed_at", ""),
+            "weights_changed": changed,
             "function_name": fn_name,
             "display": fn_display,
             "has_gpu_yaml": (d / "function-gpu.yaml").exists(),

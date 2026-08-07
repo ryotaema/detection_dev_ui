@@ -104,9 +104,21 @@ def render_annotate() -> None:
                         st.markdown(f"{_badge} **{_fn['display']}**")
                         st.caption(f"`{_fn['name']}`")
                         st.caption("🏷 ラベル: " + (", ".join(_fn["labels"]) or "—"))
-                        if _d.get("model_run"):
+                        if _d.get("model_weights"):
                             _mr_ok = "✅" if _d.get("model_exists") else "⚠ 見つかりません"
-                            st.caption(f"📦 モデル: `models/{_d['model_run']}` {_mr_ok}")
+                            st.caption(f"📦 モデル: `models/{_d['model_weights']}` {_mr_ok}")
+                            if _d.get("deployed_at"):
+                                st.caption(f"🕐 デプロイ: {_d['deployed_at'][:19].replace('T', ' ')}")
+                            # 重みはビルド時に焼き込まれるので、models/ を差し替えても
+                            # 再デプロイしない限り古いモデルが動き続ける
+                            if _d.get("weights_changed"):
+                                st.warning(
+                                    "⚠ **重みが更新されています。**いま動いているのは"
+                                    "デプロイ時点のモデルです。右の「🔄 再デプロイ」を"
+                                    "押すと最新のモデルに入れ替わります。")
+                            elif not _d.get("deployed_sha1"):
+                                st.caption("ℹ この関数はデプロイ記録がありません"
+                                           "（更新の検知は次回のデプロイから効きます）")
                     with _fc2:
                         st.metric("状態", _fn["state"] or "—")
                     with _fc3:
@@ -115,7 +127,8 @@ def render_annotate() -> None:
                         if _d.get("dir"):
                             if st.button("🔄 再デプロイ", key=f"redeploy_{_fn['name']}",
                                          use_container_width=True, disabled=_dep_running,
-                                         help="モデルを差し替えた後に実行すると最新の best.pt が反映されます"):
+                                         type="primary" if _d.get("weights_changed") else "secondary",
+                                         help="モデルを差し替えた後に実行すると最新の重みが反映されます"):
                                 start_deploy(_d["dir"], use_gpu=_fn["gpu"])
                                 cached_nuclio_functions.clear()
                                 st.rerun()

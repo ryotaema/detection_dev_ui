@@ -133,11 +133,31 @@ for name in "${TARGETS[@]}"; do
   echo "=========================================================="
   echo "  Deploy: $name  (weights=${best_pt#"$PROJECT_DIR/models/"})"
   echo "=========================================================="
-  "$NUCTL" deploy --project-name cvat \
+  if "$NUCTL" deploy --project-name cvat \
     --path "$stage" \
     --file "$stage/function.yaml" \
     --platform local \
-    --platform-config "{\"attributes\": {\"network\": \"$CVAT_NETWORK\"}}"
+    --platform-config "{\"attributes\": {\"network\": \"$CVAT_NETWORK\"}}"; then
+    # どの重みで焼いたかを残す。
+    # 重みはビルド時にコンテナへ焼き込まれるので、models/ 側を更新しても
+    # 再デプロイするまで反映されない。**気づけないのが一番の問題**なので、
+    # ここに記録して UI が「更新されています」と出せるようにする。
+    # 照合は先頭 8MB のハッシュとサイズ。**Python 側と同じ取り方にすること**
+    # （全体 sha1 と先頭 8MB sha1 は当然一致せず、常に「更新あり」になる）
+    _sha="$(head -c 8388608 "$best_pt" | sha1sum | cut -d" " -f1)"
+    _size="$(stat -c %s "$best_pt")"
+    cat > "$fn_dir/.deployed.json" <<EOF
+{
+  "weights": "${best_pt#"$PROJECT_DIR/models/"}",
+  "sha1": "$_sha",
+  "size": $_size,
+  "gpu": $([ "$USE_GPU" = "1" ] && echo true || echo false),
+  "deployed_at": "$(date -Iseconds)"
+}
+EOF
+    # コンテナ内 root で実行されることがあるため、ホストからも読み書きできるように
+    chmod 0666 "$fn_dir/.deployed.json" 2>/dev/null || true
+  fi
 done
 
 echo ""

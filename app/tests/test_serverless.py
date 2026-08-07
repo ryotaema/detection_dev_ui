@@ -129,3 +129,77 @@ def test_旧形式の_model_env_も読める():
         assert got[0]["model_weights"] == "legacy_run/weights/best.pt"
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 重みの更新検知
+# ---------------------------------------------------------------------------
+def test_重みを差し替えると更新として検知される():
+    """重みはビルド時にコンテナへ焼き込まれる。models/ を差し替えても
+    再デプロイするまで古いモデルが動き続けるので、気づけるようにする。"""
+    import json
+    import shutil
+
+    from core.config import MODELS_DIR, SERVERLESS_DIR
+    from core.serverless import _weights_sha1, list_serverless_defs
+
+    fn = SERVERLESS_DIR / "custom" / "_test_stale"
+    w = MODELS_DIR / "_test_stale_run" / "weights" / "m.pt"
+    try:
+        fn.mkdir(parents=True, exist_ok=True)
+        w.parent.mkdir(parents=True, exist_ok=True)
+        w.write_bytes(b"weights-v1" * 100)
+        (fn / "model.env").write_text(
+            "MODEL_RUN=_test_stale_run\n"
+            "MODEL_WEIGHTS=_test_stale_run/weights/m.pt\n", encoding="utf-8")
+        (fn / ".deployed.json").write_text(json.dumps({
+            "weights": "_test_stale_run/weights/m.pt",
+            "sha1": _weights_sha1(w), "size": w.stat().st_size,
+            "deployed_at": "2026-08-07T00:00:00+00:00"}), encoding="utf-8")
+
+        got = [d for d in list_serverless_defs() if d["dir"] == "_test_stale"][0]
+        assert got["weights_changed"] is False, "デプロイ直後なのに更新扱い"
+        assert got["deployed_at"].startswith("2026-08-07")
+
+        w.write_bytes(b"weights-v2" * 100)      # 学習し直した状況
+        got = [d for d in list_serverless_defs() if d["dir"] == "_test_stale"][0]
+        assert got["weights_changed"] is True, "差し替えを検知できていない"
+    finally:
+        shutil.rmtree(fn, ignore_errors=True)
+        shutil.rmtree(w.parent.parent, ignore_errors=True)
+
+
+def test_デプロイ記録が無ければ更新扱いにしない():
+    """記録の無い古い関数を「常に更新あり」にすると、警告が意味を失う。"""
+    import shutil
+
+    from core.config import MODELS_DIR, SERVERLESS_DIR
+    from core.serverless import list_serverless_defs
+
+    fn = SERVERLESS_DIR / "custom" / "_test_norecord"
+    w = MODELS_DIR / "_test_norecord_run" / "weights" / "best.pt"
+    try:
+        fn.mkdir(parents=True, exist_ok=True)
+        w.parent.mkdir(parents=True, exist_ok=True)
+        w.write_bytes(b"x" * 100)
+        (fn / "model.env").write_text("MODEL_RUN=_test_norecord_run\n",
+                                      encoding="utf-8")
+        got = [d for d in list_serverless_defs() if d["dir"] == "_test_norecord"][0]
+        assert got["weights_changed"] is False
+        assert got["deployed_sha1"] == ""
+    finally:
+        shutil.rmtree(fn, ignore_errors=True)
+        shutil.rmtree(w.parent.parent, ignore_errors=True)
+
+
+def test_ハッシュの取り方がデプロイ側と揃っている():
+    """deploy.sh は先頭 8MB の sha1 を記録する。Python が全体 sha1 を取ると
+    値が一致せず、常に「更新あり」になる（実際に起きた）。"""
+    from pathlib import Path
+
+    sh = Path(__file__).resolve().parent.parent.parent / "serverless" / "deploy.sh"
+    if not sh.exists():
+        return
+    text = sh.read_text(encoding="utf-8")
+    assert "head -c 8388608" in text, "deploy.sh が先頭 8MB を取っていない"
+    assert "stat -c %s" in text, "deploy.sh がサイズを記録していない"
