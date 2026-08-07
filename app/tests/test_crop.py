@@ -1078,3 +1078,51 @@ def test_実機用の設定はそのままmake_cropに渡せる():
         assert load_crop_config(Path(d) / "crop_config.json") == cfg
         # 無ければ空（落とさない）
         assert load_crop_config(Path(d) / "nope") == {}
+
+
+def test_失敗した実行はログを上書きしない():
+    """出力先が既にある等で 0 枚に終わった回が、前回の成功時の記録を潰すと
+    「13660 枚あるのにログは 0 枚」という食い違いが起きる（実際に起きた）。
+    UI 側は crops>0 のときだけ書く。ここでは書き出し関数の性質を確かめる。"""
+    import tempfile
+    from pathlib import Path
+
+    from core.crop import write_crop_log
+
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d)
+        write_crop_log(out, {"images": 3, "crops": 13660}, {"out_size": 640})
+        keep = (out / "crop_log.txt").read_text(encoding="utf-8")
+        assert "13660" in keep
+
+        # 失敗した実行の内容で呼べば上書きされてしまう
+        # → だから呼び出し側が守る必要がある、という前提の確認
+        write_crop_log(out, {"images": 0, "crops": 0}, {"out_size": 640})
+        assert "13660" not in (out / "crop_log.txt").read_text(encoding="utf-8")
+
+
+def test_クロップ出力の内部は元画像として選ばない():
+    """確認画像や未採用タイルを入力にすると、自分の出力を切り直してしまう。"""
+    import tempfile
+    from pathlib import Path
+
+    import cv2
+    import numpy as np
+
+    from core.utils import _find_image_dirs
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        for rel in ("raw", "crops/images", "crops/debug",
+                    "crops/background/_unused/images"):
+            (root / rel).mkdir(parents=True)
+            cv2.imwrite(str(root / rel / "a.png"),
+                        np.zeros((32, 32, 3), np.uint8))
+
+        found = _find_image_dirs(root)
+        kept = [p for p in found
+                if not {"debug", "_unused", "contact_sheet", "meta",
+                        "_backup_original"} & set(p.parts)]
+        names = {str(p.relative_to(root)) for p in kept}
+        assert "raw" in names
+        assert not any("debug" in n or "_unused" in n for n in names), names

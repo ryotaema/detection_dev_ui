@@ -67,7 +67,11 @@ def _render_generate() -> None:
         "ここで決めた値は実機側の設定とそろえてください。ずれると精度が落ちます。"
     )
 
-    _imgs_dirs = _find_image_dirs(DATA_DIR)
+    # クロップ出力の内部（確認画像・未採用タイル・メタ）は元画像ではない。
+    # 選べてしまうと、誤って自分の出力を入力にしてしまう（実際に起きた）
+    _imgs_dirs = [d for d in _find_image_dirs(DATA_DIR)
+                  if not {"debug", "_unused", "contact_sheet", "meta",
+                          "_backup_original"} & set(d.parts)]
     _models = model_weight_files()
     if not _imgs_dirs:
         empty_state("元画像が見つかりません",
@@ -476,7 +480,10 @@ def _render_generate() -> None:
             else:
                 show_error(_b["error"], prefix="⚠ 背景タイル: ")
 
-        # 何をどう作ったかを出力先に残す（画面の表示は次の操作で消えるため）
+        # 何をどう作ったかを出力先に残す（画面の表示は次の操作で消えるため）。
+        # **失敗した実行では書かない。** 出力先が既にある等で 0 枚に終わった回が
+        # 前回の成功時の記録を上書きすると、「13660 枚あるのにログは 0 枚」
+        # という食い違いが起きる（実際に起きた）。
         _params = {
             "source_dir": str(_src_dir), "model": str(_model),
             "conf_threshold": float(_conf),
@@ -487,8 +494,10 @@ def _render_generate() -> None:
             "max_upscale": float(_max_up), "out_format": _fmt,
             "dedup_center_dist": float(_dedup),
         }
-        write_crop_log(_out_dir, _res, _params, _b)
-        _cfg = write_crop_config(_out_dir, _params)
+        _cfg = None
+        if _res.get("crops"):
+            write_crop_log(_out_dir, _res, _params, _b)
+            _cfg = write_crop_config(_out_dir, _params)
         if _cfg:
             st.caption(
                 f"📄 `crop_log.txt` と `{CROP_CONFIG}` を書き出しました。"
@@ -743,7 +752,17 @@ def _render_recut() -> None:
                    f"{_prov.get('annotation_scale')} / target_scale "
                    f"{_prov.get('target_scale')} で作られています。")
     else:
-        st.caption("　作成時の倍率が記録されていません。値を確かめてください。")
+        # **クロップ出力以外を切り直すと、素の写真の中央を切り抜くことになる。**
+        # 気づきにくいので、注意ではなく確認を求める（実際に素のデータセットへ
+        # 実行された）
+        st.warning(
+            f"⚠ `{_src_name}` は**クロップ生成で作られたものではありません**"
+            "（作成時の倍率が記録されていません）。"
+            "このまま実行すると、素の画像の中央だけを切り抜いた"
+            "別のデータセットができます。"
+        )
+        if not st.checkbox("それでも切り直す", key="rc_force"):
+            return
 
     _c4, _c5 = st.columns([2, 2])
     with _c4:
