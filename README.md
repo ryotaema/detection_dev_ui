@@ -6,9 +6,62 @@ CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、**タ
 
 > **初心者の方へ**: 機械学習・物体検出の経験が浅い方でも扱えるように設計しています。
 > セットアップ後はブラウザ操作のみで、アノテーション → 学習 → 推論・評価まで一連のワークフローを完結させることができます。
-> ターミナルを使うのはセットアップ時（Step 1〜7）だけです。
+> ターミナルを使うのはセットアップ時（Step 1〜6）だけです。
 > CVATの形式関連で詰まることが多かったので作成しました。
 > ぜひ、なれたらそれぞれの要素を自分で一通りできるように頑張ってみてください^^
+
+---
+
+## クイックスタート
+
+**Docker と NVIDIA GPU がすでに使える人向け**の最短手順です。
+初めての人は [セットアップ手順](#セットアップ手順) を順に進めてください。
+
+> Docker がまだ入っていない場合 → **[Docker 環境の準備](docs/docker_setup.md)**
+
+```bash
+# 0. 前提の確認（3つとも通ればOK）
+docker compose version
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
+docker info | grep -i "default runtime"     # nvidia と出ること
+
+# 1. 取得
+git clone https://github.com/ryotaema/detection_dev_ui.git
+cd detection_dev_ui
+
+# 2. .env を作る（パスワードは必ず変更する）
+cat > .env << 'EOF'
+COMPOSE_PROJECT_NAME=mlops_workspace
+# CVAT の自動アノテーション（Nuclio）を使う場合はこの行を残す。
+# 素の `docker compose up -d` でも serverless 連携が保たれる
+COMPOSE_FILE=docker-compose.yml:docker-compose.serverless.yml
+CVAT_USERNAME=admin
+CVAT_PASSWORD=ChangeMe#2024
+CVAT_DB_PASSWORD=ChangeMe#db2024
+CVAT_IAM_DB_PASSWORD=ChangeMe#iam2024
+NVIDIA_VISIBLE_DEVICES=all
+EOF
+
+# 3. CVAT のデータベースを初期化（初回だけ）
+docker compose up -d cvat_db cvat_redis cvat_redis_inmem cvat_redis_ondisk cvat_iam_db
+sleep 30
+docker compose run --rm cvat_server init
+docker compose run --rm cvat_server bash -c \
+  "~/manage.py createsuperuser --username admin --email admin@local.com"
+#   ↑ ユーザー名は admin 固定。パスワードは .env の CVAT_PASSWORD と同じ値にする
+
+# 4. 起動（初回は 10〜30 分かかる）
+docker compose up -d
+sleep 30 && docker compose ps
+
+# 5. 確認
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8501    # 200 なら成功
+```
+
+ブラウザで **http://localhost:8501** を開けば Streamlit の統合 UI が出ます。
+CVAT は **http://localhost:8080**（`admin` / 上で設定したパスワード）です。
+
+うまくいかないときは [トラブルシューティング](#トラブルシューティング) を見てください。
 
 ---
 
@@ -93,38 +146,28 @@ detection_dev_ui/
 
 ## セットアップ手順
 
-### Step 1 — nvidia-container-toolkit のインストール
+### Step 1 — Docker と GPU の準備
+
+**手順は [📘 Docker 環境の準備](docs/docker_setup.md) にまとめてあります。**
+Docker が入っていない状態から、GPU が使えるようになるまでを順に説明しています。
+
+次の 4 つが通れば Step 2 へ進んでください。
 
 ```bash
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-
-# Linux の場合
-sudo systemctl restart docker
-
-# macOS（Docker Desktop）の場合は systemctl は不要
-# → Docker Desktop アプリをメニューバーから「Restart」するか、一度終了して再起動してください
-```
-
-### Step 2 — docker グループへの追加
-
-```bash
-sudo usermod -aG docker $USER
-newgrp docker
-
-# 動作確認
+docker compose version                       # Compose v2（スペース区切り）
+docker run --rm hello-world                  # sudo 無しで動くこと
 docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
+docker info | grep -i "default runtime"      # nvidia と出ること
 ```
 
-### Step 3 — リポジトリのクローン
+> **4 つ目の `default runtime: nvidia` は、CVAT の自動アノテーション（Nuclio）に必要です。**
+> 設定していないと GPU で動きません。手順は
+> [Docker 環境の準備 4](docs/docker_setup.md#4-nvidia-gpu-を使えるようにする) にあります。
+>
+> GPU が無い環境でも動きます（学習は CPU のみで大幅に遅くなります）。
+> その場合は [GPU なしで動かす](docs/docker_setup.md#gpu-なしで動かす) を参照してください。
+
+### Step 2 — リポジトリのクローン
 
 ```bash
 # SSH（GitHubにSSHキーを登録済みの場合）
@@ -136,11 +179,14 @@ git clone https://github.com/ryotaema/detection_dev_ui.git
 cd detection_dev_ui
 ```
 
-### Step 4 — .env ファイルの作成
+### Step 3 — .env ファイルの作成
 
 ```bash
 cat > .env << 'EOF'
 COMPOSE_PROJECT_NAME=mlops_workspace
+# CVAT の自動アノテーション（Nuclio）を使う場合はこの行を残す。
+# 素の `docker compose up -d` でも serverless 連携が保たれる
+COMPOSE_FILE=docker-compose.yml:docker-compose.serverless.yml
 CVAT_USERNAME=admin
 CVAT_PASSWORD=your_password_here
 CVAT_DB_PASSWORD=your_db_password_here
@@ -151,7 +197,7 @@ EOF
 
 > `.env` はGitの追跡対象外です。各パスワードは必ず強い値に変更してください。
 
-### Step 5 — CVATデータベースの初期化
+### Step 4 — CVATデータベースの初期化
 
 > **必須・初回のみ**: このステップを省略すると CVAT が「Cannot connect to the server」エラーになります。
 
@@ -177,7 +223,7 @@ Streamlit が CVAT API にアクセスする際、`.env` の `CVAT_USERNAME` と
 
 > **CVATへのログイン情報**: セットアップ完了後、`http://localhost:8080` を開いた際のサインイン画面には、ここで作成した **ユーザー名 `admin`・設定したパスワード** を入力してください。
 
-### Step 6 — 全サービス起動
+### Step 5 — 全サービス起動
 
 ```bash
 docker compose up -d
@@ -187,7 +233,7 @@ sleep 30 && docker compose ps
 > **初回起動時間の目安**: Docker イメージのダウンロードとビルドに **10〜30 分程度** かかります（回線速度・マシンスペックによって異なります）。
 > 2 回目以降はキャッシュが効くため数分で起動します。
 
-### Step 7 — 疎通確認
+### Step 6 — 疎通確認
 
 ```bash
 curl -s http://localhost:8080/api/server/about | python3 -m json.tool | head -3  # CVAT
@@ -218,160 +264,39 @@ docker compose build streamlit_app && docker compose up -d streamlit_app
 
 ---
 
-## 運用フロー
+## 使い方
 
-```
-① CVATでアノテーション
-   http://localhost:8080 → admin / 設定したパスワード でログイン
-   プロジェクト作成 → 画像アップロード → バウンディングボックス / ポリゴンを付ける
-   ・自作モデルによる自動アノテーションで下書きを作れる（後述「CVAT 自動アノテーション」）
-   ・よく使うショートカットは docs/cvat_shortcuts.md（アプリ内は F1 で一覧）
+起動できたら **http://localhost:8501** を開いてください。
+画面上部のタブが `Step1 アノテーション → Step2 データ取込 → Step3 学習 → Step4 推論・評価`
+の順に並んでいます。初回はサイドバー最下部の「📖 はじめかたガイドを表示」が自動で開きます。
 
-② Streamlit「📤 Step1: データ取込」タブ
-   http://localhost:8501 を開く
-   「タスク一覧を取得」→ 対象タスクを選択（複数可）
-   →「エクスポート実行」→ ラベル・タスク種別（detect/segment）を設定
-   →「データセット生成」→ data/ に YOLO 形式で展開される
-
-③ Streamlit「🚀 Step2: モデル学習」タブ
-   学習プリセットを選んで「▶ 適用」（または手動でパラメータ設定）
-     - 組み込みプリセット: ノーマル / 速度優先 / バランス型 / 精度優先 / 小物体向け / ロボット視点
-     - カスタムプリセット: 現在の設定に名前を付けて保存・編集・削除が可能
-   「学習開始」→ バックグラウンドで実行
-   → エポックごとに mAP50 / Loss のリアルタイムグラフとログが表示される
-   → MLflow にメトリクスが自動記録される（http://localhost:5000）
-   → 学習完了時にトースト通知＋バルーンアニメーション
-
-④ Streamlit「🔭 Step3: 推論・評価」タブ
-
-   【推論対象の選択】
-   - 📂 data/ のディレクトリ  — 学習時に生成したテスト画像フォルダを指定
-   - 📤 画像をアップロード    — JPG / PNG 等を複数選択してアップロード
-   - 🎬 動画をアップロード    — MP4 / AVI / MOV / MKV / WebM に対応
-
-   【動画推論オプション】（動画モード選択時に表示）
-   - 🔄 オブジェクトトラッキング ON/OFF
-     - ByteTrack: 高速・位置ベースのトラッキング
-     - BoT-SORT: 外観特徴も使用し遮蔽に強いトラッキング
-     - 設定は `app/bytetrack.yaml` / `app/botsort.yaml` を編集して調整可（再起動不要）
-   - 🕐 テンポラル平滑化（ちらつき抑制）ON/OFF
-     - 補完フレーム数をスライダーで調整（1〜30フレーム）
-     - 消えた検出をグレーのボックスで一時的に補完描画
-
-   【推論実行後】
-   - 画像: バウンディングボックス付きプレビューをグリッドで確認
-   - 動画: アノテーション済み MP4 をその場で再生 / ダウンロード
-          フレームごとの検出数グラフ・ユニークトラック数を表示（トラッキング時）
-
-   【📥 結果画像エクスポート】
-   → 「すべて書き出す」または「選択して書き出す」
-   → PNG / JPEG 形式で predictions/exports/ に保存 → ZIP ダウンロード
-
-   【🚩 再アノテーション用エクスポート】
-   → プレビューまたは選択グリッドの 🚩 ボタンで問題のある画像にフラグを立てる
-     （誤検出・検出漏れなど）
-   → 「再アノテーション用 ZIP を生成」で以下をまとめてダウンロード:
-     - `images/`        元画像（BBOX なし）
-     - `labels/`        YOLO 形式 txt（class_id cx cy w h）
-     - `classes.txt`    クラス名一覧
-     - `annotations.xml` CVAT for images 1.1 形式（推論結果を事前アノテーションとして含む）
-   → CVAT でタスクを作成 → 画像をアップロード → Actions > Upload annotations
-     → 形式「CVAT for images 1.1」で `annotations.xml` を選択
-     → 推論結果が事前アノテーション済みの状態で修正作業を開始できる
-
-   【FiftyOne で可視化】→ http://localhost:5151 でブラウザ確認
-
-⑤ Streamlit「📁 データ管理」タブ（任意）
-   data/ のデータセット一覧・削除・統合
-   models/ の学習済みモデルをカード形式で表示（mAP50・サイズ・学習日時付き）・削除・使用切替
-   predictions/ の推論結果一括クリア
-```
-
-### データセット生成後の `data/` ディレクトリ構造
-
-「データセット生成」を実行すると `data/` 以下に以下の構造でファイルが展開されます。
-
-```
-data/
-└── {タスク名}_{日時}/
-    ├── images/
-    │   ├── train/      # 学習用画像
-    │   └── val/        # 検証用画像
-    ├── labels/
-    │   ├── train/      # 学習用アノテーション（YOLO形式 .txt）
-    │   └── val/        # 検証用アノテーション（YOLO形式 .txt）
-    └── data.yaml       # クラス名・パス設定（学習時に自動参照）
-```
+各機能の説明は **[docs/overview.md](docs/overview.md)** にまとめてあります。
+学習の考え方から知りたい場合は [docs/guide.md](docs/guide.md) を参照してください。
 
 ---
 
-## CVAT 自動アノテーション（Nuclio serverless・任意）
+## CVAT 自動アノテーション（任意）
 
-自作の学習済み YOLO モデル（`models/<run>/weights/best.pt`）を、CVAT の
-**Actions → Automatic annotation** から呼び出して自動でバウンディングボックスを
-付けられる機能。CVAT は [Nuclio](https://nuclio.io/) というサーバレス基盤経由で
-モデルを実行する。詳細な手順・新モデル追加方法・トラブルシューティングは
-**[`serverless/README.md`](serverless/README.md)** を参照。
-
-```
-CVAT UI（Actions → Automatic annotation）
-   │  画像 + しきい値
-   ▼
-nuclio ダッシュボード(:8070) ── cvat_net ── 関数コンテナ（best.pt 内蔵）→ 検出結果
-```
-
-### 使い方（3ステップ）
+自作の学習済みモデルを CVAT の **Actions → Automatic annotation** から呼び出し、
+アノテーションの下書きを自動で作れます（[Nuclio](https://nuclio.io/) 経由）。
 
 ```bash
-# 1) Nuclio 基盤 + CVAT serverless 連携を起動
+# 1) Nuclio と CVAT の serverless 連携を起動
 docker compose -f docker-compose.yml -f docker-compose.serverless.yml \
   up -d nuclio cvat_server cvat_worker_annotation
 
-# 2) 自作モデルを関数としてデプロイ（既定 GPU / --cpu で CPU）
-#    初回は nuctl を serverless/bin/ に自動ダウンロードし、イメージをビルドする
-./serverless/deploy.sh
-
-# 3) CVAT (http://localhost:8080) でタスクを開き
-#    Actions → Automatic annotation → 自作モデルを選択 → ラベル対応付け → Annotate
+# 2) モデルをデプロイ（Streamlit の「🏷 Step1: アノテーション」タブからでも可）
+docker compose exec streamlit_app /workspace/serverless/deploy.sh
 ```
 
-### 補足
+> **`.env` に `COMPOSE_FILE` を書いておくことを強く勧めます**（[Step 3](#step-3-env-ファイルの作成) 参照）。
+> 書いておかないと、うっかり `docker compose up -d` した時点で連携が外れ、
+> CVAT の自動アノテーションからモデルが消えます。
 
-- **既定は GPU 版**（`function-gpu.yaml`・CUDA 12.8 / cu128）。GPU を関数に割り当てるには
-  Docker daemon の `default-runtime` を `nvidia` にする必要がある（下記）。
-  daemon を変えたくない場合は `./serverless/deploy.sh --cpu` で CPU 版を使う。
-- GPU 有効化: `/etc/docker/daemon.json` に `"default-runtime": "nvidia"` を追加して
-  `sudo systemctl restart docker`（**稼働中の全コンテナが再起動する**点に注意）。
-- 関数の状態は Nuclio ダッシュボード http://localhost:8070 でも確認できる。
-- 手修正の効率化には [`docs/cvat_shortcuts.md`](docs/cvat_shortcuts.md)（CVAT ショートカット集）も参照。
-
----
-
-## Dockerfile の CUDA バージョン設定
-
-`app/Dockerfile` のベースイメージと PyTorch インストール URL は、
-**お使いの CUDA バージョンに合わせて変更**してください。
-
-```dockerfile
-# 現在の設定（CUDA 12.8 / RTX 50系対応）
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
-
-RUN pip install --no-cache-dir torch torchvision torchaudio \
-      --index-url https://download.pytorch.org/whl/cu128
-```
-
-| CUDA | `--index-url` の末尾 | ベースイメージタグ例                       |
-| ---- | ---------------------- | ------------------------------------------ |
-| 11.8 | `cu118`              | `cuda:11.8.0-cudnn8-runtime-ubuntu22.04` |
-| 12.1 | `cu121`              | `cuda:12.1.1-cudnn8-runtime-ubuntu22.04` |
-| 12.4 | `cu124`              | `cuda:12.4.1-cudnn-runtime-ubuntu22.04`  |
-| 12.6 | `cu126`              | `cuda:12.6.3-cudnn-runtime-ubuntu22.04`  |
-| 12.8 | `cu128`              | `cuda:12.8.1-cudnn-runtime-ubuntu22.04`  |
-
-> RTX 50系（Blackwell / sm_120）は CUDA 12.8 以上が必要です。cu126 では `no kernel image` エラーが発生します。
-
-利用可能なイメージ一覧: https://hub.docker.com/r/nvidia/cuda/tags
-PyTorch 対応ビルド一覧: https://pytorch.org/get-started/locally/
+手順・新しいモデルの追加・つまずいたときの対処は
+**[serverless/README.md](serverless/README.md)** にまとめてあります。
+GPU で動かすには Docker の既定ランタイムを `nvidia` にする必要があります
+（[Docker 環境の準備](docs/docker_setup.md#4-2-既定のランタイムを-nvidia-にする)）。
 
 ---
 
@@ -456,15 +381,29 @@ deploy:
 
 ## 備考
 
-- `version: "3.8"` の警告（`the attribute version is obsolete`）は Docker Compose v2 系の仕様変更によるもので、動作には影響ありません。
-- 本システムは完全ローカル動作のため、外部ネットワークへのデータ転送は発生しません。
-- `data/`・`models/`・`predictions/` はホスト側の bind mount のため、コンテナを削除してもデータは保持されます。
-- CVAT: `v2.64.0` / cvat-sdk: `2.64.0`（サーバーと SDK を同一バージョンに固定）
-- ユーザー定義プリセットは `models/.user_presets.json` に保存されます。
-- ユーザー定義テーマは `models/.user_themes.json` に保存されます。
-- トラッカー設定（`app/bytetrack.yaml` / `app/botsort.yaml`）はホストとコンテナがバインドマウントで共有されるため、ファイルを保存するだけで次回推論から反映されます（再起動不要）。
-- 動画推論の出力は `predictions/videos/` に保存され、画像推論の `predictions/*.json` とは分離されています。
-- 🚩 再アノテーション用フラグはブラウザセッション中のみ保持されます（リロードするとリセット）。
+- **完全ローカル動作**です。外部へのデータ送信は行いません。
+- `data/` `models/` `predictions/` はホスト側の bind mount なので、**コンテナを削除してもデータは残ります**。
+- 設定の保存先: 学習プリセット `models/.user_presets.json` / テーマ `models/.user_themes.json` /
+  使う機能 `models/.user_features.json`
+- バージョンは CVAT `v2.64.0` と cvat-sdk `2.64.0` を揃えて固定しています
+  （エクスポート API の互換のため）。
+- `version: "3.8"` の警告（`the attribute version is obsolete`）は Compose v2 の仕様変更によるもので、動作に影響ありません。
+
+---
+
+## ドキュメント
+
+| 読みたいこと | ファイル |
+| --- | --- |
+| Docker が入っていない状態からの準備 | [docs/docker_setup.md](docs/docker_setup.md) |
+| 何ができるのか・画面ごとの機能 | [docs/overview.md](docs/overview.md) |
+| 学習の考え方（用語・指標の読み方） | [docs/guide.md](docs/guide.md) |
+| CVAT の操作ショートカット | [docs/cvat_shortcuts.md](docs/cvat_shortcuts.md) |
+| 自動アノテーション（Nuclio）の詳細 | [serverless/README.md](serverless/README.md) |
+| 拡張機能を作る・対応させる | [extensions/INTEGRATION.md](extensions/INTEGRATION.md) |
+
+UI の中にも説明があります。サイドバー最下部の「📖 はじめかたガイドを表示」と、
+「📚 トピックス」タブ（タスクの選び方・指標の読み方・うまくいかないとき）を見てください。
 
 ---
 
@@ -481,14 +420,3 @@ deploy:
 | [MLflow](https://github.com/mlflow/mlflow)                     | Apache 2.0 |
 | [FiftyOne](https://github.com/voxel51/fiftyone)                | Apache 2.0 |
 | [Streamlit](https://github.com/streamlit/streamlit)            | Apache 2.0 |
-
-## 任意: UI からフォルダを開けるようにする
-
-データセットやモデルのカードから、OS のファイルアプリでフォルダを開けます。
-UI はコンテナ内で動いていて画面を持たないため、ホスト側に小さな常駐を置きます。
-
-```bash
-./tools/install_folder_watcher.sh     # 一度だけ。以降はログイン時に自動で動く
-```
-
-動かさなくても、UI はホスト側のパスを表示するのでコピーして開けます。
