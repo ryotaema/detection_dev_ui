@@ -99,13 +99,20 @@ def list_serverless_defs() -> list[dict]:
         return defs
 
     for d in sorted(p for p in cdir.iterdir() if p.is_dir()):
-        model_run = ""
+        model_run, model_weights = "", ""
         env_f = d / "model.env"
         if env_f.exists():
             for line in env_f.read_text().splitlines():
                 line = line.strip()
-                if line.startswith("MODEL_RUN="):
-                    model_run = line.split("=", 1)[1].strip().strip('"').strip("'")
+                for key, setter in (("MODEL_RUN=", "run"), ("MODEL_WEIGHTS=", "w")):
+                    if line.startswith(key):
+                        v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if setter == "run":
+                            model_run = v
+                        else:
+                            model_weights = v
+        if not model_weights and model_run:
+            model_weights = f"{model_run}/weights/best.pt"
 
         fn_name, fn_display = "", ""
         y = d / "function.yaml"
@@ -121,11 +128,12 @@ def list_serverless_defs() -> list[dict]:
         defs.append({
             "dir": d.name,
             "model_run": model_run,
+            "model_weights": model_weights,
             "function_name": fn_name,
             "display": fn_display,
             "has_gpu_yaml": (d / "function-gpu.yaml").exists(),
-            "model_exists": bool(model_run)
-                            and (MODELS_DIR / model_run / "weights" / "best.pt").exists(),
+            "model_exists": bool(model_weights)
+                            and (MODELS_DIR / model_weights).exists(),
         })
     return defs
 
@@ -137,6 +145,7 @@ def generate_function_files(
     display_name: str = "",
     description: str = "",
     task: str = "detect",
+    weights_rel: str = "",
 ) -> tuple[Path, str]:
     """serverless/custom/<fn_dir>/ に関数定義一式を生成し、(ディレクトリ, 関数名) を返す。
 
@@ -146,6 +155,7 @@ def generate_function_files(
     slug     = slugify_function_name(fn_dir)
     fn_name  = f"custom-{slug}"
     image    = f"cvat.custom.{slug}"
+    _src_rel = weights_rel or f"{model_run}/weights/best.pt"
     disp     = display_name or f"{model_run} (custom)"
     desc     = description or f"自作 YOLO 検出器 ({model_run} / Ultralytics)"
 
@@ -178,7 +188,7 @@ def generate_function_files(
 
         return f"""# =============================================================================
 # このファイルは Streamlit UI (データ管理タブ) が自動生成しました。
-#   生成元モデル: models/{model_run}/weights/best.pt
+#   生成元モデル: models/{_src_rel}
 #   annotations.spec のラベルはモデルのクラス名から生成されています。
 #   CVAT タスク側のラベル名と一致していることを確認してください。
 # =============================================================================
@@ -237,10 +247,16 @@ spec:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "function.yaml").write_text(_yaml(gpu=False))
     (out_dir / "function-gpu.yaml").write_text(_yaml(gpu=True))
+    # 取り込んだモデルはファイル名が best.pt とは限らないので、
+    # models/ からの相対パスで持つ（MODEL_RUN は表示・旧形式の互換用）
+    _rel = weights_rel or f"{model_run}/weights/best.pt"
     (out_dir / "model.env").write_text(
-        "# この関数が使う学習済みモデル (models/<MODEL_RUN>/weights/best.pt)\n"
-        "# serverless/deploy.sh がこの値を読み、best.pt をビルドコンテキストへコピーする\n"
+        "# この関数が使う学習済みモデル\n"
+        "#   MODEL_WEIGHTS … models/ からの相対パス（best.pt 以外の名前でも可）\n"
+        "#   MODEL_RUN     … 表示用。旧形式では models/<run>/weights/best.pt を指した\n"
+        "# serverless/deploy.sh がこれを読み、重みをビルドコンテキストへコピーする\n"
         f"MODEL_RUN={model_run}\n"
+        f"MODEL_WEIGHTS={_rel}\n"
     )
     return out_dir, fn_name
 

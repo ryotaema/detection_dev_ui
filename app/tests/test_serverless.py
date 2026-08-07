@@ -73,3 +73,59 @@ def test_class_names_with_quotes_do_not_break_yaml(fn_dir: Path):
     out, _ = sl.generate_function_files("m", "run1", ['say "hi"', "a:b"])
     spec = json.loads(_load(out / "function.yaml")["metadata"]["annotations"]["spec"])
     assert [d["name"] for d in spec] == ['say "hi"', "a:b"]
+
+
+# ---------------------------------------------------------------------------
+# 取り込んだモデル（best.pt 以外の名前）のデプロイ
+# ---------------------------------------------------------------------------
+def test_best_pt_以外の名前の重みも指せる():
+    """取り込んだモデルはファイル名が best.pt とは限らない。
+    run 名だけでは指し切れないので、models/ からの相対パスで持つ。"""
+    import shutil
+
+    from core.config import SERVERLESS_DIR
+    from core.serverless import generate_function_files
+
+    d, _ = generate_function_files(
+        fn_dir="_test_imported_weights", model_run="imported_x",
+        class_names=["a"], weights_rel="imported_x/weights/my_model.pt")
+    try:
+        env = (d / "model.env").read_text(encoding="utf-8")
+        assert "MODEL_WEIGHTS=imported_x/weights/my_model.pt" in env
+        assert "MODEL_RUN=imported_x" in env      # 表示・旧形式の互換
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_weights_rel_を渡さなければ従来どおり():
+    import shutil
+
+    from core.serverless import generate_function_files
+
+    d, _ = generate_function_files(
+        fn_dir="_test_legacy_weights", model_run="run_a", class_names=["a"])
+    try:
+        env = (d / "model.env").read_text(encoding="utf-8")
+        assert "MODEL_WEIGHTS=run_a/weights/best.pt" in env
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_旧形式の_model_env_も読める():
+    """MODEL_RUN しか無い既存の定義を壊さないこと。"""
+    import shutil
+
+    from core.config import SERVERLESS_DIR
+    from core.serverless import list_serverless_defs
+
+    d = SERVERLESS_DIR / "custom" / "_test_legacy_env"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        (d / "model.env").write_text("MODEL_RUN=legacy_run\n", encoding="utf-8")
+        got = [x for x in list_serverless_defs() if x["dir"] == "_test_legacy_env"]
+        assert got, "旧形式の定義が読めていない"
+        assert got[0]["model_run"] == "legacy_run"
+        # 相対パスは補完される
+        assert got[0]["model_weights"] == "legacy_run/weights/best.pt"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)

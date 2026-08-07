@@ -141,81 +141,80 @@ def render_annotate() -> None:
             _dep_map = {str(p.relative_to(MODELS_DIR)): p for p in _dep_models}
             _dep_sel = st.selectbox("デプロイするモデル", list(_dep_map.keys()), key="dep_model_sel")
             _dep_path = _dep_map[_dep_sel]
-            # models/<run>/weights/best.pt の <run> を取り出す（deploy.sh がこの構造を前提とする）
-            _dep_run = _dep_path.parent.parent.name if _dep_path.parent.name == "weights" else ""
+            # 重みは models/ からの相対パスで渡す。
+            # 取り込んだモデルはファイル名が best.pt とは限らないため、
+            # run 名だけでは指し切れない（例: imported_xxx/weights/my_model.pt）
+            _dep_rel = str(_dep_path.relative_to(MODELS_DIR))
+            _dep_run = (_dep_path.parent.parent.name
+                        if _dep_path.parent.name == "weights"
+                        else _dep_path.parent.name)
 
-            if not _dep_run or _dep_path.name != "best.pt":
-                st.warning(
-                    "⚠ デプロイできるのは `models/<モデル名>/weights/best.pt` の形式のみです"
-                    "（`serverless/deploy.sh` がこのパスから重みを読み込みます）。\n\n"
-                    f"選択中: `{_dep_sel}`"
+            # クラス名はモデルから取得する（= CVAT に出るラベル定義になる）
+            _dep_meta = read_model_meta(_dep_path)
+            if _dep_meta is None:
+                with st.spinner("モデルのクラス名を読み込み中…"):
+                    _dep_meta = inspect_model_file(_dep_path)
+            _dep_classes = _dep_meta.get("names") or []
+
+            if not _dep_meta.get("ok") or not _dep_classes:
+                st.error(
+                    "❌ このモデルからクラス名を取得できませんでした。"
+                    "ラベル定義を作れないためデプロイできません。\n\n"
+                    f"{_dep_meta.get('error') or 'クラス名が空です'}"
                 )
             else:
-                # クラス名はモデルから取得する（= CVAT に出るラベル定義になる）
-                _dep_meta = read_model_meta(_dep_path)
-                if _dep_meta is None:
-                    with st.spinner("モデルのクラス名を読み込み中…"):
-                        _dep_meta = inspect_model_file(_dep_path)
-                _dep_classes = _dep_meta.get("names") or []
+                _dep_task = _dep_meta.get("task") or "detect"
+                _dep_shape = "polygon（ポリゴン）" if _dep_task == "segment" \
+                    else "rectangle（矩形）"
+                st.success(f"🏷 ラベル定義（モデルのクラス名から自動生成）: "
+                           f"**{', '.join(_dep_classes)}**")
+                st.caption(
+                    f"タスク種別: `{_dep_task}` → CVAT には **{_dep_shape}** として返します。"
+                )
+                st.caption(
+                    "⚠ CVAT タスク側のラベル名がこれと一致していないと、"
+                    "自動アノテーションの結果が反映されません。"
+                )
 
-                if not _dep_meta.get("ok") or not _dep_classes:
-                    st.error(
-                        "❌ このモデルからクラス名を取得できませんでした。"
-                        "ラベル定義を作れないためデプロイできません。\n\n"
-                        f"{_dep_meta.get('error') or 'クラス名が空です'}"
+                _dc1, _dc2 = st.columns(2)
+                with _dc1:
+                    _dep_dir = st.text_input(
+                        "関数ディレクトリ名 (`serverless/custom/` 以下)",
+                        value=slugify_function_name(_dep_run),
+                        key="dep_fn_dir",
+                    ).strip()
+                with _dc2:
+                    _dep_disp = st.text_input(
+                        "CVAT に表示する名前",
+                        value=f"{_dep_run} (custom)",
+                        key="dep_fn_disp",
+                    ).strip()
+
+                _dep_gpu = st.radio(
+                    "実行モード", ["GPU", "CPU"], horizontal=True, key="dep_gpu_mode",
+                    help="GPU 実行には Docker daemon の default-runtime=nvidia が必要です"
+                         "（serverless/README.md 参照）。CPU なら前提なしで動きます。",
+                ) == "GPU"
+
+                _dep_slug = slugify_function_name(_dep_dir) if _dep_dir else ""
+                if _dep_slug:
+                    _exists_def = (SERVERLESS_DIR / "custom" / _dep_dir).exists()
+                    st.caption(f"Nuclio 関数名: `custom-{_dep_slug}`"
+                               + ("　⚠ 同名の定義が既にあります（上書きされます）" if _exists_def else ""))
+
+                if st.button("🚀 CVAT にデプロイ", type="primary", use_container_width=True,
+                             disabled=_dep_running or not _dep_dir, key="dep_run_btn"):
+                    _out_dir, _fn_name = generate_function_files(
+                        fn_dir=_dep_dir,
+                        model_run=_dep_run,
+                        class_names=_dep_classes,
+                        display_name=_dep_disp,
+                        task=_dep_meta.get("task") or "detect",
+                        weights_rel=_dep_rel,
                     )
-                else:
-                    _dep_task = _dep_meta.get("task") or "detect"
-                    _dep_shape = "polygon（ポリゴン）" if _dep_task == "segment" \
-                        else "rectangle（矩形）"
-                    st.success(f"🏷 ラベル定義（モデルのクラス名から自動生成）: "
-                               f"**{', '.join(_dep_classes)}**")
-                    st.caption(
-                        f"タスク種別: `{_dep_task}` → CVAT には **{_dep_shape}** として返します。"
-                    )
-                    st.caption(
-                        "⚠ CVAT タスク側のラベル名がこれと一致していないと、"
-                        "自動アノテーションの結果が反映されません。"
-                    )
-
-                    _dc1, _dc2 = st.columns(2)
-                    with _dc1:
-                        _dep_dir = st.text_input(
-                            "関数ディレクトリ名 (`serverless/custom/` 以下)",
-                            value=slugify_function_name(_dep_run),
-                            key="dep_fn_dir",
-                        ).strip()
-                    with _dc2:
-                        _dep_disp = st.text_input(
-                            "CVAT に表示する名前",
-                            value=f"{_dep_run} (custom)",
-                            key="dep_fn_disp",
-                        ).strip()
-
-                    _dep_gpu = st.radio(
-                        "実行モード", ["GPU", "CPU"], horizontal=True, key="dep_gpu_mode",
-                        help="GPU 実行には Docker daemon の default-runtime=nvidia が必要です"
-                             "（serverless/README.md 参照）。CPU なら前提なしで動きます。",
-                    ) == "GPU"
-
-                    _dep_slug = slugify_function_name(_dep_dir) if _dep_dir else ""
-                    if _dep_slug:
-                        _exists_def = (SERVERLESS_DIR / "custom" / _dep_dir).exists()
-                        st.caption(f"Nuclio 関数名: `custom-{_dep_slug}`"
-                                   + ("　⚠ 同名の定義が既にあります（上書きされます）" if _exists_def else ""))
-
-                    if st.button("🚀 CVAT にデプロイ", type="primary", use_container_width=True,
-                                 disabled=_dep_running or not _dep_dir, key="dep_run_btn"):
-                        _out_dir, _fn_name = generate_function_files(
-                            fn_dir=_dep_dir,
-                            model_run=_dep_run,
-                            class_names=_dep_classes,
-                            display_name=_dep_disp,
-                            task=_dep_meta.get("task") or "detect",
-                        )
-                        start_deploy(_dep_dir, use_gpu=_dep_gpu)
-                        cached_nuclio_functions.clear()
-                        st.rerun()
+                    start_deploy(_dep_dir, use_gpu=_dep_gpu)
+                    cached_nuclio_functions.clear()
+                    st.rerun()
 
         if _dep_running:
             # ここで st.rerun() すると以降のタブが描画されないため予約だけする

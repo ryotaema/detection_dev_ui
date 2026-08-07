@@ -91,13 +91,35 @@ for name in "${TARGETS[@]}"; do
   fi
   [ -f "$src_yaml" ] || { echo "SKIP: $name ($(basename "$src_yaml") なし)"; continue; }
 
-  # model.env から使用モデルを読む
+  # model.env から使用モデルを読む。
+  #   MODEL_WEIGHTS … models/ からの相対パス（best.pt 以外の名前でも指せる）
+  #   MODEL_RUN     … 旧形式。models/<run>/weights/best.pt を指す
+  # 取り込んだモデルはファイル名が best.pt とは限らないため、
+  # どちらも無ければ weights/ の中の .pt を 1 つだけ拾う。
   # shellcheck disable=SC1091
   MODEL_RUN=""
+  MODEL_WEIGHTS=""
   [ -f "$fn_dir/model.env" ] && source "$fn_dir/model.env"
-  best_pt="$PROJECT_DIR/models/${MODEL_RUN}/weights/best.pt"
-  if [ ! -f "$best_pt" ]; then
-    echo "SKIP: $name (best.pt が見つかりません: $best_pt)"; continue
+
+  best_pt=""
+  if [ -n "$MODEL_WEIGHTS" ] && [ -f "$PROJECT_DIR/models/$MODEL_WEIGHTS" ]; then
+    best_pt="$PROJECT_DIR/models/$MODEL_WEIGHTS"
+  elif [ -n "$MODEL_RUN" ] && [ -f "$PROJECT_DIR/models/${MODEL_RUN}/weights/best.pt" ]; then
+    best_pt="$PROJECT_DIR/models/${MODEL_RUN}/weights/best.pt"
+  elif [ -n "$MODEL_RUN" ]; then
+    # weights/ に .pt がちょうど 1 つならそれを使う（取り込んだモデル向け）
+    only=""
+    count=0
+    for f in "$PROJECT_DIR/models/${MODEL_RUN}/weights/"*.pt; do
+      [ -f "$f" ] || continue
+      only="$f"; count=$((count + 1))
+    done
+    [ "$count" = "1" ] && best_pt="$only"
+  fi
+
+  if [ -z "$best_pt" ]; then
+    echo "SKIP: $name (重みが見つかりません: MODEL_WEIGHTS=${MODEL_WEIGHTS:-未設定} MODEL_RUN=${MODEL_RUN:-未設定})"
+    continue
   fi
 
   stage="$BUILD_DIR/$name"
@@ -109,7 +131,7 @@ for name in "${TARGETS[@]}"; do
 
   echo ""
   echo "=========================================================="
-  echo "  Deploy: $name  (model=$MODEL_RUN)"
+  echo "  Deploy: $name  (weights=${best_pt#"$PROJECT_DIR/models/"})"
   echo "=========================================================="
   "$NUCTL" deploy --project-name cvat \
     --path "$stage" \

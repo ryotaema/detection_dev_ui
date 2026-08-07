@@ -1,0 +1,61 @@
+# =============================================================================
+# このファイルは Streamlit UI (データ管理タブ) が自動生成しました。
+#   生成元モデル: models/imported_20260807_0529/weights/260727_pepper_yolo26x.pt
+#   annotations.spec のラベルはモデルのクラス名から生成されています。
+#   CVAT タスク側のラベル名と一致していることを確認してください。
+# =============================================================================
+metadata:
+  name: custom-yolo26x-bellpepper
+  namespace: cvat
+  annotations:
+    name: "YOLO26x bell pepper (260727) / CPU"
+    type: detector
+    spec: |
+      [
+        {
+          "id": 0,
+          "name": "bell_pepper",
+          "type": "rectangle"
+        }
+      ]
+
+spec:
+  description: "自作 YOLO 検出器 (imported_20260807_0529 / Ultralytics) / CPU"
+  runtime: "python:3.10"
+  handler: main:handler
+  eventTimeout: 60s
+
+  env:
+    - name: YOLO_CONFIG_DIR
+      value: /tmp/Ultralytics
+    - name: MPLCONFIGDIR
+      value: /tmp/matplotlib
+
+  build:
+    image: cvat.custom.yolo26x-bellpepper
+    baseImage: ubuntu:22.04
+    directives:
+      preCopy:
+        - kind: RUN
+          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+        - kind: RUN
+          value: pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        - kind: RUN
+          value: pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml
+        - kind: WORKDIR
+          value: /opt/nuclio
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: "http"
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
