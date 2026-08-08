@@ -147,8 +147,9 @@ services:
       CVAT_POSTGRES_PASSWORD: ${CVAT_DB_PASSWORD:-cvat_secret}
       CVAT_POSTGRES_DBNAME: cvat
       IAM_OIDC_PROVIDER: ""
-      CSRF_TRUSTED_ORIGINS: "http://localhost:8080,http://localhost,http://127.0.0.1:8080"
-      UI_URL: "http://localhost:8080"
+      # 共有サーバーにする場合は .env で自分の Tailscale / LAN の URL を足す
+      CSRF_TRUSTED_ORIGINS: ${CVAT_CSRF_ORIGINS:-http://localhost:8080,http://localhost,http://127.0.0.1:8080}
+      UI_URL: ${CVAT_UI_URL:-http://localhost:8080}
       SMOKESCREEN_OPTS: ${SMOKESCREEN_OPTS:- }
       CVAT_SHARE_URL: /home/django/share
       NUMPROCS: "2"
@@ -447,7 +448,10 @@ services:
       - "5151:5151"   # FiftyOne App  → http://localhost:5151
     environment:
       # CVAT接続情報
-      CVAT_HOST: http://cvat-server:8080
+      # 共有 CVAT を使うときは .env で上書きする（例: http://100.x.x.x:8080）
+      CVAT_HOST: ${CVAT_HOST:-http://cvat-server:8080}
+      # ブラウザで開くときの URL（サイドバーのリンク先）
+      CVAT_WEB_HOST: ${CVAT_WEB_HOST:-http://localhost:8080}
       CVAT_USERNAME: ${CVAT_USERNAME:-admin}
       CVAT_PASSWORD: ${CVAT_PASSWORD:-admin}
       # MLflow接続情報

@@ -245,22 +245,68 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:8501                    
 
 ## 日常的な起動・停止
 
+**普段は `stop` / `start` を使ってください。** `down` はコンテナを消してしまうため、
+次の起動でぜんぶ作り直しになります（このプロジェクトは 25 コンテナあります）。
+
 ```bash
-# 起動
-docker compose up -d
+# ── 普段づかい ────────────────────────────────
+docker compose stop      # 止める（コンテナは残る）
+docker compose start     # 再開する（作り直さないぶん速い）
 
-# 停止
-docker compose down
+docker compose ps        # いまの状態
+docker compose logs -f streamlit_app   # ログを追う
+```
 
-# ログ確認
-docker compose logs -f streamlit_app
+### 止め方の使い分け
 
-# アップデート（リポジトリに更新があった場合）
+| コマンド | 何が起きるか | 使いどころ |
+| --- | --- | --- |
+| `stop` → `start` | プロセスを終了。**コンテナは残る** | **普段の停止・再開はこれ** |
+| `pause` → `unpause` | プロセスを凍結。メモリは保持したまま | 数分だけ GPU や CPU を空けたいとき（実測 0.2 秒） |
+| `restart` | 止めて起動し直す | 設定ファイルを変えて読み直したいとき |
+| `down` → `up -d` | **コンテナを削除**して作り直す | `docker-compose.yml` や `.env` を変えたとき |
+
+```bash
+# 一時的に処理を止める（すぐ戻せる。メモリは占有したまま）
+docker compose pause
+docker compose unpause
+
+# 特定のサービスだけ
+docker compose stop streamlit_app
+docker compose start streamlit_app
+docker compose restart streamlit_app
+```
+
+> **`down` を使ってもデータは消えません。**
+> `data/` `models/` `predictions/` はホスト側の bind mount、
+> CVAT のデータベースは名前付きボリュームなので残ります。
+> ただし `down -v` を付けると**名前付きボリュームまで消えて CVAT の中身が失われます**。
+> 使わないでください。
+>
+> **`--remove-orphans` も付けないでください。**
+> CVAT の自動アノテーション用の関数コンテナは compose の管理外なので、
+> このオプションを付けると消えます（実際に消えたことがあります）。
+
+### PC を再起動したいとき
+
+コンテナは `restart: unless-stopped` なので、**Docker が起動すれば自動で復帰します**。
+事前に停める必要はありません。
+
+ただし `docker compose stop` で明示的に止めたものは、**再起動しても止まったまま**です
+（それが `unless-stopped` の意味です）。`docker compose start` で戻してください。
+
+### アップデート（リポジトリに更新があった場合）
+
+```bash
 git pull
 docker compose build streamlit_app && docker compose up -d streamlit_app
-# ※ docker-compose.yml や requirements.txt に変更があった場合は全サービス再起動
-# docker compose down && docker compose up -d
+
+# docker-compose.yml や requirements.txt が変わった場合は、変わったサービスだけ作り直す
+docker compose up -d          # 差分のあるコンテナだけ再作成される
 ```
+
+> `up -d` は**変更のあったコンテナだけ**を作り直します。
+> 先に `down` する必要はありません。
 
 ---
 
@@ -397,6 +443,7 @@ deploy:
 | --- | --- |
 | Docker が入っていない状態からの準備 | [docs/docker_setup.md](docs/docker_setup.md) |
 | 何ができるのか・画面ごとの機能 | [docs/overview.md](docs/overview.md) |
+| 複数人で分担してアノテーションする | [docs/team_tailscale.md](docs/team_tailscale.md) |
 | 学習の考え方（用語・指標の読み方） | [docs/guide.md](docs/guide.md) |
 | CVAT の操作ショートカット | [docs/cvat_shortcuts.md](docs/cvat_shortcuts.md) |
 | 自動アノテーション（Nuclio）の詳細 | [serverless/README.md](serverless/README.md) |
