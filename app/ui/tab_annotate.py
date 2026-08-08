@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import empty_state, metric_row, show_error
+from .widgets import empty_state, metric_row, open_folder, show_error
 
 
 
@@ -106,13 +106,20 @@ def render_annotate() -> None:
                         st.caption("🏷 ラベル: " + (", ".join(_fn["labels"]) or "—"))
                         if _d.get("model_weights"):
                             _mr_ok = "✅" if _d.get("model_exists") else "⚠ 見つかりません"
-                            st.caption(f"📦 モデル: `models/{_d['model_weights']}` {_mr_ok}")
+                            _mnt = "（マウント）" if _d.get("kind") == "sam3" else ""
+                            st.caption(f"📦 モデル: `models/{_d['model_weights']}` {_mr_ok}{_mnt}")
                             if _d.get("deployed_at"):
                                 st.caption(f"🕐 デプロイ: {_d['deployed_at'][:19].replace('T', ' ')}")
                             # 重みはビルド時に焼き込まれるので、models/ を差し替えても
-                            # 再デプロイしない限り古いモデルが動き続ける
+                            # 再デプロイしない限り古いモデルが動き続ける。
+                            # SAM 3 はマウントなので焼き込みではないが、関数プロセスは
+                            # 起動時に読んだモデルを持ち続けるので、結局読み直しが要る
                             if _d.get("weights_changed"):
                                 st.warning(
+                                    "⚠ **重みが差し替わっています。**重みはマウントしているため"
+                                    "再ビルドは不要ですが、関数は起動時に読んだモデルを"
+                                    "使い続けます。右の「🔄 再デプロイ」で読み直してください。"
+                                    if _d.get("kind") == "sam3" else
                                     "⚠ **重みが更新されています。**いま動いているのは"
                                     "デプロイ時点のモデルです。右の「🔄 再デプロイ」を"
                                     "押すと最新のモデルに入れ替わります。")
@@ -228,6 +235,113 @@ def render_annotate() -> None:
                     start_deploy(_dep_dir, use_gpu=_dep_gpu)
                     cached_nuclio_functions.clear()
                     st.rerun()
+
+        # --- SAM 3（学習不要・ゼロショット）---
+        st.markdown("---")
+        st.markdown("**🧩 SAM 3 を使う（学習不要）**")
+        st.caption(
+            "SAM 3 は学習なしで使えるセグメンテーションモデルです。"
+            "自分のデータがまだ少なく、学習済みモデルを用意できない段階でも、"
+            "アノテーションの下書きを作れます。"
+        )
+
+        _s3 = sam3_weights_status()
+        if not _s3["exists"]:
+            st.info(
+                "**まだ重みが置かれていません。**\n\n"
+                "SAM 3 の重みは配布物に含められないため、各自で取得する必要があります。\n\n"
+                "1. https://huggingface.co/facebook/sam3 でアクセス承認を受ける\n"
+                f"2. `{_s3['name']}`（約 3.45GB）をダウンロードする\n"
+                f"3. 下のフォルダに置く → `models/{SAM3_DIR.name}/{_s3['name']}`\n\n"
+                "置いたらこの画面を再読み込みしてください。"
+            )
+            open_folder(SAM3_DIR, key="sam3_weights_dir",
+                        label="📂 重みの置き場所を開く")
+        else:
+            st.success(
+                f"✅ 重み: `models/{SAM3_DIR.name}/{_s3['name']}` "
+                f"({_s3['size'] / 1024**3:.2f} GB)"
+            )
+
+            _s3_key = st.radio(
+                "使い方",
+                list(SAM3_VARIANTS.keys()),
+                format_func=lambda k: SAM3_VARIANTS[k]["label"],
+                horizontal=True, key="sam3_variant",
+            )
+            _s3_info = SAM3_VARIANTS[_s3_key]
+            st.caption(f"CVAT では「**{_s3_info['where']}**」に "
+                       f"`{_s3_info['display']}` として現れます。")
+
+            _s3_pairs: list[tuple[str, str]] = []
+            _s3_ready = True
+
+            if _s3_key == "concept":
+                st.caption(
+                    "検出したいものを 1 行に 1 つ書きます。"
+                    "`CVAT のラベル名 = 英語プロンプト` の形で、左が CVAT のタスクに"
+                    "付けるラベル名、右が SAM 3 に渡す言葉です（`=` を省くと同じ語を使います）。"
+                    "**SAM 3 は英語の短い名詞句を前提**にしているので、"
+                    "右側は `red fruit` のように書いてください。"
+                )
+                # key と value を同時に渡すと Streamlit が警告を出すので、
+                # 初期値は session_state 側に入れておく
+                st.session_state.setdefault("sam3_prompts_text", "猫 = cat")
+                _s3_text = st.text_area(
+                    "検出したいもの", key="sam3_prompts_text", height=110,
+                )
+                _s3_pairs, _s3_bad = parse_sam3_prompt_lines(_s3_text)
+                if _s3_bad:
+                    st.warning("⚠ 読み取れなかった行があります（重複も含む）:\n\n"
+                               + "\n".join(f"- `{b}`" for b in _s3_bad))
+                if _s3_pairs:
+                    st.caption("🏷 CVAT に出るラベル: **"
+                               + ", ".join(lb for lb, _ in _s3_pairs) + "**")
+                    st.caption("⚠ CVAT タスク側のラベル名がこれと一致していないと、"
+                               "自動アノテーションの結果が反映されません。")
+                else:
+                    _s3_ready = False
+                    st.error("❌ 検出したいものを 1 つ以上書いてください。")
+            else:
+                st.caption(
+                    "対象をボックスで囲むか、内側に正の点・外側に負の点を打つと、"
+                    "その 1 個だけをマスクにして返します。ラベルの指定は要りません。"
+                )
+
+            _s3c1, _s3c2 = st.columns(2)
+            with _s3c1:
+                _s3_gpu = st.radio(
+                    "実行モード", ["GPU", "CPU"], horizontal=True, key="sam3_gpu_mode",
+                    help="CPU でも動きますが、1 枚あたり数十秒かかります",
+                ) == "GPU"
+            with _s3c2:
+                _s3_half = st.checkbox(
+                    "FP16 で読み込む", value=False, key="sam3_half",
+                    help="GPU メモリの使用量を減らせます。精度がわずかに変わることがあります",
+                )
+
+            if _s3_gpu:
+                st.caption(
+                    "⚠ SAM 3 は GPU メモリを数 GB 使います。"
+                    "**2 つの使い方を両方デプロイすると、その分だけ常時占有します。**"
+                    "学習と同時に使うとメモリが足りなくなることがあるので、"
+                    "使わないほうは削除しておくのが安全です。"
+                )
+
+            st.caption(f"Nuclio 関数名: `{_s3_info['fn_dir']}`　"
+                       "初回はビルドとモデル読み込みで 10 分以上かかることがあります。")
+
+            if st.button("🚀 SAM 3 をデプロイ", type="primary", use_container_width=True,
+                         disabled=_dep_running or not _s3_ready, key="sam3_deploy_btn"):
+                generate_sam3_function_files(
+                    variant=_s3_key,
+                    pairs=_s3_pairs,
+                    weights_name=_s3["name"],
+                    half=_s3_half,
+                )
+                start_deploy(_s3_info["fn_dir"], use_gpu=_s3_gpu)
+                cached_nuclio_functions.clear()
+                st.rerun()
 
         if _dep_running:
             # ここで st.rerun() すると以降のタブが描画されないため予約だけする

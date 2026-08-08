@@ -40,6 +40,7 @@ TAB_MARKERS = {
 HEAVY_KEYS = {
     "train_start", "infer_run", "ev_run", "gd_run", "sw_run", "ap_run",
     "nt_create", "push_run", "gd_push", "gd_fo", "dep_run_btn", "aa_run",
+    "sam3_deploy_btn",           # SAM 3 のデプロイ（イメージのビルドが走る）
     "tune_start", "tune_stop",   # 探索は学習を何度も回す
     "mu_pt_btn", "mu_zip_btn", "cvat_export_run", "dataset_generate_run",
     "xml_parse_run", "cvat_fetch_tasks", "anno_fetch_tasks", "fo_launch",
@@ -355,3 +356,32 @@ def test_探索は学習タブの条件を引き継ぐ():
     at = AppTest.from_file(MAIN, default_timeout=300).run()
     _cap = " ".join(str(c.value) for c in at.caption)
     assert "③ 詳細設定と同じ条件" in _cap, "条件を引き継ぐ旨の表示がない"
+
+
+def test_sam3_重みがあるときも描画できる():
+    """SAM 3 のセクションは重みの有無で中身が入れ替わる。
+    重みが無い側は初期表示で通るので、ここでは「ある」側を通す。
+
+    **本物の重みがあるときは触らない。** 3.45GB を取り直すことになるので、
+    ダミーを置くのは「元々無かったとき」だけ。
+    """
+    from streamlit.testing.v1 import AppTest
+
+    from core.config import SAM3_DIR, SAM3_WEIGHTS_NAME
+
+    w = SAM3_DIR / SAM3_WEIGHTS_NAME
+    created = False
+    if not w.exists():
+        SAM3_DIR.mkdir(parents=True, exist_ok=True)
+        w.write_bytes(b"dummy")
+        created = True
+    try:
+        at = AppTest.from_file(MAIN, default_timeout=300)
+        at.run()
+        _assert_all_tabs_rendered(at, "SAM3 の重みあり")
+        # 使い方の選択とプロンプト入力が出ていること
+        assert any(r.key == "sam3_variant" for r in at.radio), "使い方の選択が無い"
+        assert any(t.key == "sam3_prompts_text" for t in at.text_area), "プロンプト入力が無い"
+    finally:
+        if created:
+            w.unlink(missing_ok=True)

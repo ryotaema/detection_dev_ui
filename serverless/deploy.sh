@@ -21,6 +21,7 @@ BIN_DIR="$SCRIPT_DIR/bin"
 BUILD_DIR="$SCRIPT_DIR/.build"
 COMMON_DIR="$SCRIPT_DIR/_common"
 CUSTOM_DIR="$SCRIPT_DIR/custom"
+SAM3_DIR="$SCRIPT_DIR/sam3"
 
 # --- 引数解析 -------------------------------------------------------------
 # 既定は GPU。CPU で動かす場合は --cpu を付ける
@@ -67,6 +68,117 @@ echo "==> nuctl: $NUCTL ($("$NUCTL" version 2>/dev/null | head -1 || echo '?'))"
 # --- nuclio プロジェクト作成 (存在すれば無視) --------------------------------
 "$NUCTL" create project cvat --platform local 2>/dev/null || true
 
+# --- コンテナ内のパス → ホストのパス ----------------------------------------
+# SAM 3 の重み (3.45GB) はイメージに焼き込まず、ホストのディレクトリを
+# 関数コンテナへマウントして使う。マウント元はホストの実パスでなければならないが、
+# このスクリプトは streamlit_app コンテナの中から実行されることがあるため、
+# そのままでは自分から見えているパス (/workspace/...) を渡してしまう。
+# 自分自身のマウント表を docker inspect で引いて読み替える
+# （app/core/hostpath.py と同じ考え方。決め打ちにすると別環境で外れる）。
+resolve_host_dir() {
+  local cpath="$1"
+  if [ -n "${SAM3_WEIGHTS_HOST_DIR:-}" ]; then echo "$SAM3_WEIGHTS_HOST_DIR"; return 0; fi
+  if [ ! -f /.dockerenv ]; then echo "$cpath"; return 0; fi
+
+  python3 - "$cpath" <<'PYEOF'
+import json, os, socket, subprocess, sys
+
+cpath = os.path.normpath(sys.argv[1])
+mounts = []
+for ident in (socket.gethostname(), "streamlit_app"):
+    try:
+        r = subprocess.run(["docker", "inspect", ident, "--format", "{{json .Mounts}}"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            for m in json.loads(r.stdout) or []:
+                if m.get("Destination") and m.get("Source"):
+                    mounts.append((os.path.normpath(m["Destination"]), m["Source"]))
+            break
+    except Exception:
+        pass
+
+# 長いマウント先から先に当てる (/workspace より /workspace/models を優先)
+for dst, src in sorted(mounts, key=lambda x: -len(x[0])):
+    if cpath == dst:
+        print(src)
+        sys.exit(0)
+    if cpath.startswith(dst.rstrip("/") + "/"):
+        print(os.path.join(src, os.path.relpath(cpath, dst)))
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
+# --- SAM 3 のデプロイ ------------------------------------------------------
+# 自作モデルと違い、重みはイメージに焼き込まずホストからマウントする
+# (sam3.pt は 3.45GB あるため)。ハンドラも専用のものを使う。
+deploy_sam3() {
+  local name="$1" fn_dir="$2" src_yaml="$3"
+  local variant="${SAM3_VARIANT:-concept}"
+  local handler="$SAM3_DIR/main_${variant}.py"
+
+  if [ ! -f "$handler" ]; then
+    echo "SKIP: $name (未知の SAM3_VARIANT: $variant / concept か interactive)"
+    return 1
+  fi
+
+  local rel="${MODEL_WEIGHTS:-.sam3/sam3.pt}"
+  local abs="$PROJECT_DIR/models/$rel"
+  if [ ! -f "$abs" ]; then
+    echo "SKIP: $name (重みがありません: models/$rel)"
+    echo "      https://huggingface.co/facebook/sam3 でアクセス承認を受けたうえで"
+    echo "      sam3.pt を models/$(dirname "$rel")/ に置いてください。"
+    return 1
+  fi
+
+  local host_dir
+  if ! host_dir="$(resolve_host_dir "$(dirname "$abs")")"; then
+    echo "SKIP: $name (重みのホスト側パスを解決できませんでした)"
+    echo "      SAM3_WEIGHTS_HOST_DIR=<ホストの絶対パス> を指定して再実行してください。"
+    return 1
+  fi
+
+  local stage="$BUILD_DIR/$name"
+  rm -rf "$stage"; mkdir -p "$stage"
+  # マウント元はホストの実パスでなければならないので、ここで初めて確定させる
+  sed "s|__SAM3_WEIGHTS_HOST_DIR__|$host_dir|g" "$src_yaml" > "$stage/function.yaml"
+  cp "$handler" "$stage/main.py"
+  cp "$SAM3_DIR/model_handler.py" "$stage/"
+
+  echo ""
+  echo "=========================================================="
+  echo "  Deploy: $name  (SAM 3 / $variant)"
+  echo "    weights: $host_dir/$(basename "$rel")  ← マウント"
+  echo "=========================================================="
+  "$NUCTL" deploy --project-name cvat \
+    --path "$stage" \
+    --file "$stage/function.yaml" \
+    --platform local \
+    --platform-config "{\"attributes\": {\"network\": \"$CVAT_NETWORK\"}}" || return 1
+
+  # 重みはマウントなので焼き込みとは違い、差し替えても再デプロイは要らない。
+  # ただし関数プロセスは起動時に読んだモデルを持ち続けるので、
+  # 差し替えたら**再起動**が要る。それに気づけるよう記録は残す
+  # (照合の取り方は deploy.sh / Python 側で必ず揃えること)。
+  local _sha _size
+  _sha="$(head -c 8388608 "$abs" | sha1sum | cut -d" " -f1)"
+  _size="$(stat -c %s "$abs")"
+  cat > "$fn_dir/.deployed.json" <<EOF
+{
+  "kind": "sam3",
+  "variant": "$variant",
+  "weights": "$rel",
+  "mounted": true,
+  "host_dir": "$host_dir",
+  "sha1": "$_sha",
+  "size": $_size,
+  "gpu": $([ "$USE_GPU" = "1" ] && echo true || echo false),
+  "deployed_at": "$(date -Iseconds)"
+}
+EOF
+  chmod 0666 "$fn_dir/.deployed.json" 2>/dev/null || true
+}
+
 # --- デプロイ対象の決定 ----------------------------------------------------
 if [ "${#TARGETS[@]}" -eq 0 ]; then
   while IFS= read -r d; do TARGETS+=("$(basename "$d")"); done \
@@ -99,7 +211,15 @@ for name in "${TARGETS[@]}"; do
   # shellcheck disable=SC1091
   MODEL_RUN=""
   MODEL_WEIGHTS=""
+  MODEL_KIND=""
+  SAM3_VARIANT=""
   [ -f "$fn_dir/model.env" ] && source "$fn_dir/model.env"
+
+  # SAM 3 は重みの扱いもハンドラも違うので、ここで分岐する
+  if [ "${MODEL_KIND:-}" = "sam3" ]; then
+    deploy_sam3 "$name" "$fn_dir" "$src_yaml" || true
+    continue
+  fi
 
   best_pt=""
   if [ -n "$MODEL_WEIGHTS" ] && [ -f "$PROJECT_DIR/models/$MODEL_WEIGHTS" ]; then

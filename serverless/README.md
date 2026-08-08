@@ -129,6 +129,53 @@ docker compose -f docker-compose.yml -f docker-compose.serverless.yml \
 UI から行う場合は、この 1〜4 を「🏷 Step1: アノテーション」タブが自動で行う。
 モデルのクラス名から `annotations.spec` を生成するため、ラベル名のずれも起きない。
 
+## SAM 3 を使う（学習不要のゼロショット）
+
+自作モデルがまだ無い段階でも、[SAM 3](https://github.com/facebookresearch/sam3) を
+デプロイすればアノテーションの下書きを作れる。使い方は 2 通りで、
+CVAT 側の出方が違うため関数を分けている。
+
+| variant | CVAT での場所 | できること |
+|---|---|---|
+| `concept` | Actions → Automatic annotation | 英語の名詞句（例 `red fruit`）に当てはまるものを**全部**ポリゴンにする |
+| `interactive` | AI Tools → Interactors | ボックスで囲む／点を打った **1 個だけ**をマスクにする |
+
+### 1. 重みを置く
+
+重みは配布物に含まれない（Meta の SAM License に従うため）。
+
+1. https://huggingface.co/facebook/sam3 でアクセス承認を受ける
+2. `sam3.pt`（約 3.45GB）をダウンロード
+3. `models/.sam3/sam3.pt` に置く
+
+### 2. デプロイ
+
+「🏷 Step1: アノテーション」タブの「🧩 SAM 3 を使う」から生成〜デプロイまで行える。
+CLI で行う場合は `serverless/custom/<name>/model.env` に以下を書き、
+`function.yaml` / `function-gpu.yaml` を用意して `./serverless/deploy.sh <name>`:
+
+```sh
+MODEL_KIND=sam3               # これがあると deploy.sh が SAM 3 の経路を通る
+SAM3_VARIANT=concept          # concept か interactive
+MODEL_WEIGHTS=.sam3/sam3.pt   # models/ からの相対パス
+```
+
+### 仕組み上の注意
+
+- **重みはイメージに焼き込まず、ホストの `models/.sam3/` をマウントする。**
+  3.45GB をビルドのたびにコピーすると時間もディスクも食うため。
+  `function.yaml` の `__SAM3_WEIGHTS_HOST_DIR__` は `deploy.sh` が
+  デプロイ時にホストの実パスへ置換する（コンテナ内から実行された場合は
+  自分のマウント表を引いて読み替える。`SAM3_WEIGHTS_HOST_DIR` で明示も可）
+- **重みを差し替えたら関数の再起動が必要。** マウントなので再ビルドは要らないが、
+  関数プロセスは起動時に読んだモデルを持ち続ける（UI は差分を見て再デプロイを促す）
+- **CVAT のラベル名と SAM 3 に渡す語は別に持つ。** SAM 3 は英語の短い名詞句を
+  前提にしているので、CVAT 側のラベル名（日本語でも可）とは分けて
+  `SAM3_PROMPTS` 環境変数に対応表を持たせている
+- **GPU メモリを数 GB 常時占有する。** `concept` と `interactive` を両方デプロイすると
+  そのぶん増える。学習と同時に使うなら片方だけにするか、`SAM3_HALF=1`（FP16）にする
+- 起動には重みの読み込みぶんの時間がかかるため、`readinessTimeoutSeconds` を延ばしてある
+
 ## トラブルシューティング
 
 | 症状 | 対処 |
@@ -138,3 +185,7 @@ UI から行う場合は、この 1〜4 を「🏷 Step1: アノテーション�
 | GPU が使われない | daemon の `default-runtime=nvidia` になっているか確認 |
 | ネットワーク不一致 | `CVAT_NETWORK=<実ネットワーク名> ./serverless/deploy.sh` で明示 |
 | ラベルが投入されない | `function.yaml` の spec ラベル名と CVAT タスクのラベル名が一致しているか |
+| SAM 3 が `SKIP` される | `models/.sam3/sam3.pt` があるか。無ければ HuggingFace から取得する |
+| SAM 3 が起動しない | 重みのマウント元がホストの実パスか（`docker inspect nuclio-sam3-... --format '{{json .Mounts}}'`） |
+| SAM 3 が何も検出しない | プロンプトが英語の短い名詞句になっているか。CVAT 側の threshold を下げてみる |
+| SAM 3 のクリックが反応しない | マスクがスコアで捨てられている。`SAM3_INTERACTIVE_CONF`（既定 0.05）を下げる |

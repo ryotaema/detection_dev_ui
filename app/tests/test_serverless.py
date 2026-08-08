@@ -17,6 +17,15 @@ def fn_dir(tmp_path: Path, monkeypatch):
     return tmp_path
 
 
+def _deploy_sh():
+    """deploy.sh の場所。コンテナ内 (/workspace/serverless) とホストの両方に対応。"""
+    for p in (sl.SERVERLESS_DIR / "deploy.sh",
+              Path(__file__).resolve().parent.parent.parent / "serverless" / "deploy.sh"):
+        if p.exists():
+            return p
+    return None
+
+
 def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text())
 
@@ -195,11 +204,92 @@ def test_デプロイ記録が無ければ更新扱いにしない():
 def test_ハッシュの取り方がデプロイ側と揃っている():
     """deploy.sh は先頭 8MB の sha1 を記録する。Python が全体 sha1 を取ると
     値が一致せず、常に「更新あり」になる（実際に起きた）。"""
-    from pathlib import Path
-
-    sh = Path(__file__).resolve().parent.parent.parent / "serverless" / "deploy.sh"
-    if not sh.exists():
-        return
+    sh = _deploy_sh()
+    if sh is None:
+        pytest.skip("serverless/deploy.sh が見つからない")
     text = sh.read_text(encoding="utf-8")
     assert "head -c 8388608" in text, "deploy.sh が先頭 8MB を取っていない"
     assert "stat -c %s" in text, "deploy.sh がサイズを記録していない"
+
+
+# ---------------------------------------------------------------------------
+# SAM 3
+# ---------------------------------------------------------------------------
+def test_sam3_プロンプト行の読み取り():
+    """人が手で書くものなので緩く読む。読めなかった行は捨てずに返す。"""
+    pairs, bad = sl.parse_sam3_prompt_lines(
+        "\n".join([
+            "object_a = red thing",
+            "  猫 ： cat  ",          # 全角の区切り・前後の空白
+            "dog",                    # 区切り無し → ラベル名をそのまま使う
+            "",
+            "# コメント",
+            "object_a = another",     # 重複ラベル
+            " = 空ラベル",
+        ])
+    )
+    assert pairs == [("object_a", "red thing"), ("猫", "cat"), ("dog", "dog")]
+    assert len(bad) == 2               # 重複と空ラベル
+
+
+def test_sam3_ラベル名とプロンプトを分けて持つ(fn_dir: Path):
+    """CVAT のラベル名は日本語でもよいが、SAM 3 に渡すのは英語の名詞句。
+    spec にラベル名、SAM3_PROMPTS に対応表を持たせて分離する。"""
+    out, name = sl.generate_sam3_function_files("concept", [("猫", "cat")])
+    assert name == "sam3-concept"
+
+    y = _load(out / "function.yaml")
+    spec = json.loads(y["metadata"]["annotations"]["spec"])
+    assert [d["name"] for d in spec] == ["猫"]
+    assert spec[0]["type"] == "polygon"        # SAM 3 はポリゴンを返す
+
+    env = {e["name"]: e["value"] for e in y["spec"]["env"]}
+    assert json.loads(env["SAM3_PROMPTS"]) == [{"label": "猫", "prompt": "cat"}]
+
+
+def test_sam3_interactive_は_interactor_として出す(fn_dir: Path):
+    out, name = sl.generate_sam3_function_files("interactive")
+    assert name == "sam3-interactive"
+    ann = _load(out / "function.yaml")["metadata"]["annotations"]
+    assert ann["type"] == "interactor"
+    assert ann["spec"] is None                 # interactor はラベル定義を持たない
+    assert ann["startswith_box_optional"] is True
+
+
+def test_sam3_concept_はラベルが無ければ作れない(fn_dir: Path):
+    with pytest.raises(ValueError):
+        sl.generate_sam3_function_files("concept", [])
+
+
+def test_sam3_重みは焼き込まずマウントする(fn_dir: Path):
+    """3.45GB をイメージに入れるとビルドのたびにコピーが走る。
+    マウント先のホストパスは deploy.sh がデプロイ時に埋めるので、
+    ここではプレースホルダのまま残っていること。"""
+    out, _ = sl.generate_sam3_function_files("interactive")
+    for f in ("function.yaml", "function-gpu.yaml"):
+        y = _load(out / f)
+        vol = y["spec"]["volumes"][0]
+        assert vol["volume"]["hostPath"]["path"] == "__SAM3_WEIGHTS_HOST_DIR__"
+        assert vol["volumeMount"]["mountPath"] == sl.SAM3_MOUNT_PATH
+        env = {e["name"]: e["value"] for e in y["spec"]["env"]}
+        assert env["SAM3_WEIGHTS_PATH"].startswith(sl.SAM3_MOUNT_PATH)
+        # 重みを COPY する指示が紛れ込んでいないこと
+        assert "best.pt" not in (out / f).read_text()
+
+
+def test_sam3_起動猶予を延ばしてある(fn_dir: Path):
+    """3.45GB を読み終えるまで起動完了にならない。既定の 120 秒では足りない。"""
+    out, _ = sl.generate_sam3_function_files("interactive")
+    assert _load(out / "function.yaml")["spec"]["readinessTimeoutSeconds"] >= 600
+
+
+def test_sam3_deploy_sh_が専用の経路を持っている():
+    """model.env の MODEL_KIND=sam3 を deploy.sh 側が見ていること。
+    見ていないと重みの解決に失敗して黙って SKIP される。"""
+    sh = _deploy_sh()
+    if sh is None:
+        pytest.skip("serverless/deploy.sh が見つからない")
+    text = sh.read_text(encoding="utf-8")
+    assert "MODEL_KIND" in text
+    assert "__SAM3_WEIGHTS_HOST_DIR__" in text, "ホストパスの置換が無い"
+    assert "resolve_host_dir" in text

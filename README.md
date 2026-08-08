@@ -479,6 +479,12 @@ AGPL のコードを取り込んだソフトウェアを配布する場合、全
 | [Optuna](https://github.com/optuna/optuna) | MIT |
 | [OpenCV](https://github.com/opencv/opencv) | Apache 2.0 |
 
+**SAM 3 の重みは配布物に含まれません。** CVAT の自動アノテーションで SAM 3 を使う場合、
+重み (`sam3.pt`) は [HuggingFace](https://huggingface.co/facebook/sam3) でアクセス承認を
+受けたうえで各自が取得し、`models/.sam3/` に置きます。重みは Meta の
+[SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE)（商用利用可・
+用途制限あり）に従うもので、このリポジトリのライセンスとは別に確認が必要です。
+
 `docker-compose.yml` の CVAT 関連サービス定義、`nginx/cvat.conf`、
 `serverless/_common/` の関数インタフェースは、CVAT 公式の実装を元に構成しています
 （Copyright (C) CVAT.ai Corporation / MIT License）。
