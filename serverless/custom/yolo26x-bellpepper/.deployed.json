@@ -1,7 +1,0 @@
-{
-  "weights": "imported_20260807_0529/weights/260727_pepper_yolo26x.pt",
-  "sha1": "6f742fd66f326c2bf0010474693fda43797c93ec",
-  "size": 118333541,
-  "gpu": true,
-  "deployed_at": "2026-08-07T06:07:17+00:00"
-}

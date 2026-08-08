@@ -34,6 +34,10 @@ docker-compose.yml.bak
 serverless/bin/
 serverless/.build/
 
+# Nuclio 関数の定義（各自の学習済みモデルに対応するもの）。
+# UI の「自動アノテーションへデプロイ」が生成するため、リポジトリには含めない
+serverless/custom/
+
 
 # デザインシステムのプレビュー生成物
 # （tools/build_design_system.py でいつでも作り直せる）

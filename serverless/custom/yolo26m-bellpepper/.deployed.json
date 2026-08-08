@@ -1,7 +1,0 @@
-{
-  "weights": "yolo26m_ep2000_0711/weights/best.pt",
-  "sha1": "825b86634ff7926f3938a7c43bd50ef5e0a5ebfd",
-  "size": 44062937,
-  "gpu": true,
-  "deployed_at": "2026-08-07T06:07:00+00:00"
-}
