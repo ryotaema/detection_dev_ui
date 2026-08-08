@@ -52,12 +52,12 @@ def _labels_of(ds, split):
 @pytest.fixture
 def two_datasets(tmp_path):
     """names の並びが違う 2 つのデータセット"""
-    a = _make_dataset(tmp_path, "ds_a", ["pepper", "leaf"], {
+    a = _make_dataset(tmp_path, "ds_a", ["cat", "dog"], {
         "train": [[(0, "0.1 0.1 0.2 0.2")], [(1, "0.3 0.3 0.2 0.2")]],
         "val":   [[(0, "0.5 0.5 0.2 0.2")]],
     })
-    # B は leaf しか持たず、その ID は 0
-    b = _make_dataset(tmp_path, "ds_b", ["leaf"], {
+    # B は dog しか持たず、その ID は 0
+    b = _make_dataset(tmp_path, "ds_b", ["dog"], {
         "train": [[(0, "0.7 0.7 0.2 0.2")]],
         "val":   [[(0, "0.9 0.9 0.1 0.1")]],
     })
@@ -74,15 +74,15 @@ def test_クラスIDが正しく振り直される(tmp_path, two_datasets):
     assert res["ok"], res["error"]
 
     # 統合後のクラス順は「先に出てきた順」
-    assert res["labels"] == ["pepper", "leaf"]
+    assert res["labels"] == ["cat", "dog"]
 
     rows = _labels_of(out, "train")
-    # A 由来はそのまま（pepper=0, leaf=1）
+    # A 由来はそのまま（cat=0, dog=1）
     assert rows["ds_a__img0"] == [(0, "0.1 0.1 0.2 0.2")]
     assert rows["ds_a__img1"] == [(1, "0.3 0.3 0.2 0.2")]
-    # B 由来の「0 = leaf」は統合後の leaf=1 に振り直される
+    # B 由来の「0 = dog」は統合後の dog=1 に振り直される
     assert rows["ds_b__img0"] == [(1, "0.7 0.7 0.2 0.2")], \
-        "B のクラスIDが振り直されていない（pepper に化けている）"
+        "B のクラスIDが振り直されていない（cat に化けている）"
 
 
 def test_座標は変えない(tmp_path, two_datasets):
@@ -130,7 +130,7 @@ def test_data_yamlが正しい(tmp_path, two_datasets):
     cfg = yaml.safe_load((out / "data.yaml").read_text())
     assert cfg["train"] == "images/train"
     assert cfg["val"] == "images/val"
-    assert cfg["names"] == ["pepper", "leaf"]
+    assert cfg["names"] == ["cat", "dog"]
     assert cfg["nc"] == 2
     assert cfg["task"] == "detect"
 

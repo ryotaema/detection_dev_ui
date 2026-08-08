@@ -34,7 +34,7 @@ def ds(tmp_path):
         "dataset": "dataset_a",
         "source": "cvat",
         "task_type": "detect",
-        "labels": ["bell_pepper"],
+        "labels": ["object_a"],
         "cvat_tasks": [{"id": 7, "name": "task7"}],
         "counts": {"train": 3, "val": 1},
     })

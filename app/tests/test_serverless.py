@@ -30,9 +30,9 @@ def test_generates_cpu_and_gpu_definitions(fn_dir: Path):
 
 def test_labels_come_from_model_classes(fn_dir: Path):
     """ラベル名をモデルのクラス名から作ることで CVAT との不一致を防ぐ"""
-    out, _ = sl.generate_function_files("m", "run1", ["bell_pepper", "peduncle"])
+    out, _ = sl.generate_function_files("m", "run1", ["object_a", "object_b"])
     spec = _load(out / "function.yaml")["metadata"]["annotations"]["spec"]
-    assert [d["name"] for d in json.loads(spec)] == ["bell_pepper", "peduncle"]
+    assert [d["name"] for d in json.loads(spec)] == ["object_a", "object_b"]
 
 
 def test_segment_model_declares_polygon(fn_dir: Path):

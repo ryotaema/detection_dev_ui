@@ -4,7 +4,7 @@
 # -----------------------------------------------------------------------------
 #   GPU (既定):  ./serverless/deploy.sh
 #   CPU:         ./serverless/deploy.sh --cpu
-#   個別:        ./serverless/deploy.sh yolo11s-bellpepper
+#   個別:        ./serverless/deploy.sh <関数名>
 #
 # 前提:
 #   - nuclio ダッシュボードが起動していること

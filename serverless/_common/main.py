@@ -1,6 +1,10 @@
 # =============================================================================
 # Nuclio 関数エントリポイント (CVAT detector)
 # CVAT から base64 画像 + threshold を受け取り、検出結果 JSON を返す。
+#
+# インタフェース（init_context / handler の入出力）は CVAT 公式の
+# serverless 関数の実装に合わせている。
+#   https://github.com/cvat-ai/cvat  (Copyright (C) CVAT.ai Corporation / MIT License)
 # =============================================================================
 import base64
 import io

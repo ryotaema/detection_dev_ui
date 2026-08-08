@@ -458,12 +458,27 @@ UI の中にも説明があります。サイドバー最下部の「📖 はじ
 
 このプロジェクトは [GNU Affero General Public License v3.0](LICENSE) の下で公開されています。
 
+**AGPL-3.0 なのは [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) を使っているためです。**
+AGPL のコードを取り込んだソフトウェアを配布する場合、全体を AGPL で公開する必要があります。
+このリポジトリを利用・改変する方は、次の点にご注意ください。
+
+- 改変して**再配布する**場合、変更後のソースコードも AGPL で公開する必要があります
+- **ネットワーク越しに他人へ使わせる**場合（社内サーバーに立てて複数人で使う等）も、
+  利用者にソースコードを提供する必要があります（AGPL 第 13 条）
+- **自分だけで使う・組織内で使うだけ**なら、公開の義務は生じません
+
 使用しているライブラリのライセンス:
 
-| ライブラリ                                                  | ライセンス |
-| ----------------------------------------------------------- | ---------- |
-| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) | AGPL-3.0   |
-| [CVAT](https://github.com/opencv/cvat)                         | MIT        |
-| [MLflow](https://github.com/mlflow/mlflow)                     | Apache 2.0 |
-| [FiftyOne](https://github.com/voxel51/fiftyone)                | Apache 2.0 |
-| [Streamlit](https://github.com/streamlit/streamlit)            | Apache 2.0 |
+| ライブラリ | ライセンス |
+| --- | --- |
+| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) | AGPL-3.0 |
+| [CVAT](https://github.com/cvat-ai/cvat) | MIT |
+| [MLflow](https://github.com/mlflow/mlflow) | Apache 2.0 |
+| [FiftyOne](https://github.com/voxel51/fiftyone) | Apache 2.0 |
+| [Streamlit](https://github.com/streamlit/streamlit) | Apache 2.0 |
+| [Optuna](https://github.com/optuna/optuna) | MIT |
+| [OpenCV](https://github.com/opencv/opencv) | Apache 2.0 |
+
+`docker-compose.yml` の CVAT 関連サービス定義、`nginx/cvat.conf`、
+`serverless/_common/` の関数インタフェースは、CVAT 公式の実装を元に構成しています
+（Copyright (C) CVAT.ai Corporation / MIT License）。

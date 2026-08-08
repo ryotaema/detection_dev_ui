@@ -33,8 +33,7 @@ def render_extension_placeholder() -> None:
     st.markdown("**入れ方**")
     st.code(
         "cd extensions\n"
-        "git clone https://github.com/ryotaema/anno_dataset_tools\n"
-        "git clone https://github.com/ryotaema/mosaic_tool\n"
+        "git clone <拡張リポジトリの URL>\n"
         "# ブラウザを再読み込みするとタブが増えます",
         language="bash",
     )

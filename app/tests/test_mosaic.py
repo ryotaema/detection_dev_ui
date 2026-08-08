@@ -97,14 +97,14 @@ def test_推論結果から領域を集める(tmp_path):
     jf.write_text(json.dumps({
         "image_path": "/x/1.png",
         "boxes": [
-            {"label": "bell_pepper", "confidence": 0.9, "bbox_xyxy": [1, 2, 3, 4]},
-            {"label": "bell_pepper", "confidence": 0.05, "bbox_xyxy": [5, 6, 7, 8]},
-            {"label": "leaf", "confidence": 0.9, "bbox_xyxy": [9, 9, 9, 9]},
+            {"label": "object_a", "confidence": 0.9, "bbox_xyxy": [1, 2, 3, 4]},
+            {"label": "object_a", "confidence": 0.05, "bbox_xyxy": [5, 6, 7, 8]},
+            {"label": "object_b", "confidence": 0.9, "bbox_xyxy": [9, 9, 9, 9]},
         ]}))
     got = regions_from_predictions([jf], conf=0.10)
     assert got == {"/x/1.png": [(1.0, 2.0, 3.0, 4.0), (9.0, 9.0, 9.0, 9.0)]}
 
-    only = regions_from_predictions([jf], labels=["bell_pepper"], conf=0.10)
+    only = regions_from_predictions([jf], labels=["object_a"], conf=0.10)
     assert only == {"/x/1.png": [(1.0, 2.0, 3.0, 4.0)]}
 
 
@@ -143,7 +143,7 @@ def test_CVATのXMLからマスク領域を取る(ds, tmp_path):
 <annotations>
   <image id="0" name="img0.png" width="80" height="60">
     <box label="mask" xtl="10" ytl="10" xbr="30" ybr="30"/>
-    <box label="bell_pepper" xtl="1" ytl="1" xbr="5" ybr="5"/>
+    <box label="object_a" xtl="1" ytl="1" xbr="5" ybr="5"/>
     <polygon label="mask" points="40,10;60,10;60,25;40,25"/>
   </image>
 </annotations>""", encoding="utf-8")
@@ -430,16 +430,16 @@ def test_アノテーションと重なれば報告する(ds_labeled):
     img = str(ds_labeled / "images" / "train" / "a.png")
     # ラベルは 30,10 - 50,50 付近。そこに重なる領域を渡す
     got = find_annotation_conflicts({img: [(35, 20, 45, 40)]}, ds_labeled,
-                                    class_names=["bell_pepper"])
+                                    class_names=["object_a"])
     assert len(got) == 1
-    assert got[0]["label"] == "bell_pepper"
+    assert got[0]["label"] == "object_a"
     assert got[0]["covered"] > 0
 
 
 def test_重ならなければ報告しない(ds_labeled):
     img = str(ds_labeled / "images" / "train" / "a.png")
     got = find_annotation_conflicts({img: [(0, 0, 5, 5)]}, ds_labeled,
-                                    class_names=["bell_pepper"])
+                                    class_names=["object_a"])
     assert got == []
 
 

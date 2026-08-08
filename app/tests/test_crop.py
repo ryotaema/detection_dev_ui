@@ -44,13 +44,13 @@ def _dets(src):
     return {
         str(src / "IMG_0.png"): [
             {"bbox_xyxy": [300, 200, 400, 300], "confidence": 0.9,
-             "label": "bell_pepper", "class_id": 0},
+             "label": "object_a", "class_id": 0},
             {"bbox_xyxy": [600, 100, 660, 160], "confidence": 0.5,
-             "label": "bell_pepper", "class_id": 0},
+             "label": "object_a", "class_id": 0},
         ],
         str(src / "IMG_1.png"): [
             {"bbox_xyxy": [50, 50, 150, 130], "confidence": 0.8,
-             "label": "bell_pepper", "class_id": 0},
+             "label": "object_a", "class_id": 0},
         ],
     }
 

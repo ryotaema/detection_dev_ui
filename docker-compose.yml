@@ -2,6 +2,9 @@
 # detection_dev_ui - Docker Compose 統合設定
 # Ubuntu 22.04 / GPU対応 (NVIDIA Container Toolkit 必須)
 # CVAT: v2.64.0 (cvat-sdk と同一バージョンに固定)
+#
+# cvat_* のサービス定義は CVAT 公式の docker-compose.yml を元に構成している。
+#   https://github.com/cvat-ai/cvat  (Copyright (C) CVAT.ai Corporation / MIT License)
 # =============================================================================
 
 version: "3.8"

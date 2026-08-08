@@ -30,9 +30,9 @@ def pred(tmp_path):
         "image_path": str(ip),
         "task": "detect",
         "boxes": [
-            {"label": "bell_pepper", "confidence": 0.91,
+            {"label": "object_a", "confidence": 0.91,
              "bbox_xyxy": [300.0, 200.0, 380.0, 300.0]},
-            {"label": "peduncle", "confidence": 0.42,
+            {"label": "object_b", "confidence": 0.42,
              "bbox_xyxy": [640.0, 60.0, 700.0, 110.0]},
         ]}))
     return jf
@@ -44,7 +44,7 @@ def pred(tmp_path):
 def test_検出ごとの要約が取れる(pred):
     got = prediction_box_summaries(pred)
     assert len(got) == 2
-    assert got[0]["label"] == "bell_pepper"
+    assert got[0]["label"] == "object_a"
     assert got[0]["confidence"] == pytest.approx(0.91)
     assert got[0]["size"] == (80, 100)
     assert got[1]["index"] == 1

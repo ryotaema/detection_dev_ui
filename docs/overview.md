@@ -202,7 +202,7 @@ crop, geom = make_crop(frame, bbox_xyxy, **cfg)
 
 ```bash
 cd extensions
-git clone https://github.com/ryotaema/anno_dataset_tools
+git clone <拡張リポジトリの URL>
 # ブラウザを再読み込みするとタブが増えます
 ```
 

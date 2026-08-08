@@ -272,7 +272,7 @@ python3 -c "import json; json.load(open('extension/extension.json')); print('OK'
   "name": "アノテーション整理",
   "icon": "🗂",
   "description": "データセットの統合・分割・形式変換・品質検証",
-  "url": "https://github.com/ryotaema/anno_dataset_tools",
+  "url": "https://example.com/your-org/anno-tools",
   "requirements": ["pyyaml"],
   "actions": [
     {

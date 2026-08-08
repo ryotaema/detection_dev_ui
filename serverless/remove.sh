@@ -2,7 +2,7 @@
 # =============================================================================
 # デプロイ済みの自作 YOLO 関数を削除する
 #   全削除:  ./serverless/remove.sh
-#   個別:    ./serverless/remove.sh custom-yolo11s-bellpepper
+#   個別:    ./serverless/remove.sh custom-<関数名>
 # =============================================================================
 set -euo pipefail
 

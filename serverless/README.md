@@ -24,14 +24,17 @@ serverless/
 ├── _common/              # 全関数で共有するハンドラ
 │   ├── main.py           #   Nuclio エントリポイント
 │   └── model_handler.py  #   Ultralytics 推論ラッパ
-└── custom/
-    ├── yolo11s-bellpepper/
-    │   ├── function.yaml       # CPU 用定義 (ラベル spec を含む)
-    │   ├── function-gpu.yaml   # GPU 用定義 (cu128 / Blackwell 対応)
-    │   └── model.env           # MODEL_RUN=<models/ 配下の run 名>
-    └── yolo26m-bellpepper/
-        └── ...
+└── custom/                # 関数定義（各自のモデルごとに 1 ディレクトリ）
+    └── <関数名>/
+        ├── function.yaml       # CPU 用定義 (ラベル spec を含む)
+        ├── function-gpu.yaml   # GPU 用定義 (cu128 / Blackwell 対応)
+        └── model.env           # MODEL_WEIGHTS=<models/ からの相対パス>
 ```
+
+`custom/` の中身は **リポジトリに含まれない**（`.gitignore` 済み）。
+どのモデルを置くかは環境ごとに違うため、UI の
+「🏷 Step1: アノテーション」タブから生成するか、下記「新しいモデルを追加する」の
+手順で自分の環境に合わせて作る。
 
 `best.pt` はリポジトリに含めない。`deploy.sh` が `model.env` の `MODEL_RUN` を読み、
 `models/<MODEL_RUN>/weights/best.pt` をビルド時にコピーする。
@@ -57,8 +60,8 @@ docker compose \
 # GPU (既定・下記「GPU で動かす」の前提を満たしていること)
 ./serverless/deploy.sh
 
-# 特定モデルだけ
-./serverless/deploy.sh yolo11s-bellpepper
+# 特定の関数だけ
+./serverless/deploy.sh <関数名>
 
 # CPU (daemon 変更不要で確実に動く)
 ./serverless/deploy.sh --cpu
@@ -72,7 +75,7 @@ docker compose \
 
 1. CVAT (http://localhost:8080) でタスク/ジョブを開く
 2. **Actions → Automatic annotation**
-3. Model に自作モデル（例: *YOLO11s BellPepper (custom / CPU)*）を選択
+3. Model に自作モデル（`function.yaml` の `metadata.annotations.name` の表示名）を選択
 4. モデルのラベルと CVAT タスクのラベルを対応付け → **Annotate**
 
 Nuclio 側の状態は http://localhost:8070 でも確認できる。
@@ -80,8 +83,8 @@ Nuclio 側の状態は http://localhost:8070 でも確認できる。
 ### 4. 削除
 
 ```bash
-./serverless/remove.sh                        # 全関数削除
-./serverless/remove.sh custom-yolo11s-bellpepper
+./serverless/remove.sh              # 全関数削除
+./serverless/remove.sh custom-<関数名>
 ```
 
 ## GPU で動かす（既定）
@@ -119,8 +122,12 @@ docker compose -f docker-compose.yml -f docker-compose.serverless.yml \
    - `metadata.name` は一意・小文字ハイフン
    - `annotations.spec` のラベル名は **モデルのクラス名 = CVAT タスクのラベル名** に合わせる
    - マルチクラスなら `spec` に全クラスを列挙（`id` は学習時のクラス index）
-3. `model.env` に `MODEL_RUN=<models/ 配下の run 名>` を記載
+3. `model.env` に `MODEL_WEIGHTS=<models/ からの相対パス>` を記載
+   （`MODEL_RUN=<run 名>` だけでも `models/<run>/weights/best.pt` として解決される）
 4. `./serverless/deploy.sh <name>`
+
+UI から行う場合は、この 1〜4 を「🏷 Step1: アノテーション」タブが自動で行う。
+モデルのクラス名から `annotations.spec` を生成するため、ラベル名のずれも起きない。
 
 ## トラブルシューティング
 

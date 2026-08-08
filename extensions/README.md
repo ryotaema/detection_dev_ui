@@ -13,8 +13,7 @@
 
 ```bash
 cd extensions
-git clone https://github.com/ryotaema/anno_dataset_tools
-git clone https://github.com/ryotaema/mosaic_tool
+git clone <拡張リポジトリの URL>
 # ブラウザを再読み込みするとタブが増えます
 ```
 

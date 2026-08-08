@@ -41,7 +41,8 @@
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up          # ブラウザが開くのでログイン（Google / GitHub 等）
 
-tailscale ip -4            # 例: 100.88.86.17 ← この番号を後で使う
+tailscale ip -4            # 例: 100.101.102.103 ← この番号を後で使う
+                           #    以降の 100.101.102.103 は、すべてこの値に読み替えてください
 ```
 
 すでに他の用途（リモートデスクトップなど）で使っている場合は、そのままで構いません。
@@ -115,9 +116,9 @@ CVAT を動かしている PC の行の `⋯` → **Share…** → 相手のメ�
 メンバー側から次が「繋がる／繋がらない」になっていれば成功です。
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://100.88.86.17:8080/   # 200 になる
-nc -zv -w 3 100.88.86.17 3389                                        # 失敗する（RDP）
-nc -zv -w 3 100.88.86.17 22                                          # 失敗する（SSH）
+curl -s -o /dev/null -w "%{http_code}\n" http://100.101.102.103:8080/   # 200 になる
+nc -zv -w 3 100.101.102.103 3389                                        # 失敗する（RDP）
+nc -zv -w 3 100.101.102.103 22                                          # 失敗する（SSH）
 ```
 
 ### 5. CVAT に共有用の URL を教える
@@ -125,9 +126,9 @@ nc -zv -w 3 100.88.86.17 22                                          # 失敗す
 `.env` に次を足して、CVAT を再起動します。
 
 ```bash
-# 100.88.86.17 の部分は自分の tailscale ip -4 の値
-CVAT_CSRF_ORIGINS=http://localhost:8080,http://localhost,http://127.0.0.1:8080,http://100.88.86.17:8080
-CVAT_UI_URL=http://100.88.86.17:8080
+# 100.101.102.103 の部分は自分の tailscale ip -4 の値
+CVAT_CSRF_ORIGINS=http://localhost:8080,http://localhost,http://127.0.0.1:8080,http://100.101.102.103:8080
+CVAT_UI_URL=http://100.101.102.103:8080
 ```
 
 ```bash
@@ -169,7 +170,7 @@ Windows / macOS は [公式サイト](https://tailscale.com/download) からア�
 
 ### 2. CVAT に入る
 
-ブラウザで `http://100.88.86.17:8080` を開き、
+ブラウザで `http://100.101.102.103:8080` を開き、
 ホスト役から渡されたユーザー名とパスワードでログインします。
 
 **アノテーションするだけなら、ここまでで完了です。**
@@ -181,8 +182,8 @@ Windows / macOS は [公式サイト](https://tailscale.com/download) からア�
 このリポジトリをセットアップしたうえで、`.env` に次を足します。
 
 ```bash
-CVAT_HOST=http://100.88.86.17:8080       # Streamlit が API で使う
-CVAT_WEB_HOST=http://100.88.86.17:8080   # サイドバーのリンク先
+CVAT_HOST=http://100.101.102.103:8080       # Streamlit が API で使う
+CVAT_WEB_HOST=http://100.101.102.103:8080   # サイドバーのリンク先
 CVAT_USERNAME=tanaka                     # 自分の CVAT アカウント
 CVAT_PASSWORD=自分のパスワード
 ```
@@ -295,8 +296,8 @@ YAML / TXT / CVAT JSON で書き出せます。ラベル名がずれると、
 ```bash
 # メンバー側で
 tailscale status | grep <ホストの名前>     # 出てこなければ共有・招待ができていない
-ping 100.88.86.17                          # 応答があるか
-curl -v http://100.88.86.17:8080/          # HTTP で届くか
+ping 100.101.102.103                          # 応答があるか
+curl -v http://100.101.102.103:8080/          # HTTP で届くか
 ```
 
 `ping` は通るのに HTTP が届かない場合は、Access controls でポートが塞がれています。

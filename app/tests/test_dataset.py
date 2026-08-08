@@ -205,10 +205,10 @@ def test_resplit_rejects_bad_ratio(detect_dataset: Path):
 # ── クラス名の編集 ──────────────────────────────────────────────────────
 def test_remap_renames_and_merges(detect_dataset: Path):
     r = remap_dataset_classes(detect_dataset,
-                              {"red": "pepper", "green": "other", "blue": "other"})
+                              {"red": "cat", "green": "other", "blue": "other"})
     assert r["ok"], r["error"]
-    assert r["new_classes"] == ["pepper", "other"]
-    assert dataset_class_names(detect_dataset) == ["pepper", "other"]
+    assert r["new_classes"] == ["cat", "other"]
+    assert dataset_class_names(detect_dataset) == ["cat", "other"]
 
     ids = {int(line.split()[0])
            for t in (detect_dataset / "labels").rglob("*.txt")
