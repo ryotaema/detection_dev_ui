@@ -155,11 +155,56 @@ def render_annotate() -> None:
 
         _dep_models = sorted(model_weight_files(), key=lambda p: p.stat().st_mtime,
                              reverse=True) if MODELS_DIR.exists() else []
+
+        # 他 PC で学習した .pt をここで直接取り込めるようにする。
+        # 「データ管理タブで取り込んでから戻ってくる」という往復をなくすため
+        _dep_src = st.radio(
+            "モデルの選び方",
+            ["📂 models/ から選ぶ", "📤 .pt をアップロード"],
+            horizontal=True, key="dep_src",
+            index=0 if _dep_models else 1,
+        )
+
+        if _dep_src == "📤 .pt をアップロード":
+            _up_pt = st.file_uploader(
+                "学習済みの重み (.pt)", type=["pt"], key="dep_up_pt",
+                help="他の PC で学習したモデルをそのまま取り込めます",
+            )
+            _up_name = st.text_input(
+                "モデル名（`models/` 以下に作るディレクトリ名）",
+                value=f"imported_{datetime.now():%Y%m%d_%H%M}",
+                key="dep_up_name",
+            ).strip()
+            if _up_pt:
+                st.caption(f"選択中: `{_up_pt.name}` ({_up_pt.size / 1024 / 1024:.1f} MB)"
+                           f" → `models/{safe_run_name(_up_name)}/weights/`")
+                if st.button("📥 取り込む", key="dep_up_btn", use_container_width=True,
+                             disabled=_dep_running):
+                    _saved, _err = import_model_weights(
+                        _up_name, [(_up_pt.name, _up_pt.getbuffer())])
+                    if _err:
+                        st.error(f"❌ {_err}")
+                    else:
+                        # 取り込んだものをそのまま選択状態にして、続けてデプロイできるようにする
+                        st.session_state["dep_model_sel"] = str(
+                            _saved[0].relative_to(MODELS_DIR))
+                        st.session_state["dep_src"] = "📂 models/ から選ぶ"
+                        st.success(f"✅ 取り込みました: `{_saved[0].name}`")
+                        st.rerun()
+            st.caption("取り込むとこの下でそのままデプロイできます。")
+
         if not _dep_models:
-            st.info("models/ に .pt がありません。Step3で学習するか、データ管理タブから取り込んでください。")
+            st.info("models/ に .pt がありません。"
+                    "上の「📤 .pt をアップロード」から取り込むか、Step3 で学習してください。")
         else:
             _dep_map = {str(p.relative_to(MODELS_DIR)): p for p in _dep_models}
-            _dep_sel = st.selectbox("デプロイするモデル", list(_dep_map.keys()), key="dep_model_sel")
+            _dep_keys = list(_dep_map.keys())
+            # 取り込み直後は、その重みを選んだ状態で始める。
+            # key を使うウィジェットに index を併せて渡しても効かないので、
+            # session_state 側を先に整えておく
+            if st.session_state.get("dep_model_sel") not in _dep_keys:
+                st.session_state["dep_model_sel"] = _dep_keys[0]
+            _dep_sel = st.selectbox("デプロイするモデル", _dep_keys, key="dep_model_sel")
             _dep_path = _dep_map[_dep_sel]
             # 重みは models/ からの相対パスで渡す。
             # 取り込んだモデルはファイル名が best.pt とは限らないため、
@@ -196,19 +241,25 @@ def render_annotate() -> None:
                     "自動アノテーションの結果が反映されません。"
                 )
 
-                _dc1, _dc2 = st.columns(2)
-                with _dc1:
-                    _dep_dir = st.text_input(
-                        "関数ディレクトリ名 (`serverless/custom/` 以下)",
-                        value=slugify_function_name(_dep_run),
-                        key="dep_fn_dir",
-                    ).strip()
-                with _dc2:
-                    _dep_disp = st.text_input(
-                        "CVAT に表示する名前",
-                        value=f"{_dep_run} (custom)",
-                        key="dep_fn_disp",
-                    ).strip()
+                # 名前はモデル名から機械的に決まるので、既定では見せない。
+                # 「モデルを選んで押すだけ」で終わるようにして、
+                # 変えたい人だけが開く（入力欄が並ぶと何を決めるべきか分からなくなる）
+                _dep_dir_def  = slugify_function_name(_dep_run)
+                _dep_disp_def = f"{_dep_run} (custom)"
+                _dep_dir, _dep_disp = _dep_dir_def, _dep_disp_def
+
+                if st.checkbox("⚙ 名前を変える（任意）", key="dep_rename"):
+                    _dc1, _dc2 = st.columns(2)
+                    with _dc1:
+                        _dep_dir = st.text_input(
+                            "関数ディレクトリ名 (`serverless/custom/` 以下)",
+                            value=_dep_dir_def, key="dep_fn_dir",
+                        ).strip() or _dep_dir_def
+                    with _dc2:
+                        _dep_disp = st.text_input(
+                            "CVAT に表示する名前",
+                            value=_dep_disp_def, key="dep_fn_disp",
+                        ).strip() or _dep_disp_def
 
                 _dep_gpu = st.radio(
                     "実行モード", ["GPU", "CPU"], horizontal=True, key="dep_gpu_mode",
@@ -236,71 +287,107 @@ def render_annotate() -> None:
                     cached_nuclio_functions.clear()
                     st.rerun()
 
-        # --- SAM 3（学習不要・ゼロショット）---
+        # --- SAM（学習不要のゼロショットモデル）---
         st.markdown("---")
-        st.markdown("**🧩 SAM 3 を使う（学習不要）**")
+        st.markdown("**🧩 学習不要のモデルを使う（SAM）**")
         st.caption(
-            "SAM 3 は学習なしで使えるセグメンテーションモデルです。"
+            "SAM は学習なしで使えるセグメンテーションモデルです。"
             "自分のデータがまだ少なく、学習済みモデルを用意できない段階でも、"
             "アノテーションの下書きを作れます。"
         )
 
-        _s3 = sam3_weights_status()
-        if not _s3["exists"]:
+        _sm_key = st.radio(
+            "モデル",
+            list(SAM_MODELS.keys()),
+            # 知らない値が来ても落とさない（定義から版を消したあとの
+            # 古いセッションでも画面を出し続けるため）
+            format_func=lambda k: SAM_MODELS.get(k, {}).get("display", str(k)),
+            horizontal=True, key="sam_model",
+        )
+        if _sm_key not in SAM_MODELS:
+            _sm_key = next(iter(SAM_MODELS))
+        _sm = SAM_MODELS[_sm_key]
+        _sm_st = sam_model_status(_sm_key)
+        st.caption(_sm["note"])
+
+        if not _sm_st["ready"]:
+            # SAM 3 は各自が重みを取ってくる必要がある
             st.info(
                 "**まだ重みが置かれていません。**\n\n"
-                "SAM 3 の重みは配布物に含められないため、各自で取得する必要があります。\n\n"
-                "1. https://huggingface.co/facebook/sam3 でアクセス承認を受ける\n"
-                f"2. `{_s3['name']}`（約 3.45GB）をダウンロードする\n"
-                f"3. 下のフォルダに置く → `models/{SAM3_DIR.name}/{_s3['name']}`\n\n"
-                "置いたらこの画面を再読み込みしてください。"
+                "SAM 3 の重みは Meta の承認が要るため、配布物に含められません。\n\n"
+                "1. https://huggingface.co/facebook/sam3 でアクセス承認を受ける"
+                "（**手動レビュー**なので即時ではありません）\n"
+                f"2. `{_sm_st['name']}`（約 3.45GB）をダウンロードする\n"
+                f"3. 下のフォルダに置く → `models/{SAM3_DIR.name}/{_sm_st['name']}`\n\n"
+                "置いたらこの画面を再読み込みしてください。\n\n"
+                "**承認を待つ間は SAM 2.1 が使えます**（承認も重みの配置も不要）。"
             )
-            open_folder(SAM3_DIR, key="sam3_weights_dir",
+            open_folder(SAM3_DIR, key="sam_weights_dir",
                         label="📂 重みの置き場所を開く")
         else:
-            st.success(
-                f"✅ 重み: `models/{SAM3_DIR.name}/{_s3['name']}` "
-                f"({_s3['size'] / 1024**3:.2f} GB)"
-            )
+            _sm_wname = ""
+            if _sm_st.get("auto"):
+                st.success("✅ 重みはデプロイ時に自動ダウンロードされます（準備作業は不要です）")
+                if _sm.get("sizes"):
+                    _sm_size = st.selectbox(
+                        "モデルサイズ",
+                        list(_sm["sizes"].keys()),
+                        index=list(_sm["sizes"].keys()).index(_sm["default_size"]),
+                        key="sam_size",
+                        help="大きいほど精度が上がりますが、GPU メモリと待ち時間が増えます",
+                    )
+                    _sm_wname = _sm["sizes"][_sm_size]
+                    st.caption(f"重み: `{_sm_wname}`")
+            else:
+                st.success(
+                    f"✅ 重み: `models/{SAM3_DIR.name}/{_sm_st['name']}` "
+                    f"({_sm_st['size'] / 1024**3:.2f} GB)"
+                )
 
-            _s3_key = st.radio(
-                "使い方",
-                list(SAM3_VARIANTS.keys()),
-                format_func=lambda k: SAM3_VARIANTS[k]["label"],
-                horizontal=True, key="sam3_variant",
-            )
-            _s3_info = SAM3_VARIANTS[_s3_key]
-            st.caption(f"CVAT では「**{_s3_info['where']}**」に "
-                       f"`{_s3_info['display']}` として現れます。")
+            # 使い方は版によって選べる数が違う（SAM 2 はクリックのみ）
+            _sm_variants = _sm["variants"]
+            if len(_sm_variants) == 1:
+                _sv_key = _sm_variants[0]
+                st.caption(f"使い方: **{SAM_VARIANTS[_sv_key]['label']}**"
+                           "（SAM 2 はテキストでの検出に対応していません）")
+            else:
+                _sv_key = st.radio(
+                    "使い方",
+                    _sm_variants,
+                    format_func=lambda k: SAM_VARIANTS[k]["label"],
+                    horizontal=True, key="sam_variant",
+                )
+            _sv = SAM_VARIANTS[_sv_key]
+            st.caption(f"CVAT では「**{_sv['where']}**」に現れます。")
 
-            _s3_pairs: list[tuple[str, str]] = []
-            _s3_ready = True
+            _sm_pairs: list[tuple[str, str]] = []
+            _sm_ready = True
 
-            if _s3_key == "concept":
+            if _sv_key == "concept":
                 st.caption(
                     "検出したいものを 1 行に 1 つ書きます。"
                     "`CVAT のラベル名 = 英語プロンプト` の形で、左が CVAT のタスクに"
-                    "付けるラベル名、右が SAM 3 に渡す言葉です（`=` を省くと同じ語を使います）。"
+                    "付けるラベル名、右が SAM に渡す言葉です（`=` を省くと同じ語を使います）。"
                     "**SAM 3 は英語の短い名詞句を前提**にしているので、"
                     "右側は `red fruit` のように書いてください。"
                 )
                 # key と value を同時に渡すと Streamlit が警告を出すので、
                 # 初期値は session_state 側に入れておく
-                st.session_state.setdefault("sam3_prompts_text", "猫 = cat")
-                _s3_text = st.text_area(
-                    "検出したいもの", key="sam3_prompts_text", height=110,
+                st.session_state.setdefault("sam_prompts_text", "猫 = cat")
+                _sm_text = st.text_area(
+                    "検出したいもの", key="sam_prompts_text", height=110,
                 )
-                _s3_pairs, _s3_bad = parse_sam3_prompt_lines(_s3_text)
-                if _s3_bad:
+                _sm_pairs, _sm_bad = parse_sam_prompt_lines(_sm_text)
+                if _sm_bad:
                     st.warning("⚠ 読み取れなかった行があります（重複も含む）:\n\n"
-                               + "\n".join(f"- `{b}`" for b in _s3_bad))
-                if _s3_pairs:
+                               + "\n".join(f"- `{b}`" for b in _sm_bad))
+                if _sm_pairs:
                     st.caption("🏷 CVAT に出るラベル: **"
-                               + ", ".join(lb for lb, _ in _s3_pairs) + "**")
+                               + ", ".join(lb for lb, _ in _sm_pairs) + "**")
                     st.caption("⚠ CVAT タスク側のラベル名がこれと一致していないと、"
                                "自動アノテーションの結果が反映されません。")
                 else:
-                    _s3_ready = False
+                    _sm_ready = False
                     st.error("❌ 検出したいものを 1 つ以上書いてください。")
             else:
                 st.caption(
@@ -308,38 +395,39 @@ def render_annotate() -> None:
                     "その 1 個だけをマスクにして返します。ラベルの指定は要りません。"
                 )
 
-            _s3c1, _s3c2 = st.columns(2)
-            with _s3c1:
-                _s3_gpu = st.radio(
-                    "実行モード", ["GPU", "CPU"], horizontal=True, key="sam3_gpu_mode",
+            _smc1, _smc2 = st.columns(2)
+            with _smc1:
+                _sm_gpu = st.radio(
+                    "実行モード", ["GPU", "CPU"], horizontal=True, key="sam_gpu_mode",
                     help="CPU でも動きますが、1 枚あたり数十秒かかります",
                 ) == "GPU"
-            with _s3c2:
-                _s3_half = st.checkbox(
-                    "FP16 で読み込む", value=False, key="sam3_half",
+            with _smc2:
+                _sm_half = st.checkbox(
+                    "FP16 で読み込む", value=False, key="sam_half",
                     help="GPU メモリの使用量を減らせます。精度がわずかに変わることがあります",
                 )
 
-            if _s3_gpu:
+            if _sm_gpu:
                 st.caption(
-                    "⚠ SAM 3 は GPU メモリを数 GB 使います。"
-                    "**2 つの使い方を両方デプロイすると、その分だけ常時占有します。**"
+                    "⚠ SAM は GPU メモリを使います（SAM 3 は数 GB）。"
+                    "**複数の使い方を同時にデプロイすると、その分だけ常時占有します。**"
                     "学習と同時に使うとメモリが足りなくなることがあるので、"
                     "使わないほうは削除しておくのが安全です。"
                 )
 
-            st.caption(f"Nuclio 関数名: `{_s3_info['fn_dir']}`　"
+            st.caption(f"Nuclio 関数名: `{_sm_key}-{_sv_key}`　"
                        "初回はビルドとモデル読み込みで 10 分以上かかることがあります。")
 
-            if st.button("🚀 SAM 3 をデプロイ", type="primary", use_container_width=True,
-                         disabled=_dep_running or not _s3_ready, key="sam3_deploy_btn"):
-                generate_sam3_function_files(
-                    variant=_s3_key,
-                    pairs=_s3_pairs,
-                    weights_name=_s3["name"],
-                    half=_s3_half,
+            if st.button("🚀 デプロイ", type="primary", use_container_width=True,
+                         disabled=_dep_running or not _sm_ready, key="sam_deploy_btn"):
+                generate_sam_function_files(
+                    version=_sm_key,
+                    variant=_sv_key,
+                    pairs=_sm_pairs,
+                    weights_name=_sm_wname,
+                    half=_sm_half,
                 )
-                start_deploy(_s3_info["fn_dir"], use_gpu=_s3_gpu)
+                start_deploy(f"{_sm_key}-{_sv_key}", use_gpu=_sm_gpu)
                 cached_nuclio_functions.clear()
                 st.rerun()
 

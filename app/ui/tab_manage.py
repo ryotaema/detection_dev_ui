@@ -572,6 +572,9 @@ def render_manage() -> None:
             "取り込み後、このモデルを「使用中」にする", value=True, key="mu_set_current"
         )
 
+        # 入力値はそのままパスにせず、危険な文字を落としたもので示す
+        # （表示した保存先と実際の保存先がずれないように）
+        _mu_run = safe_run_name(_mu_run) if _mu_run else ""
         _mu_dir = MODELS_DIR / _mu_run if _mu_run else None
         if _mu_dir and _mu_dir.exists():
             st.warning(f"⚠ `models/{_mu_run}/` は既に存在します。同名ファイルは上書きされます。")
@@ -600,17 +603,17 @@ def render_manage() -> None:
                 st.caption(f"保存先: `models/{_mu_run}/weights/`")
                 if st.button("📥 models/ に取り込む", key="mu_pt_btn",
                              type="primary", use_container_width=True):
-                    _mu_w = _mu_dir / "weights"
-                    _mu_w.mkdir(parents=True, exist_ok=True)
-                    _mu_saved = []
-                    for _f in _mu_pts:
-                        _dst = _mu_w / _f.name
-                        _dst.write_bytes(_f.getbuffer())
-                        _mu_saved.append(_dst)
-                    for _f in (_mu_extras or []):
-                        (_mu_dir / _f.name).write_bytes(_f.getbuffer())
-                    st.session_state["mu_saved_paths"] = [str(p) for p in _mu_saved]
-                    st.session_state["mu_pending_current"] = _mu_set_current
+                    # 保存そのものは core 側（Step1 のデプロイ画面からも同じ経路を使う）
+                    _mu_saved, _mu_err = import_model_weights(
+                        _mu_run,
+                        [(_f.name, _f.getbuffer()) for _f in _mu_pts],
+                        [(_f.name, _f.getbuffer()) for _f in (_mu_extras or [])],
+                    )
+                    if _mu_err:
+                        st.error(f"❌ {_mu_err}")
+                    else:
+                        st.session_state["mu_saved_paths"] = [str(p) for p in _mu_saved]
+                        st.session_state["mu_pending_current"] = _mu_set_current
         else:
             _mu_zip = st.file_uploader(
                 "学習run ディレクトリの ZIP（`weights/best.pt` を含む想定）",

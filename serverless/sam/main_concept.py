@@ -2,7 +2,7 @@
 # Nuclio 関数エントリポイント (SAM 3 / detector)
 #
 # CVAT の「Actions → Automatic annotation」から呼ばれる。
-# function.yaml の annotations.spec に並べたラベルを、環境変数 SAM3_PROMPTS で
+# function.yaml の annotations.spec に並べたラベルを、環境変数 SAM_PROMPTS で
 # テキストプロンプトに読み替えて SAM 3 に渡し、該当するインスタンスを全部返す。
 #
 # インタフェース（init_context / handler の入出力）は CVAT 公式の
@@ -30,7 +30,7 @@ def init_context(context):
     # id ではなく spec に書かれた順序をそのまま使う
     labels = [item["name"] for item in json.loads(labels_spec)]
 
-    pairs = parse_prompt_map(os.environ.get("SAM3_PROMPTS", ""), labels)
+    pairs = parse_prompt_map(os.environ.get("SAM_PROMPTS", ""), labels)
     context.logger.info(f"SAM3 prompts: {pairs}")
 
     context.user_data.model = ConceptHandler(pairs)

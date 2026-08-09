@@ -21,7 +21,7 @@ BIN_DIR="$SCRIPT_DIR/bin"
 BUILD_DIR="$SCRIPT_DIR/.build"
 COMMON_DIR="$SCRIPT_DIR/_common"
 CUSTOM_DIR="$SCRIPT_DIR/custom"
-SAM3_DIR="$SCRIPT_DIR/sam3"
+SAM_DIR="$SCRIPT_DIR/sam"
 
 # --- 引数解析 -------------------------------------------------------------
 # 既定は GPU。CPU で動かす場合は --cpu を付ける
@@ -109,46 +109,58 @@ sys.exit(1)
 PYEOF
 }
 
-# --- SAM 3 のデプロイ ------------------------------------------------------
-# 自作モデルと違い、重みはイメージに焼き込まずホストからマウントする
-# (sam3.pt は 3.45GB あるため)。ハンドラも専用のものを使う。
-deploy_sam3() {
-  local name="$1" fn_dir="$2" src_yaml="$3"
-  local variant="${SAM3_VARIANT:-concept}"
-  local handler="$SAM3_DIR/main_${variant}.py"
+# --- SAM (SAM 2 / SAM 3) のデプロイ -----------------------------------------
+# 自作モデルと違い、重みの扱いが版によって分かれる:
+#   SAM 2 … 非ゲートなので Ultralytics がビルド時に自動ダウンロードする（何も要らない）
+#   SAM 3 … ゲート付きで各自が取得したものを使う。3.45GB あるため焼き込まず、
+#           ホストの models/.sam3/ をマウントする
+deploy_sam() {
+  local name="$1" fn_dir="$2" src_yaml="$3" version="$4"
+  local variant="${SAM_VARIANT:-interactive}"
+  local handler="$SAM_DIR/main_${variant}.py"
 
   if [ ! -f "$handler" ]; then
-    echo "SKIP: $name (未知の SAM3_VARIANT: $variant / concept か interactive)"
-    return 1
-  fi
-
-  local rel="${MODEL_WEIGHTS:-.sam3/sam3.pt}"
-  local abs="$PROJECT_DIR/models/$rel"
-  if [ ! -f "$abs" ]; then
-    echo "SKIP: $name (重みがありません: models/$rel)"
-    echo "      https://huggingface.co/facebook/sam3 でアクセス承認を受けたうえで"
-    echo "      sam3.pt を models/$(dirname "$rel")/ に置いてください。"
-    return 1
-  fi
-
-  local host_dir
-  if ! host_dir="$(resolve_host_dir "$(dirname "$abs")")"; then
-    echo "SKIP: $name (重みのホスト側パスを解決できませんでした)"
-    echo "      SAM3_WEIGHTS_HOST_DIR=<ホストの絶対パス> を指定して再実行してください。"
+    echo "SKIP: $name (未知の SAM_VARIANT: $variant / concept か interactive)"
     return 1
   fi
 
   local stage="$BUILD_DIR/$name"
   rm -rf "$stage"; mkdir -p "$stage"
-  # マウント元はホストの実パスでなければならないので、ここで初めて確定させる
-  sed "s|__SAM3_WEIGHTS_HOST_DIR__|$host_dir|g" "$src_yaml" > "$stage/function.yaml"
+
+  local abs="" host_dir=""
+  if [ "$version" = "sam3" ]; then
+    local rel="${MODEL_WEIGHTS:-.sam3/sam3.pt}"
+    abs="$PROJECT_DIR/models/$rel"
+    if [ ! -f "$abs" ]; then
+      echo "SKIP: $name (重みがありません: models/$rel)"
+      echo "      https://huggingface.co/facebook/sam3 でアクセス承認を受けたうえで"
+      echo "      sam3.pt を models/$(dirname "$rel")/ に置いてください。"
+      echo "      承認を待たずに使いたい場合は SAM 2 (クリック操作) が使えます。"
+      return 1
+    fi
+    if ! host_dir="$(resolve_host_dir "$(dirname "$abs")")"; then
+      echo "SKIP: $name (重みのホスト側パスを解決できませんでした)"
+      echo "      SAM3_WEIGHTS_HOST_DIR=<ホストの絶対パス> を指定して再実行してください。"
+      return 1
+    fi
+    # マウント元はホストの実パスでなければならないので、ここで初めて確定させる
+    sed "s|__SAM3_WEIGHTS_HOST_DIR__|$host_dir|g" "$src_yaml" > "$stage/function.yaml"
+  else
+    # SAM 2 は重みをビルド時に焼き込むので置換もマウントも要らない
+    cp "$src_yaml" "$stage/function.yaml"
+  fi
+
   cp "$handler" "$stage/main.py"
-  cp "$SAM3_DIR/model_handler.py" "$stage/"
+  cp "$SAM_DIR/model_handler.py" "$stage/"
 
   echo ""
   echo "=========================================================="
-  echo "  Deploy: $name  (SAM 3 / $variant)"
-  echo "    weights: $host_dir/$(basename "$rel")  ← マウント"
+  echo "  Deploy: $name  ($version / $variant)"
+  if [ -n "$host_dir" ]; then
+    echo "    weights: $host_dir/$(basename "${MODEL_WEIGHTS:-sam3.pt}")  ← マウント"
+  else
+    echo "    weights: ビルド時に自動ダウンロード（焼き込み）"
+  fi
   echo "=========================================================="
   "$NUCTL" deploy --project-name cvat \
     --path "$stage" \
@@ -156,19 +168,21 @@ deploy_sam3() {
     --platform local \
     --platform-config "{\"attributes\": {\"network\": \"$CVAT_NETWORK\"}}" || return 1
 
-  # 重みはマウントなので焼き込みとは違い、差し替えても再デプロイは要らない。
+  # SAM 3 はマウントなので焼き込みとは違い、差し替えても再デプロイは要らない。
   # ただし関数プロセスは起動時に読んだモデルを持ち続けるので、
   # 差し替えたら**再起動**が要る。それに気づけるよう記録は残す
   # (照合の取り方は deploy.sh / Python 側で必ず揃えること)。
-  local _sha _size
-  _sha="$(head -c 8388608 "$abs" | sha1sum | cut -d" " -f1)"
-  _size="$(stat -c %s "$abs")"
+  local _sha="" _size=0
+  if [ -n "$abs" ] && [ -f "$abs" ]; then
+    _sha="$(head -c 8388608 "$abs" | sha1sum | cut -d" " -f1)"
+    _size="$(stat -c %s "$abs")"
+  fi
   cat > "$fn_dir/.deployed.json" <<EOF
 {
-  "kind": "sam3",
+  "kind": "$version",
   "variant": "$variant",
-  "weights": "$rel",
-  "mounted": true,
+  "weights": "${MODEL_WEIGHTS:-}",
+  "mounted": $([ -n "$host_dir" ] && echo true || echo false),
   "host_dir": "$host_dir",
   "sha1": "$_sha",
   "size": $_size,
@@ -212,14 +226,16 @@ for name in "${TARGETS[@]}"; do
   MODEL_RUN=""
   MODEL_WEIGHTS=""
   MODEL_KIND=""
-  SAM3_VARIANT=""
+  SAM_VARIANT=""
   [ -f "$fn_dir/model.env" ] && source "$fn_dir/model.env"
 
-  # SAM 3 は重みの扱いもハンドラも違うので、ここで分岐する
-  if [ "${MODEL_KIND:-}" = "sam3" ]; then
-    deploy_sam3 "$name" "$fn_dir" "$src_yaml" || true
-    continue
-  fi
+  # SAM は重みの扱いもハンドラも違うので、ここで分岐する
+  case "${MODEL_KIND:-}" in
+    sam2|sam3)
+      deploy_sam "$name" "$fn_dir" "$src_yaml" "$MODEL_KIND" || true
+      continue
+      ;;
+  esac
 
   best_pt=""
   if [ -n "$MODEL_WEIGHTS" ] && [ -f "$PROJECT_DIR/models/$MODEL_WEIGHTS" ]; then

@@ -40,7 +40,7 @@ TAB_MARKERS = {
 HEAVY_KEYS = {
     "train_start", "infer_run", "ev_run", "gd_run", "sw_run", "ap_run",
     "nt_create", "push_run", "gd_push", "gd_fo", "dep_run_btn", "aa_run",
-    "sam3_deploy_btn",           # SAM 3 のデプロイ（イメージのビルドが走る）
+    "sam_deploy_btn",            # SAM のデプロイ（イメージのビルドが走る）
     "tune_start", "tune_stop",   # 探索は学習を何度も回す
     "mu_pt_btn", "mu_zip_btn", "cvat_export_run", "dataset_generate_run",
     "xml_parse_run", "cvat_fetch_tasks", "anno_fetch_tasks", "fo_launch",
@@ -358,6 +358,40 @@ def test_探索は学習タブの条件を引き継ぐ():
     assert "③ 詳細設定と同じ条件" in _cap, "条件を引き継ぐ旨の表示がない"
 
 
+def test_sam_のモデル選択が描画される(app):
+    """SAM は版によって選べる使い方が違う（SAM 2 はクリックのみ）。
+    切り替えても描画が途切れないこと。"""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(MAIN, default_timeout=300)
+    at.run()
+    from core.serverless import SAM_MODELS
+
+    if not [r for r in at.radio if r.key == "sam_model"]:
+        pytest.skip("SAM のセクションが出ていない（Nuclio 未設定）")
+    # **format_func 付きの radio に AppTest の `options` を渡さないこと。**
+    # options は表示ラベル側（"SAM 3"）なので、そのまま set_value すると
+    # 実データに無いキーが session_state に入り、次の描画で落ちる
+    for value in SAM_MODELS:
+        sel = [r for r in at.radio if r.key == "sam_model"][0]
+        sel.set_value(value).run()
+        _assert_all_tabs_rendered(at, f"SAM={value}")
+
+
+def test_モデルのアップロード導線が描画される(app):
+    """他 PC の .pt をこの画面から取り込めること（タブ往復をなくすため）。"""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(MAIN, default_timeout=300)
+    at.run()
+    src = [r for r in at.radio if r.key == "dep_src"]
+    if not src:
+        pytest.skip("デプロイのセクションが出ていない（Nuclio 未設定）")
+    src[0].set_value("📤 .pt をアップロード").run()
+    _assert_all_tabs_rendered(at, "アップロード導線")
+    assert any(t.key == "dep_up_name" for t in at.text_input), "モデル名の入力が無い"
+
+
 def test_sam3_重みがあるときも描画できる():
     """SAM 3 のセクションは重みの有無で中身が入れ替わる。
     重みが無い側は初期表示で通るので、ここでは「ある」側を通す。
@@ -380,8 +414,8 @@ def test_sam3_重みがあるときも描画できる():
         at.run()
         _assert_all_tabs_rendered(at, "SAM3 の重みあり")
         # 使い方の選択とプロンプト入力が出ていること
-        assert any(r.key == "sam3_variant" for r in at.radio), "使い方の選択が無い"
-        assert any(t.key == "sam3_prompts_text" for t in at.text_area), "プロンプト入力が無い"
+        assert any(r.key == "sam_model" for r in at.radio), "モデルの選択が無い"
+        assert any(t.key == "sam_prompts_text" for t in at.text_area), "プロンプト入力が無い"
     finally:
         if created:
             w.unlink(missing_ok=True)

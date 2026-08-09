@@ -129,44 +129,60 @@ docker compose -f docker-compose.yml -f docker-compose.serverless.yml \
 UI から行う場合は、この 1〜4 を「🏷 Step1: アノテーション」タブが自動で行う。
 モデルのクラス名から `annotations.spec` を生成するため、ラベル名のずれも起きない。
 
-## SAM 3 を使う（学習不要のゼロショット）
+## SAM を使う（学習不要のゼロショット）
 
-自作モデルがまだ無い段階でも、[SAM 3](https://github.com/facebookresearch/sam3) を
-デプロイすればアノテーションの下書きを作れる。使い方は 2 通りで、
-CVAT 側の出方が違うため関数を分けている。
+自作モデルがまだ無い段階でも、SAM をデプロイすればアノテーションの下書きを作れる。
+**版によって使える機能と重みの入手経路が違う**ので、そこだけ押さえておけばよい。
+
+| | SAM 2.1 | SAM 3 |
+|---|---|---|
+| テキストで一括検出 | ✗ | ✅ |
+| クリック / ボックスで 1 個ずつ | ✅ | ✅ |
+| 重みの入手 | **自動**（Ultralytics が取得） | Meta の**手動承認**が必要 |
+| ライセンス | Apache-2.0 | SAM License |
+| 準備作業 | **不要** | 承認 → 3.45GB を配置 |
+
+使い方（variant）は 2 通りで、CVAT 側の出方が違うため関数を分けている。
 
 | variant | CVAT での場所 | できること |
 |---|---|---|
-| `concept` | Actions → Automatic annotation | 英語の名詞句（例 `red fruit`）に当てはまるものを**全部**ポリゴンにする |
+| `concept` | Actions → Automatic annotation | 英語の名詞句（例 `red fruit`）に当てはまるものを**全部**ポリゴンにする（SAM 3 のみ） |
 | `interactive` | AI Tools → Interactors | ボックスで囲む／点を打った **1 個だけ**をマスクにする |
 
-### 1. 重みを置く
+### SAM 2 を使う場合
 
-重みは配布物に含まれない（Meta の SAM License に従うため）。
+準備は要らない。「🏷 Step1: アノテーション」タブの「🧩 学習不要のモデルを使う」で
+SAM 2.1 とサイズ（t/s/b/l）を選んでデプロイするだけ。重みはビルド時に自動で落ちる。
+
+### SAM 3 を使う場合
+
+重みは配布物に含められない（Meta の SAM License に従うため）。
 
 1. https://huggingface.co/facebook/sam3 でアクセス承認を受ける
+   （**手動レビュー**なので即時ではない）
 2. `sam3.pt`（約 3.45GB）をダウンロード
 3. `models/.sam3/sam3.pt` に置く
 
-### 2. デプロイ
+### CLI からデプロイする場合
 
-「🏷 Step1: アノテーション」タブの「🧩 SAM 3 を使う」から生成〜デプロイまで行える。
-CLI で行う場合は `serverless/custom/<name>/model.env` に以下を書き、
+UI を使わない場合は `serverless/custom/<name>/model.env` に以下を書き、
 `function.yaml` / `function-gpu.yaml` を用意して `./serverless/deploy.sh <name>`:
 
 ```sh
-MODEL_KIND=sam3               # これがあると deploy.sh が SAM 3 の経路を通る
-SAM3_VARIANT=concept          # concept か interactive
-MODEL_WEIGHTS=.sam3/sam3.pt   # models/ からの相対パス
+MODEL_KIND=sam3               # sam2 か sam3。deploy.sh の経路が分かれる
+SAM_VARIANT=concept           # concept か interactive
+MODEL_WEIGHTS=.sam3/sam3.pt   # SAM 3 のみ（models/ からの相対パス）
 ```
 
 ### 仕組み上の注意
 
-- **重みはイメージに焼き込まず、ホストの `models/.sam3/` をマウントする。**
+- **SAM 3 の重みはイメージに焼き込まず、ホストの `models/.sam3/` をマウントする。**
   3.45GB をビルドのたびにコピーすると時間もディスクも食うため。
   `function.yaml` の `__SAM3_WEIGHTS_HOST_DIR__` は `deploy.sh` が
   デプロイ時にホストの実パスへ置換する（コンテナ内から実行された場合は
-  自分のマウント表を引いて読み替える。`SAM3_WEIGHTS_HOST_DIR` で明示も可）
+  自分のマウント表を引いて読み替える。`SAM3_WEIGHTS_HOST_DIR` で明示も可）。
+  **SAM 2 は逆に焼き込む**（数百 MB と小さく、自動で落とせるため。
+  マウントを付けると存在しないディレクトリを参照して起動できなくなる）
 - **重みを差し替えたら関数の再起動が必要。** マウントなので再ビルドは要らないが、
   関数プロセスは起動時に読んだモデルを持ち続ける（UI は差分を見て再デプロイを促す）
 - **CVAT のラベル名と SAM 3 に渡す語は別に持つ。** SAM 3 は英語の短い名詞句を

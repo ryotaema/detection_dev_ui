@@ -1,13 +1,17 @@
 # =============================================================================
-# SAM 3 (Segment Anything Model 3) 用の推論ハンドラ
+# SAM (Segment Anything Model) 用の推論ハンドラ — SAM 2 / SAM 3 共通
 #
 #   ConceptHandler     … テキスト（名詞句）で該当インスタンスを**全部**出す (PCS)
 #                        → CVAT の detector（Actions → Automatic annotation）
+#                        **SAM 3 のみ**。SAM 2 はテキストを受け取れない
 #   InteractiveHandler … 点/ボックスで指した **1 個だけ**をマスク化 (PVS)
 #                        → CVAT の interactor（AI Tools → Interactors）
+#                        SAM 2 / SAM 3 のどちらでも動く
 #
-# 重みはイメージに焼き込まず、ホストの models/.sam3/ をマウントして参照する
-# （sam3.pt は 3.45GB あるため。serverless/deploy.sh がマウントを設定する）。
+# 重みの入手経路が 2 つあることに注意:
+#   SAM 2 … 非ゲート。Ultralytics が自動ダウンロードするのでビルド時に焼き込める
+#   SAM 3 … ゲート付き（Meta の手動承認）。各自が取得したものを
+#           models/.sam3/ からマウントして参照する（3.45GB あるため焼き込まない）
 #
 # mask_to_rle() は CVAT 公式の serverless 関数の実装をそのまま使っている。
 #   https://github.com/cvat-ai/cvat  (Copyright (C) CVAT.ai Corporation / MIT License)
@@ -22,9 +26,10 @@ import numpy as np
 os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-WEIGHTS_PATH = os.environ.get("SAM3_WEIGHTS_PATH", "/opt/nuclio/sam3/sam3.pt")
+SAM_VERSION  = os.environ.get("SAM_VERSION", "sam3").lower()      # sam2 / sam3
+WEIGHTS_PATH = os.environ.get("SAM_WEIGHTS_PATH", "/opt/nuclio/sam3/sam3.pt")
 # FP16。GPU メモリを減らせるが、環境によっては精度・安定性に影響するため既定はオフ
-USE_HALF = os.environ.get("SAM3_HALF", "0").lower() not in ("0", "", "false", "no")
+USE_HALF = os.environ.get("SAM_HALF", "0").lower() not in ("0", "", "false", "no")
 
 
 def mask_to_rle(mask):
@@ -56,8 +61,33 @@ def to_bgr(image):
     return arr[:, :, ::-1].copy()
 
 
+def flatten_bbox(obj_bbox):
+    """CVAT から来る `obj_bbox` を [x1, y1, x2, y2] に揃える。
+
+    **CVAT の UI は点のペアの配列 `[[x1, y1], [x2, y2]]` で送ってくる。**
+    フラットな `[x1, y1, x2, y2]` を前提にすると `float()` に list を渡して
+    落ち、CVAT 側には 500 としてしか見えない（実際に踏んだ）。
+    どちらの形でも受け、点が何個来ても外接矩形にまとめる。
+    """
+    if not obj_bbox:
+        return None
+
+    flat = []
+    for v in obj_bbox:
+        if isinstance(v, (list, tuple)):
+            flat.extend(float(x) for x in v)
+        else:
+            flat.append(float(v))
+
+    if len(flat) < 4:
+        return None
+
+    xs, ys = flat[0::2], flat[1::2]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
 def parse_prompt_map(raw, labels):
-    """`SAM3_PROMPTS` を [(CVAT ラベル名, テキストプロンプト), ...] にする。
+    """`SAM_PROMPTS` を [(CVAT ラベル名, テキストプロンプト), ...] にする。
 
     SAM 3 のテキストプロンプトは英語の短い名詞句を前提にしているので、
     CVAT 側のラベル名（日本語でも構わない）とは分けて持てるようにしている。
@@ -174,7 +204,13 @@ class InteractiveHandler(_Base):
 
     def __init__(self):
         super().__init__()
-        from ultralytics.models.sam import SAM3Predictor
+        # 点・ボックスの受け取り方は SAM 2 / SAM 3 で共通（SAM3Predictor は
+        # SAM2Predictor の _prepare_prompts をそのまま継承している）ので、
+        # 差し替えるのは Predictor のクラスだけでよい
+        if SAM_VERSION == "sam2":
+            from ultralytics.models.sam import SAM2Predictor as _Predictor
+        else:
+            from ultralytics.models.sam import SAM3Predictor as _Predictor
 
         overrides = {
             "model": WEIGHTS_PATH,
@@ -185,11 +221,11 @@ class InteractiveHandler(_Base):
             # 難しい対象をクリックしたときに**何も返らない**（利用者からは
             # 「反応しない」ようにしか見えない）。人が指した以上は何かを返し、
             # 採否は人に決めてもらう
-            "conf": float(os.environ.get("SAM3_INTERACTIVE_CONF", "0.05")),
+            "conf": float(os.environ.get("SAM_INTERACTIVE_CONF", "0.05")),
         }
         if USE_HALF:
             overrides["half"] = True
-        self.predictor = SAM3Predictor(overrides=overrides)
+        self.predictor = _Predictor(overrides=overrides)
         self.predictor.setup_model()
 
     def handle(self, image, pos_points, neg_points, obj_bbox):
@@ -206,10 +242,11 @@ class InteractiveHandler(_Base):
             # ここで欲しいのは「N 個の点で指した 1 個のオブジェクト」。
             kwargs["points"] = [pos + neg]
             kwargs["labels"] = [[1] * len(pos) + [0] * len(neg)]
-        if obj_bbox:
+        box = flatten_bbox(obj_bbox)
+        if box:
             # bbox は _prepare_prompts が点列の先頭に連結してくれるので、
             # 点と併用しても 1 オブジェクトとして扱われる
-            kwargs["bboxes"] = [[float(v) for v in obj_bbox]]
+            kwargs["bboxes"] = [box]
 
         if not kwargs:
             return []

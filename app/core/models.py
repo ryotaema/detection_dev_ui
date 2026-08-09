@@ -42,6 +42,62 @@ def model_run_dirs(root=None) -> list:
     return sorted(d for d in base.iterdir()
                   if d.is_dir() and not d.name.startswith("."))
 
+def safe_run_name(name: str) -> str:
+    """アップロード時のモデル名を、そのままディレクトリ名にできる形に直す。
+
+    利用者が入力した文字列をパスに使うので、`/` や `..` を素通しにしない
+    （models/ の外に書き込まれるのを防ぐ）。
+    """
+    import re
+
+    safe = re.sub(r"[^\w\-.]", "_", str(name or "")).strip("._")
+    return safe or f"imported_{datetime.now():%Y%m%d_%H%M}"
+
+
+def import_model_weights(run_name: str, files, extras=None) -> tuple[list, str]:
+    """アップロードされた重みを `models/<run_name>/weights/` に取り込む。
+
+    UI（Step1 のデプロイ画面 / データ管理タブ）の 2 か所から呼ぶので core に置く。
+    Streamlit に依存させないため、受け取るのは (ファイル名, バイト列) の並び。
+
+    Args:
+        run_name: models/ 以下に作るディレクトリ名（危険な文字は落とす）
+        files:   [(名前, bytes), ...] 重みファイル
+        extras:  [(名前, bytes), ...] results.csv などの付随ファイル（任意）
+
+    Returns:
+        (保存した重みのパス, エラーメッセージ)。エラーがあれば空リストを返す。
+    """
+    from .config import MODELS_DIR
+
+    if not files:
+        return [], "重みファイルが選ばれていません"
+
+    run = safe_run_name(run_name)
+    wdir = Path(MODELS_DIR) / run / "weights"
+    try:
+        wdir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return [], f"保存先を作れませんでした: {type(e).__name__}: {e}"
+
+    saved = []
+    try:
+        for name, data in files:
+            # ファイル名も利用者由来なので、ディレクトリ部分は捨てる
+            fname = Path(str(name)).name
+            if not fname.endswith(".pt"):
+                fname += ".pt"
+            dst = wdir / fname
+            dst.write_bytes(data)
+            saved.append(dst)
+        for name, data in (extras or []):
+            (wdir.parent / Path(str(name)).name).write_bytes(data)
+    except Exception as e:
+        return saved, f"保存に失敗しました: {type(e).__name__}: {e}"
+
+    return saved, ""
+
+
 def model_meta_path(model_path: Path) -> Path:
     """`weights/best.pt` に対する `weights/.best.pt.meta.json` を返す（rglob('*.pt') に載らない名前）"""
     return model_path.parent / f".{model_path.name}.meta.json"

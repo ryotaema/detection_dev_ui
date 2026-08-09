@@ -1,4 +1,4 @@
-"""SAM 3 の Nuclio ハンドラ（serverless/sam3/model_handler.py）
+"""SAM 3 の Nuclio ハンドラ（serverless/sam/model_handler.py）
 
 このファイルは関数コンテナの中でしか動かないが、CVAT への返し方を間違えると
 「動いているのにアノテーションが出ない」という分かりにくい壊れ方をする。
@@ -17,8 +17,8 @@ from core.config import SERVERLESS_DIR
 
 # コンテナ内 (/workspace/serverless) とホスト (<repo>/serverless) の両方で見つける
 _CANDIDATES = [
-    SERVERLESS_DIR / "sam3" / "model_handler.py",
-    Path(__file__).resolve().parent.parent.parent / "serverless" / "sam3" / "model_handler.py",
+    SERVERLESS_DIR / "sam" / "model_handler.py",
+    Path(__file__).resolve().parent.parent.parent / "serverless" / "sam" / "model_handler.py",
 ]
 _SRC = next((p for p in _CANDIDATES if p.exists()), _CANDIDATES[0])
 
@@ -26,7 +26,7 @@ _SRC = next((p for p in _CANDIDATES if p.exists()), _CANDIDATES[0])
 @pytest.fixture(scope="module")
 def mh():
     if not _SRC.exists():
-        pytest.skip("serverless/sam3/model_handler.py が無い")
+        pytest.skip("serverless/sam/model_handler.py が無い")
     spec = importlib.util.spec_from_file_location("_sam3_model_handler", _SRC)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)          # type: ignore[union-attr]
@@ -83,3 +83,19 @@ def test_点は_1_オブジェクトとしてまとめて渡す(mh):
     text = _SRC.read_text(encoding="utf-8")
     assert 'kwargs["points"] = [pos + neg]' in text, "点を 1 オブジェクトにまとめていない"
     assert 'kwargs["labels"] = [[1] * len(pos) + [0] * len(neg)]' in text
+
+
+def test_CVAT_の_obj_bbox_は点のペアで来る(mh):
+    """**CVAT UI は `[[x1,y1],[x2,y2]]` で送ってくる。**
+    フラットな `[x1,y1,x2,y2]` を前提にすると float() に list を渡して落ち、
+    CVAT 側には 500 としてしか見えない（実際に踏んだ）。"""
+    assert mh.flatten_bbox([[10, 20], [110, 220]]) == [10, 20, 110, 220]
+    assert mh.flatten_bbox([10, 20, 110, 220]) == [10, 20, 110, 220]
+    # 描いた向きによって左上・右下が逆に来ても外接矩形にまとめる
+    assert mh.flatten_bbox([[110, 220], [10, 20]]) == [10, 20, 110, 220]
+
+
+def test_obj_bbox_が無い_足りないときは使わない(mh):
+    assert mh.flatten_bbox(None) is None
+    assert mh.flatten_bbox([]) is None
+    assert mh.flatten_bbox([[1, 2]]) is None        # 点が 1 つでは矩形にならない

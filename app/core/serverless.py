@@ -157,10 +157,12 @@ def list_serverless_defs() -> list[dict]:
         model_run     = env.get("MODEL_RUN", "")
         model_weights = env.get("MODEL_WEIGHTS", "")
         kind          = env.get("MODEL_KIND", "")
-        variant       = env.get("SAM3_VARIANT", "")
+        variant       = env.get("SAM_VARIANT", "")
 
         if not model_weights and model_run:
             model_weights = f"{model_run}/weights/best.pt"
+        # SAM 3 は重みをマウントする。SAM 2 はビルド時に焼き込むので
+        # models/ 側に実体が無く、ここで補ってはいけない（「見つかりません」になる）
         if kind == "sam3" and not model_weights:
             model_weights = f"{SAM3_DIR.name}/{SAM3_WEIGHTS_NAME}"
 
@@ -328,40 +330,80 @@ spec:
 
 
 # ===========================================================================
-# SAM 3 (Segment Anything Model 3)
+# SAM (Segment Anything Model) — 学習不要のゼロショットモデル
 #
-#   2 通りの使い方があり、CVAT 側の出方も違うので関数を分けている:
+#   使い方が 2 通りあり、CVAT 側の出方も違うので関数を分けている:
 #     concept     … detector。テキスト（英語の短い名詞句）に当てはまるものを全部出す
-#                   → Actions → Automatic annotation
+#                   → Actions → Automatic annotation。**SAM 3 のみ**
 #     interactive … interactor。点やボックスで指した 1 個だけをマスクにする
-#                   → AI Tools → Interactors
+#                   → AI Tools → Interactors。SAM 2 / SAM 3 のどちらでも動く
 #
-#   自作モデルと違い、重みはイメージに焼き込まずホストからマウントする
-#   （3.45GB あり、焼き込むとビルドのたびにコピーが走るため）。
-#   マウント元のホストパスは deploy.sh がデプロイ時に確定させる。
+#   **重みの入手経路が版によって違う**（ここが実装上の分かれ目）:
+#     SAM 2 … 非ゲート。Ultralytics が自動ダウンロードするのでビルド時に焼き込める
+#             = 利用者の準備作業が要らない
+#     SAM 3 … Meta の手動承認が要る。各自が取得した重みを models/.sam3/ から
+#             マウントする（3.45GB あり、焼き込むとビルドのたびにコピーが走る）。
+#             マウント元のホストパスは deploy.sh がデプロイ時に確定させる
 # ===========================================================================
-SAM3_VARIANTS = {
+SAM_VARIANTS = {
     "concept": {
         "label": "テキストで一括（detector）",
-        "fn_dir": "sam3-concept",
-        "display": "SAM 3 Concept (text)",
         "where": "Actions → Automatic annotation",
     },
     "interactive": {
         "label": "クリックで 1 個ずつ（interactor）",
-        "fn_dir": "sam3-interactive",
-        "display": "SAM 3 Interactive",
         "where": "AI Tools → Interactors",
     },
 }
 
+# 新しい版が出たらここに 1 つ足すだけで UI の選択肢に現れる
+SAM_MODELS = {
+    "sam3": {
+        "display":  "SAM 3",
+        "variants": ["concept", "interactive"],
+        "weights":  "manual",       # 各自が取得 → マウント
+        "note":     "テキストでの一括検出ができる。重みの取得に Meta の承認が要る",
+    },
+    "sam2": {
+        "display":  "SAM 2.1",
+        "variants": ["interactive"],
+        "weights":  "auto",         # Ultralytics が自動ダウンロード
+        "sizes": {                  # 表示名: 重みファイル名
+            "t (小さい・速い)":   "sam2.1_t.pt",
+            "s":                  "sam2.1_s.pt",
+            "b":                  "sam2.1_b.pt",
+            "l (大きい・高精度)": "sam2.1_l.pt",
+        },
+        "default_size": "l (大きい・高精度)",
+        "note":     "クリック専用。承認も重みの配置も要らず、そのまま使える",
+    },
+}
+
+
+def sam_model_status(version: str) -> dict:
+    """その版がいま使える状態かを見る。
+
+    SAM 2 は自動ダウンロードなので常に使える。
+    SAM 3 は各自が重みを置くまで使えないので、置き場所も一緒に返す。
+    """
+    info = SAM_MODELS.get(version, {})
+    if info.get("weights") != "manual":
+        return {"ready": True, "auto": True, "path": None, "dir": None, "size": 0}
+
+    p = SAM3_DIR / SAM3_WEIGHTS_NAME
+    exists = p.exists() and p.is_file()
+    return {
+        "ready": exists,
+        "auto": False,
+        "path": p,
+        "dir": SAM3_DIR,
+        "name": SAM3_WEIGHTS_NAME,
+        "size": p.stat().st_size if exists else 0,
+    }
+
 
 def sam3_weights_status(weights_name: str = SAM3_WEIGHTS_NAME) -> dict:
-    """SAM 3 の重みが置かれているかを見る。
-
-    重みは各自が HuggingFace から取ってくるものなので、
-    「無い」ことを前提に案内できるよう置き場所も一緒に返す。
-    """
+    """SAM 3 の重みが置かれているかを見る（後方互換の薄いラッパ）。"""
     p = SAM3_DIR / weights_name
     exists = p.exists() and p.is_file()
     return {
@@ -373,7 +415,7 @@ def sam3_weights_status(weights_name: str = SAM3_WEIGHTS_NAME) -> dict:
     }
 
 
-def parse_sam3_prompt_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
+def parse_sam_prompt_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     """「CVAT ラベル名 = 英語プロンプト」の行を [(ラベル, プロンプト), ...] にする。
 
     書き方は緩く受ける（人が手で書くものなので）:
@@ -418,36 +460,54 @@ def parse_sam3_prompt_lines(text: str) -> tuple[list[tuple[str, str]], list[str]
     return pairs, bad
 
 
-def generate_sam3_function_files(
+# 名前を変えた経緯: SAM 3 専用だったものを SAM 2 にも使うようにした
+parse_sam3_prompt_lines = parse_sam_prompt_lines
+
+
+def generate_sam_function_files(
+    version: str,
     variant: str,
     pairs: Optional[list[tuple[str, str]]] = None,
     display_name: str = "",
-    weights_name: str = SAM3_WEIGHTS_NAME,
+    weights_name: str = "",
     half: bool = False,
 ) -> tuple[Path, str]:
-    """serverless/custom/<fn_dir>/ に SAM 3 の関数定義一式を生成する。
+    """serverless/custom/<fn_dir>/ に SAM の関数定義一式を生成する。
 
     Args:
-        variant: "concept"（テキスト検出）または "interactive"（クリック）
+        version: "sam2" または "sam3"
+        variant: "concept"（テキスト検出・SAM 3 のみ）/ "interactive"（クリック）
         pairs:   concept のみ。[(CVAT のラベル名, 英語のテキストプロンプト), ...]
                  並び順がそのまま SAM 3 のクラス index になるので順序を保つこと。
+        weights_name: SAM 2 のサイズ指定（例 "sam2.1_l.pt"）。SAM 3 では省略可
         half:    FP16 で読み込む（GPU メモリを減らせる）
 
     Returns:
         (生成先ディレクトリ, Nuclio の関数名)
     """
-    if variant not in SAM3_VARIANTS:
-        raise ValueError(f"未知の variant: {variant}")
+    if version not in SAM_MODELS:
+        raise ValueError(f"未知の SAM の版: {version}")
+    model = SAM_MODELS[version]
+    if variant not in model["variants"]:
+        raise ValueError(f"{model['display']} は {variant} に対応していません")
 
-    info    = SAM3_VARIANTS[variant]
-    fn_dir  = info["fn_dir"]
-    slug    = slugify_function_name(fn_dir)
-    fn_name = slug
-    disp    = display_name or info["display"]
+    info    = SAM_VARIANTS[variant]
+    fn_dir  = f"{version}-{variant}"
+    fn_name = slugify_function_name(fn_dir)
+    _vname  = {"concept": "Concept (text)", "interactive": "Interactive"}[variant]
+    disp    = display_name or f"{model['display']} {_vname}"
     pairs   = list(pairs or [])
 
     if variant == "concept" and not pairs:
         raise ValueError("concept では少なくとも 1 つのラベルとプロンプトが要ります")
+
+    auto_weights = model["weights"] == "auto"
+    if auto_weights:
+        wname = weights_name or model["sizes"][model["default_size"]]
+        weights_path = f"/opt/nuclio/{wname}"
+    else:
+        wname = weights_name or SAM3_WEIGHTS_NAME
+        weights_path = f"{SAM3_MOUNT_PATH}/{wname}"
 
     def _annotations(suffix: str) -> str:
         name_line = f"    name: {json.dumps(f'{disp} / {suffix}', ensure_ascii=False)}"
@@ -467,7 +527,7 @@ def generate_sam3_function_files(
             ])
 
         # detector: ラベル名は CVAT タスク側と一致させる必要がある。
-        # SAM 3 へ渡す英語プロンプトは SAM3_PROMPTS 側に持たせて分離している
+        # SAM へ渡す英語プロンプトは SAM_PROMPTS 側に持たせて分離している
         items = [{"id": i, "name": lb, "type": "polygon"} for i, (lb, _) in enumerate(pairs)]
         spec_block = "\n".join(
             "      " + line
@@ -475,24 +535,26 @@ def generate_sam3_function_files(
         )
         return "\n".join([name_line, "    type: detector", "    spec: |", spec_block])
 
-    def _env(suffix: str) -> str:
+    def _env() -> str:
         lines = [
             "  env:",
-            "    - name: SAM3_WEIGHTS_PATH",
-            f"      value: {SAM3_MOUNT_PATH}/{weights_name}",
+            "    - name: SAM_VERSION",
+            f"      value: {version}",
+            "    - name: SAM_WEIGHTS_PATH",
+            f"      value: {weights_path}",
         ]
         if variant == "concept":
             prompts = json.dumps(
                 [{"label": lb, "prompt": pr} for lb, pr in pairs], ensure_ascii=False)
             lines += [
-                "    # CVAT のラベル名 → SAM 3 に渡すテキストプロンプト。",
+                "    # CVAT のラベル名 → SAM に渡すテキストプロンプト。",
                 "    # SAM 3 は英語の短い名詞句を前提にしているので、",
                 "    # CVAT 側のラベル名（日本語でも可）とは分けて持つ",
-                "    - name: SAM3_PROMPTS",
+                "    - name: SAM_PROMPTS",
                 f"      value: {json.dumps(prompts, ensure_ascii=False)}",
             ]
         if half:
-            lines += ["    - name: SAM3_HALF", '      value: "1"']
+            lines += ["    - name: SAM_HALF", '      value: "1"']
         lines += [
             "    - name: YOLO_CONFIG_DIR",
             "      value: /tmp/Ultralytics",
@@ -500,6 +562,36 @@ def generate_sam3_function_files(
             "      value: /tmp/matplotlib",
         ]
         return "\n".join(lines)
+
+    def _volumes() -> str:
+        if auto_weights:
+            # 重みはビルド時に焼き込むのでマウントは要らない
+            return ""
+        return f"""
+  # 重みはビルド時にコピーせず、ホストのディレクトリをそのまま見せる。
+  # 差し替えても再ビルドは不要だが、**関数の再起動は必要**
+  # （プロセスが起動時に読んだモデルを持ち続けるため）
+  volumes:
+    - volume:
+        name: sam-weights
+        hostPath:
+          path: __SAM3_WEIGHTS_HOST_DIR__
+      volumeMount:
+        name: sam-weights
+        mountPath: {SAM3_MOUNT_PATH}
+        readOnly: true
+"""
+
+    def _weight_directive() -> str:
+        if not auto_weights:
+            return ""
+        # 実行時ではなくビルド時に落としておく。初回のリクエストで
+        # 数百 MB のダウンロードを待たせないため（オフライン環境でも動く）
+        return (
+            "\n        - kind: RUN\n"
+            "          value: python -c \"from ultralytics.utils.downloads import "
+            f"attempt_download_asset; attempt_download_asset('{wname}')\""
+        )
 
     def _yaml(gpu: bool) -> str:
         if gpu:
@@ -520,13 +612,18 @@ def generate_sam3_function_files(
             suffix     = "CPU"
             resources  = ""
 
+        weights_note = (
+            f"#   重みはビルド時に自動ダウンロードして焼き込みます（{wname}）。"
+            if auto_weights else
+            f"#   重みはホストの models/{SAM3_DIR.name}/ をマウントして読みます。\n"
+            "#   マウント元のホストパスは serverless/deploy.sh がデプロイ時に埋めます\n"
+            "#   （__SAM3_WEIGHTS_HOST_DIR__ のまま nuctl に渡してはいけない）。"
+        )
+
         return f"""# =============================================================================
 # このファイルは Streamlit UI (Step1 アノテーションタブ) が自動生成しました。
-#   SAM 3 ({variant}) — CVAT では「{info["where"]}」に出ます。
-#
-#   重みはイメージに焼き込まず、ホストの models/{SAM3_DIR.name}/ をマウントして読む。
-#   マウント元のホストパスは serverless/deploy.sh がデプロイ時に埋める
-#   （__SAM3_WEIGHTS_HOST_DIR__ のまま nuctl に渡してはいけない）。
+#   {model["display"]} ({variant}) — CVAT では「{info["where"]}」に出ます。
+{weights_note}
 # =============================================================================
 metadata:
   name: {fn_name}
@@ -535,17 +632,17 @@ metadata:
 {_annotations(suffix)}
 
 spec:
-  description: {json.dumps(f"SAM 3 ({variant}) / Meta / {suffix}", ensure_ascii=False)}
+  description: {json.dumps(f"{model['display']} ({variant}) / Meta / {suffix}", ensure_ascii=False)}
   runtime: "python:3.10"
   handler: main:handler
   eventTimeout: 120s
-  # 3.45GB の重みを読み終えるまで起動完了にならない。既定 (120秒) では足りない
+  # 重みを読み終えるまで起動完了にならない。既定 (120秒) では足りないことがある
   readinessTimeoutSeconds: 900
 
-{_env(suffix)}
+{_env()}
 
   build:
-    image: cvat.sam3.{variant}{tag}
+    image: cvat.{version}.{variant}{tag}
     baseImage: {base_image}
     directives:
       preCopy:
@@ -556,24 +653,11 @@ spec:
         - kind: RUN
           value: pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml
         - kind: WORKDIR
-          value: /opt/nuclio
-
-  # 重みはビルド時にコピーせず、ホストのディレクトリをそのまま見せる。
-  # 差し替えても再ビルドは不要だが、**関数の再起動は必要**
-  # （プロセスが起動時に読んだモデルを持ち続けるため）
-  volumes:
-    - volume:
-        name: sam3-weights
-        hostPath:
-          path: __SAM3_WEIGHTS_HOST_DIR__
-      volumeMount:
-        name: sam3-weights
-        mountPath: {SAM3_MOUNT_PATH}
-        readOnly: true
-
+          value: /opt/nuclio{_weight_directive()}
+{_volumes()}
   triggers:
     myHttpTrigger:
-      # SAM 3 は GPU メモリを大きく使うので、worker を増やさないこと
+      # SAM は GPU メモリを大きく使うので、worker を増やさないこと
       numWorkers: 1
       kind: "http"
       workerAvailabilityTimeoutMilliseconds: 10000
@@ -592,16 +676,35 @@ spec:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "function.yaml").write_text(_yaml(gpu=False))
     (out_dir / "function-gpu.yaml").write_text(_yaml(gpu=True))
-    (out_dir / "model.env").write_text(
-        "# SAM 3 の関数定義\n"
-        "#   MODEL_KIND    … sam3 なら deploy.sh が重みをマウント方式で扱う\n"
-        "#   SAM3_VARIANT  … concept (detector) / interactive (interactor)\n"
-        "#   MODEL_WEIGHTS … models/ からの相対パス\n"
-        "MODEL_KIND=sam3\n"
-        f"SAM3_VARIANT={variant}\n"
-        f"MODEL_WEIGHTS={SAM3_DIR.name}/{weights_name}\n"
-    )
+
+    env_lines = [
+        "# SAM の関数定義",
+        "#   MODEL_KIND    … sam2 / sam3。deploy.sh がこれを見て重みの扱いを変える",
+        "#   SAM_VARIANT   … concept (detector) / interactive (interactor)",
+        f"MODEL_KIND={version}",
+        f"SAM_VARIANT={variant}",
+    ]
+    if not auto_weights:
+        env_lines += [
+            "#   MODEL_WEIGHTS … models/ からの相対パス（マウント元の特定に使う）",
+            f"MODEL_WEIGHTS={SAM3_DIR.name}/{wname}",
+        ]
+    (out_dir / "model.env").write_text("\n".join(env_lines) + "\n")
     return out_dir, fn_name
+
+
+def generate_sam3_function_files(
+    variant: str,
+    pairs: Optional[list[tuple[str, str]]] = None,
+    display_name: str = "",
+    weights_name: str = SAM3_WEIGHTS_NAME,
+    half: bool = False,
+) -> tuple[Path, str]:
+    """SAM 3 の関数定義を生成する（`generate_sam_function_files` の薄いラッパ）。"""
+    return generate_sam_function_files(
+        "sam3", variant, pairs=pairs, display_name=display_name,
+        weights_name=weights_name, half=half,
+    )
 
 
 def _deploy_worker(fn_dir: str, use_gpu: bool) -> None:

@@ -217,7 +217,7 @@ def test_ハッシュの取り方がデプロイ側と揃っている():
 # ---------------------------------------------------------------------------
 def test_sam3_プロンプト行の読み取り():
     """人が手で書くものなので緩く読む。読めなかった行は捨てずに返す。"""
-    pairs, bad = sl.parse_sam3_prompt_lines(
+    pairs, bad = sl.parse_sam_prompt_lines(
         "\n".join([
             "object_a = red thing",
             "  猫 ： cat  ",          # 全角の区切り・前後の空白
@@ -235,7 +235,7 @@ def test_sam3_プロンプト行の読み取り():
 def test_sam3_ラベル名とプロンプトを分けて持つ(fn_dir: Path):
     """CVAT のラベル名は日本語でもよいが、SAM 3 に渡すのは英語の名詞句。
     spec にラベル名、SAM3_PROMPTS に対応表を持たせて分離する。"""
-    out, name = sl.generate_sam3_function_files("concept", [("猫", "cat")])
+    out, name = sl.generate_sam_function_files("sam3", "concept", [("猫", "cat")])
     assert name == "sam3-concept"
 
     y = _load(out / "function.yaml")
@@ -244,11 +244,11 @@ def test_sam3_ラベル名とプロンプトを分けて持つ(fn_dir: Path):
     assert spec[0]["type"] == "polygon"        # SAM 3 はポリゴンを返す
 
     env = {e["name"]: e["value"] for e in y["spec"]["env"]}
-    assert json.loads(env["SAM3_PROMPTS"]) == [{"label": "猫", "prompt": "cat"}]
+    assert json.loads(env["SAM_PROMPTS"]) == [{"label": "猫", "prompt": "cat"}]
 
 
 def test_sam3_interactive_は_interactor_として出す(fn_dir: Path):
-    out, name = sl.generate_sam3_function_files("interactive")
+    out, name = sl.generate_sam_function_files("sam3", "interactive")
     assert name == "sam3-interactive"
     ann = _load(out / "function.yaml")["metadata"]["annotations"]
     assert ann["type"] == "interactor"
@@ -258,28 +258,28 @@ def test_sam3_interactive_は_interactor_として出す(fn_dir: Path):
 
 def test_sam3_concept_はラベルが無ければ作れない(fn_dir: Path):
     with pytest.raises(ValueError):
-        sl.generate_sam3_function_files("concept", [])
+        sl.generate_sam_function_files("sam3", "concept", [])
 
 
 def test_sam3_重みは焼き込まずマウントする(fn_dir: Path):
     """3.45GB をイメージに入れるとビルドのたびにコピーが走る。
     マウント先のホストパスは deploy.sh がデプロイ時に埋めるので、
     ここではプレースホルダのまま残っていること。"""
-    out, _ = sl.generate_sam3_function_files("interactive")
+    out, _ = sl.generate_sam_function_files("sam3", "interactive")
     for f in ("function.yaml", "function-gpu.yaml"):
         y = _load(out / f)
         vol = y["spec"]["volumes"][0]
         assert vol["volume"]["hostPath"]["path"] == "__SAM3_WEIGHTS_HOST_DIR__"
         assert vol["volumeMount"]["mountPath"] == sl.SAM3_MOUNT_PATH
         env = {e["name"]: e["value"] for e in y["spec"]["env"]}
-        assert env["SAM3_WEIGHTS_PATH"].startswith(sl.SAM3_MOUNT_PATH)
+        assert env["SAM_WEIGHTS_PATH"].startswith(sl.SAM3_MOUNT_PATH)
         # 重みを COPY する指示が紛れ込んでいないこと
         assert "best.pt" not in (out / f).read_text()
 
 
 def test_sam3_起動猶予を延ばしてある(fn_dir: Path):
     """3.45GB を読み終えるまで起動完了にならない。既定の 120 秒では足りない。"""
-    out, _ = sl.generate_sam3_function_files("interactive")
+    out, _ = sl.generate_sam_function_files("sam3", "interactive")
     assert _load(out / "function.yaml")["spec"]["readinessTimeoutSeconds"] >= 600
 
 
@@ -293,3 +293,110 @@ def test_sam3_deploy_sh_が専用の経路を持っている():
     assert "MODEL_KIND" in text
     assert "__SAM3_WEIGHTS_HOST_DIR__" in text, "ホストパスの置換が無い"
     assert "resolve_host_dir" in text
+
+
+# ---------------------------------------------------------------------------
+# SAM 2（非ゲート。重みは自動ダウンロード）
+# ---------------------------------------------------------------------------
+def test_sam2_の重みは焼き込みでマウントしない(fn_dir: Path):
+    """SAM 2 は非ゲートで Ultralytics が自動取得できるので、
+    利用者に重みを置かせない。マウントを付けると存在しないディレクトリを
+    参照して起動できなくなる。"""
+    out, name = sl.generate_sam_function_files("sam2", "interactive")
+    assert name == "sam2-interactive"
+
+    y = _load(out / "function-gpu.yaml")
+    assert "volumes" not in y["spec"], "SAM 2 にマウントが付いている"
+    assert "__SAM3_WEIGHTS_HOST_DIR__" not in (out / "function-gpu.yaml").read_text()
+
+    # ビルド時に落としておくこと（初回リクエストで数百 MB 待たせない）
+    directives = y["spec"]["build"]["directives"]["preCopy"]
+    assert any("attempt_download_asset" in d["value"] for d in directives)
+
+    env = {e["name"]: e["value"] for e in y["spec"]["env"]}
+    assert env["SAM_VERSION"] == "sam2"
+    assert env["SAM_WEIGHTS_PATH"].endswith(".pt")
+
+
+def test_sam2_はテキスト検出に対応しない(fn_dir: Path):
+    """SAM 2 はテキストプロンプトを受け取れない。
+    間違って concept を作ると、CVAT には出るのに何も返さない関数になる。"""
+    with pytest.raises(ValueError):
+        sl.generate_sam_function_files("sam2", "concept", [("a", "a")])
+
+
+def test_sam2_のサイズを選べる(fn_dir: Path):
+    out, _ = sl.generate_sam_function_files("sam2", "interactive",
+                                            weights_name="sam2.1_t.pt")
+    env = {e["name"]: e["value"]
+           for e in _load(out / "function.yaml")["spec"]["env"]}
+    assert env["SAM_WEIGHTS_PATH"].endswith("sam2.1_t.pt")
+
+
+def test_sam2_は重みの準備が要らない():
+    """SAM 3 は各自が置くまで使えないが、SAM 2 は常に使える。"""
+    assert sl.sam_model_status("sam2")["ready"] is True
+    assert sl.sam_model_status("sam2")["auto"] is True
+
+
+def test_未知の版は作れない(fn_dir: Path):
+    with pytest.raises(ValueError):
+        sl.generate_sam_function_files("sam9", "interactive")
+
+
+def test_deploy_sh_が_sam2_と_sam3_を見分ける():
+    """model.env の MODEL_KIND で経路が分かれること。
+    sam2 側でマウント用の置換をすると、存在しないパスを渡してしまう。"""
+    sh = _deploy_sh()
+    if sh is None:
+        pytest.skip("serverless/deploy.sh が見つからない")
+    text = sh.read_text(encoding="utf-8")
+    assert "sam2|sam3)" in text, "SAM 2 が deploy.sh の分岐に入っていない"
+    assert "deploy_sam " in text
+    assert "SAM_VARIANT" in text
+
+
+# ---------------------------------------------------------------------------
+# モデルの取り込み（Step1 のデプロイ画面 / データ管理タブが共有する）
+# ---------------------------------------------------------------------------
+def test_取り込み名はパスとして安全化される():
+    """モデル名は利用者が入力する。`/` や `..` を素通しにすると
+    models/ の外へ書き込まれてしまう。"""
+    import core.models as cm
+
+    assert "/" not in cm.safe_run_name("../../etc/passwd")
+    assert ".." not in cm.safe_run_name("../../etc/passwd")
+    assert cm.safe_run_name("my model!") == "my_model"
+    assert cm.safe_run_name("").startswith("imported_")    # 空なら日付名
+
+
+def test_取り込みは_weights_の下に置く(tmp_path, monkeypatch):
+    """デプロイ側は models/<run>/weights/*.pt を前提にしている。
+    別の場所に置くと、取り込めてもデプロイ候補に出てこない。"""
+    import core.config as cfg
+    import core.models as cm
+
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path)
+    saved, err = cm.import_model_weights("run1", [("best.pt", b"x" * 10)])
+    assert err == ""
+    assert saved[0] == tmp_path / "run1" / "weights" / "best.pt"
+    assert saved[0].read_bytes() == b"x" * 10
+
+
+def test_取り込みはディレクトリ付きのファイル名を捨てる(tmp_path, monkeypatch):
+    import core.config as cfg
+    import core.models as cm
+
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path)
+    saved, err = cm.import_model_weights("run2", [("../../evil.pt", b"x")])
+    assert err == ""
+    assert saved[0] == tmp_path / "run2" / "weights" / "evil.pt"
+
+
+def test_重みが無ければエラーを返す(tmp_path, monkeypatch):
+    import core.config as cfg
+    import core.models as cm
+
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path)
+    saved, err = cm.import_model_weights("run3", [])
+    assert saved == [] and err
