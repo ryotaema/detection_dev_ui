@@ -59,8 +59,8 @@ docker compose run --rm cvat_server bash -c \
 docker compose up -d
 sleep 30 && docker compose ps
 
-# 5. 確認
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8501    # 200 なら成功
+# 5. 確認（問題があれば原因と対処が出ます）
+./tools/doctor.sh
 ```
 
 ブラウザで **http://localhost:8501** を開けば Streamlit の統合 UI が出ます。
@@ -420,6 +420,20 @@ docker compose exec cvat_server bash -c "~/manage.py syncperiodicjobs"
 
 ブラウザのセキュリティポリシー（iframe 制限）により、Streamlit 画面内に埋め込み表示されない場合があります。
 その場合は直接 http://localhost:5151 をブラウザで開いてください。
+
+### まず自己診断を実行する
+
+うまく動かないときは、**原因の切り分けを自動でやるスクリプト**があります。
+
+```bash
+./tools/doctor.sh
+```
+
+`.env` の不備・GPU 設定の食い違い・DB のパスワード不一致・止まっているコンテナを調べ、
+**次にやることだけ**を出します。「502」「UI が開かない」のように症状からは
+原因が分からない場合でも、ここを見れば大抵は特定できます。
+
+問題が残る場合は、その出力をそのまま共有してください。
 
 ### `password authentication failed for user "root"` / DB に繋がらない
 

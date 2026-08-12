@@ -309,6 +309,11 @@ services:
       CVAT_REDIS_PORT: "6379"
       CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
       CVAT_REDIS_INMEM_PORT: "6379"
+      # このサービスだけが rqscheduler.conf を読み込む。
+      # supervisord は %(ENV_CVAT_REDIS_INMEM_PASSWORD)s を展開できないと
+      # 起動に失敗して再起動を繰り返す（cvat_redis_inmem は認証なしなので空でよい）。
+      # CVAT 公式の docker-compose.yml も同じ位置に空文字を置いている。
+      CVAT_REDIS_INMEM_PASSWORD: ""
       CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
       CVAT_REDIS_ONDISK_PORT: "6666"
       CVAT_POSTGRES_HOST: cvat_db

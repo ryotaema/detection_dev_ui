@@ -265,6 +265,10 @@ docker compose build streamlit_app && docker compose up -d streamlit_app
 
 ## うまくいかないとき
 
+**まず `./tools/doctor.sh` を実行してください。** Docker・`.env`・GPU・DB・各サービスを
+順に調べて、原因と対処を出します。以下は個別の症状ごとの説明です。
+
+
 ### `permission denied while trying to connect to the Docker daemon socket`
 
 `docker` グループへの追加が反映されていません。
