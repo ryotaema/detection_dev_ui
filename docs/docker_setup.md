@@ -202,10 +202,22 @@ GPU が無くても動きます。ただし**学習は数十倍遅くなりま�
 docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
 ```
 
-毎回 2 つ指定するのが面倒なら、環境変数にしておけば `docker compose up -d` だけで済みます。
+毎回 2 つ指定するのが面倒なら、`.env` の `COMPOSE_FILE` に足しておけば
+`docker compose up -d` だけで済みます。
+
+**すでに `COMPOSE_FILE` の行がある場合は、追記せずにその行の末尾へ足してください。**
+`.env` に 2 行あると**後の行だけが効き**、自動アノテーション（Nuclio）の設定が外れます
+（`Found orphan containers (nuclio)` という警告が出ていたらこれです）。
 
 ```bash
-echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.cpu.yml' >> .env
+# 既にある行を書き換える（自動アノテーションも使う場合）
+COMPOSE_FILE=docker-compose.yml:docker-compose.serverless.yml:docker-compose.cpu.yml
+```
+
+いまどうなっているかは次で確認できます。2 行出たら片方を消してください。
+
+```bash
+grep -n COMPOSE_FILE .env
 ```
 
 4 の手順（NVIDIA Container Toolkit）はまるごと不要です。
@@ -320,6 +332,11 @@ sudo systemctl restart docker
 `"default-runtime": "nvidia",` の 1 行を消して `sudo systemctl restart docker` してください。
 
 そのうえで [GPU なしで動かす](#gpu-なしで動かす)の方法で起動します。
+
+> **`deploy` を消しただけでは足りません。** `docker-compose.yml` は
+> `NVIDIA_VISIBLE_DEVICES=all` も渡していて、**この環境変数だけで GPU 注入が走ります**。
+> `docker-compose.cpu.yml` は両方（`deploy` と環境変数）を無効にしているので、
+> 手で消す場合も 2 か所あることに注意してください。
 
 #### C. ツールキットの設定を作り直す
 

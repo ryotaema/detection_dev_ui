@@ -23,3 +23,12 @@ services:
     # （`!reset` は Docker Compose 2.24 以降。それより古い場合は
     #   docker-compose.yml の該当ブロックを手で消してください）
     deploy: !reset null
+
+    environment:
+      # **これも消さないと GPU なしでは起動できない。**
+      # nvidia-container-runtime は deploy の指定だけでなく、
+      # この環境変数を見ただけで GPU を注入しようとする。
+      # deploy を消しても `NVIDIA_VISIBLE_DEVICES=all` が残っていると
+      # `failed to initialize NVML: ERROR_LIBRARY_NOT_FOUND` のままになる（実際に踏んだ）。
+      # "void" は「何も注入しない」を意味する予約語（空文字でも同じ）。
+      NVIDIA_VISIBLE_DEVICES: "void"
