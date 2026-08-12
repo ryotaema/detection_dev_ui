@@ -120,6 +120,21 @@ docker run --rm hello-world   # sudo 無しで通ることを確認
 
 GPU を使わない場合は飛ばして構いません（[GPU なしで動かす](#gpu-なしで動かす)を参照）。
 
+> ### ⚠ 先に `nvidia-smi` が動くことを確認してください
+>
+> ```bash
+> nvidia-smi        # GPU 名とドライバのバージョンが出ること
+> ```
+>
+> **これが動かないまま 4-2 を実行しないでください。**
+> ドライバが無いのに Docker の既定を `nvidia` にすると、
+> `failed to initialize NVML: ERROR_LIBRARY_NOT_FOUND` で
+> GPU を使うコンテナが起動できなくなります（元に戻す手順は
+> [トラブルシューティング](#failed-to-initialize-nvml-error_library_not_found)）。
+>
+> 動かない場合は **[0. NVIDIA ドライバ](#0-nvidia-ドライバgpu-を使う場合のみ)** に戻るか、
+> GPU を使わないなら 4 をまるごと飛ばしてください。
+
 ### 4-1. NVIDIA Container Toolkit を入れる
 
 コンテナから GPU を見えるようにする部品です。
@@ -280,16 +295,35 @@ CVAT などは起動して、`streamlit_app` だけが落ちます（GPU を要�
 まず、どちらの状況か確かめてください。
 
 ```bash
-nvidia-smi                                        # ① ドライバが動くか
-ls /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1    # ② NVML の実体があるか
+nvidia-smi                    # ① ドライバが動くか
+lspci | grep -i nvidia        # ② そもそも GPU が載っているか
 ```
 
-| ①の結果 | 状況 | 対処 |
-|---|---|---|
-| コマンドが無い / エラー | ドライバが入っていない、または壊れている | GPU を使うなら **0.** から。使わないなら[GPU なしで動かす](#gpu-なしで動かす) |
-| 正常に表示される | ドライバはあるがコンテナから見えていない | 下記 |
+| 状況 | 対処 |
+|---|---|
+| ② に何も出ない（GPU 非搭載） | **A. GPU を使わない設定に戻す**（下記） |
+| ② は出るが ① が動かない | **B. ドライバを入れる** → [0. NVIDIA ドライバ](#0-nvidia-ドライバgpu-を使う場合のみ) |
+| ① が正常に表示される | **C. ツールキットの設定を作り直す**（下記） |
 
-ドライバが正常なのに出る場合は、ツールキットの設定を作り直して Docker を再起動します。
+#### A. GPU を使わない設定に戻す
+
+**ドライバが無いのに `default-runtime: nvidia` を設定してしまった場合**は、
+先にそれを戻してください（`docker info | grep -i "default runtime"` で確認できます）。
+そのままだと GPU を使うコンテナが起動できません。
+
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker --set-as-default=false
+sudo systemctl restart docker
+```
+
+このオプションが使えない版では `/etc/docker/daemon.json` を開き、
+`"default-runtime": "nvidia",` の 1 行を消して `sudo systemctl restart docker` してください。
+
+そのうえで [GPU なしで動かす](#gpu-なしで動かす)の方法で起動します。
+
+#### C. ツールキットの設定を作り直す
+
+ドライバ（`nvidia-smi`）が正常なのに出る場合は、設定を作り直して Docker を再起動します。
 
 ```bash
 sudo nvidia-ctk runtime configure --runtime=docker

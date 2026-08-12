@@ -416,19 +416,44 @@ docker compose exec cvat_server bash -c "~/manage.py syncperiodicjobs"
 ブラウザのセキュリティポリシー（iframe 制限）により、Streamlit 画面内に埋め込み表示されない場合があります。
 その場合は直接 http://localhost:5151 をブラウザで開いてください。
 
+### CVAT が 502 Bad Gateway になる
+
+`/api/server/health/` が 502 を返す場合、**`cvat_proxy`（nginx）は動いているが
+`cvat_server` が応答していない**状態です。まず状態を見てください。
+
+```bash
+docker compose ps cvat_server
+docker logs cvat_server --tail 50
+```
+
+| `docker compose ps` の STATUS | 状況 | 対処 |
+|---|---|---|
+| `Up` になって間もない | 起動途中（1〜2 分かかる） | 待ってから再読み込み |
+| `Up` なのに 502 が続く | 内部で待機している。`migrateredis` 未実行が多い | 下記の初期化 |
+| `Restarting` を繰り返す | 起動に失敗している | ログを見る（DB 接続・`.env` の値を確認） |
+| 一覧に出てこない | そもそも起動していない | `docker compose up -d` |
+
+初期化が不完全な場合はこれで直ります。
+
+```bash
+docker compose exec cvat_server bash -c "~/manage.py migrateredis"
+docker compose exec cvat_server bash -c "~/manage.py syncperiodicjobs"
+```
+
+まだ一度も初期化していない場合は [Step 4](#step-4--cvatデータベースの初期化) からやり直してください。
+
+> ブラウザのコンソールに出る `The shortcut: tab of ... have conflicts with ...` は
+> CVAT 内部の警告で、動作には影響しません。
+
 ### GPU 非搭載環境で動かしたい（CPU のみ）
 
-`docker-compose.yml` の `streamlit_app` から以下のブロックを削除してください：
+`docker-compose.cpu.yml` を重ねて起動してください（ファイルの編集は不要です）。
 
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all
-          capabilities: [gpu]
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
 ```
+
+詳細は [GPU なしで動かす](docs/docker_setup.md#gpu-なしで動かす) を参照してください。
 
 ---
 
