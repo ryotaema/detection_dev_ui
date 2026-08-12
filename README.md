@@ -435,6 +435,31 @@ docker compose exec cvat_server bash -c "~/manage.py syncperiodicjobs"
 
 問題が残る場合は、その出力をそのまま共有してください。
 
+### CVAT にログインできない / パスワードを忘れた
+
+`Unable to log in with provided credentials.`（`/api/auth/login` が 400）になる場合、
+**利用者が登録されていない**か、**パスワードが `.env` と食い違っています**。
+
+```bash
+./tools/reset_cvat_password.sh
+```
+
+`.env` の `CVAT_USERNAME` / `CVAT_PASSWORD` に合わせてパスワードを設定し直します。
+その利用者がいなければ管理者として作成し、最後に実際にログインできるか確認します。
+
+> **CVAT のログイン用パスワードと `.env` の `CVAT_PASSWORD` は別管理です。**
+> 前者は `createsuperuser` の対話入力で決まるため、`.env` を変えても追従しません。
+> 食い違うと「ブラウザからは入れるのに Streamlit から CVAT を操作できない」
+> （またはその逆）という分かりにくい状態になります。
+> `docker compose down -v` で DB を作り直したあとは利用者も消えるので、
+> このスクリプトで作り直してください。
+
+対象を指定することもできます。
+
+```bash
+./tools/reset_cvat_password.sh <ユーザー名>
+```
+
 ### `password authentication failed for user "root"` / DB に繋がらない
 
 `docker logs cvat_server` にこれが出ている場合、**`.env` のパスワードと、

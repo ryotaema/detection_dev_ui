@@ -200,8 +200,57 @@ if docker compose ps --services 2>/dev/null | grep -qx cvat_server; then
   fi
 fi
 
-# --- 6. サービスの応答 -------------------------------------------------------
-head_ "6. サービスの応答"
+# --- 6. CVAT のログイン ------------------------------------------------------
+# CVAT のログイン用パスワードは `createsuperuser` で対話的に決めるもので、
+# `.env` の CVAT_PASSWORD とは**別物**。ここが食い違うと、
+# ブラウザからは入れるのに Streamlit から CVAT を操作できない（逆もある）。
+# 設定を見比べても分からないので、実際にログインして確かめる。
+head_ "6. CVAT のログイン"
+if [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://localhost:8080/api/server/health/ 2>/dev/null)" = "200" ]; then
+  CV_USER="$(cfg services streamlit_app environment CVAT_USERNAME)"
+  CV_PASS="$(cfg services streamlit_app environment CVAT_PASSWORD)"
+  if [ -z "$CV_USER" ]; then
+    warn "認証情報" "CVAT_USERNAME を読み取れませんでした"
+  else
+    # パスワードに " や \ が入っていても壊れないよう JSON は python3 で作る
+    BODY="$(CV_USER="$CV_USER" CV_PASS="$CV_PASS" python3 -c "
+import json, os
+print(json.dumps({'username': os.environ['CV_USER'], 'password': os.environ.get('CV_PASS','')}))")"
+    LOGIN_CODE="$(curl -s -o /dev/null -m 10 -w '%{http_code}' \
+      -X POST http://localhost:8080/api/auth/login \
+      -H 'Content-Type: application/json' -d "$BODY" 2>/dev/null)"
+
+    if [ "$LOGIN_CODE" = "200" ]; then
+      ok "ログイン" "$CV_USER でログインできます"
+    elif [ "$LOGIN_CODE" = "400" ] || [ "$LOGIN_CODE" = "401" ]; then
+      # ユーザーがそもそも無いのか、パスワードが違うのかで対処が変わる
+      # `~` はコンテナ内で展開させる。bash -c で包まないとホスト側の HOME になり、
+      # 「/home/<自分>/manage.py が無い」で必ず失敗する（実際に踏んだ）
+      USERS="$(docker compose exec -T cvat_server bash -c \
+        '~/manage.py shell -c "from django.contrib.auth import get_user_model; print(\",\".join(get_user_model().objects.values_list(\"username\", flat=True)))"' \
+        2>/dev/null | tr -d '\r' | tail -1)"
+      if [ -z "$USERS" ]; then
+        bad "ログイン" "利用者が 1 人も登録されていません"
+        act "管理者を作る: docker compose run --rm cvat_server bash -c \"~/manage.py createsuperuser --username \$CVAT_USERNAME --email admin@local.com\""
+        act "  （パスワードは .env の CVAT_PASSWORD と同じ値にすること）"
+      elif ! printf '%s' "$USERS" | tr ',' '\n' | grep -qx "$CV_USER"; then
+        bad "ログイン" "利用者 '$CV_USER' がいません（登録済み: $USERS）"
+        act ".env の CVAT_USERNAME を登録済みの名前に合わせるか、その名前で createsuperuser する"
+      else
+        bad "ログイン" "'$CV_USER' はいますが .env のパスワードでは入れません"
+        act "パスワードを合わせる: docker compose exec cvat_server ~/manage.py changepassword $CV_USER"
+        act "  （.env の CVAT_PASSWORD と同じ値を入力すること。CVAT のログイン用と .env は別管理です）"
+      fi
+    else
+      warn "ログイン" "HTTP $LOGIN_CODE"
+    fi
+  fi
+else
+  warn "ログイン" "CVAT が応答しないため確認できません"
+fi
+
+# --- 7. サービスの応答 -------------------------------------------------------
+head_ "7. サービスの応答"
 probe() {  # 表示名 URL 期待コード
   code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$2" 2>/dev/null)"
   case "$code" in
