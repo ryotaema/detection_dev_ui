@@ -207,6 +207,11 @@ EOF
 ### Step 4 — CVATデータベースの初期化
 
 > **必須・初回のみ**: このステップを省略すると CVAT が「Cannot connect to the server」エラーになります。
+>
+> **Step 3 の `.env` を先に作ってください。** DB のパスワードは
+> **最初に起動したときの値がボリュームに焼き付き、あとから `.env` を変えても反映されません**。
+> 順番を逆にすると `password authentication failed for user "root"` で起動できなくなります
+> （[対処](#password-authentication-failed-for-user-root--db-に繋がらない)）。
 
 ```bash
 # DB・Redis系コンテナを先に起動（初回のみ）
@@ -415,6 +420,31 @@ docker compose exec cvat_server bash -c "~/manage.py syncperiodicjobs"
 
 ブラウザのセキュリティポリシー（iframe 制限）により、Streamlit 画面内に埋め込み表示されない場合があります。
 その場合は直接 http://localhost:5151 をブラウザで開いてください。
+
+### `password authentication failed for user "root"` / DB に繋がらない
+
+`docker logs cvat_server` にこれが出ている場合、**`.env` のパスワードと、
+DB に記録されているパスワードが食い違っています**。
+
+PostgreSQL は**ボリュームが空のときにだけ** `POSTGRES_PASSWORD` を読みます。
+`.env` を作る前に一度起動していたり、あとからパスワードを変更したりすると、
+**DB 側は古いまま**になり接続できません（`cvat_server` が起動できず 502 になります）。
+
+**まだアノテーションを作っていない場合**（セットアップ中）は、作り直すのが確実です。
+
+```bash
+docker compose down -v     # DB を含むボリュームを削除
+```
+
+> `-v` で消えるのは CVAT の DB・タスク・アノテーションです。
+> **`data/` `models/` `predictions/` はホスト側の bind mount なので消えません。**
+
+そのうえで [Step 4](#step-4--cvatデータベースの初期化) からやり直してください。
+
+**すでにアノテーション作業を進めている場合**は、DB を消さずに
+`.env` の `CVAT_DB_PASSWORD` を「最初に起動したときの値」に戻してください。
+`.env` を作らずに起動していた場合、その値は既定の **`cvat_secret`** です
+（`CVAT_IAM_DB_PASSWORD` は `iam_secret`）。
 
 ### CVAT が 502 Bad Gateway になる
 
