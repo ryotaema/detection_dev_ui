@@ -178,20 +178,26 @@ docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ## GPU なしで動かす
 
 GPU が無くても動きます。ただし**学習は数十倍遅くなります**（アノテーションや推論結果の確認は問題なく行えます）。
+学習は GPU のある PC で行い、できたモデルを「📁 データ管理」タブから取り込む使い方もできます。
 
-`docker-compose.yml` の `streamlit_app` から、次のブロックを削除してください。
+**`docker-compose.cpu.yml` を重ねて起動してください。** ファイルを書き換えないので、
+あとから `git pull` しても衝突しません。
 
-```yaml
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
 ```
 
-4 の手順はまるごと不要です。
+毎回 2 つ指定するのが面倒なら、環境変数にしておけば `docker compose up -d` だけで済みます。
+
+```bash
+echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.cpu.yml' >> .env
+```
+
+4 の手順（NVIDIA Container Toolkit）はまるごと不要です。
+
+> Docker Compose が 2.24 より古い場合は `!reset` が使えません。
+> その場合は `docker-compose.yml` の `streamlit_app` から
+> `deploy:` のブロック（`driver: nvidia` を含む 6 行）を手で削除してください。
 
 ---
 
@@ -260,6 +266,42 @@ sudo systemctl enable --now docker  # 起動＋自動起動を有効に
 
 NVIDIA Container Toolkit が入っていないか、Docker の再起動がまだです。
 4-1 → 4-2 をやり直してください。
+
+### `failed to initialize NVML: ERROR_LIBRARY_NOT_FOUND`
+
+```
+Error response from daemon: failed to create task for container: ...
+failed to initialize NVML: ERROR_LIBRARY_NOT_FOUND
+```
+
+**NVIDIA Container Toolkit は入っているのに、GPU ドライバ側が見つからない状態**です。
+CVAT などは起動して、`streamlit_app` だけが落ちます（GPU を要求しているのがそれだけのため）。
+
+まず、どちらの状況か確かめてください。
+
+```bash
+nvidia-smi                                        # ① ドライバが動くか
+ls /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1    # ② NVML の実体があるか
+```
+
+| ①の結果 | 状況 | 対処 |
+|---|---|---|
+| コマンドが無い / エラー | ドライバが入っていない、または壊れている | GPU を使うなら **0.** から。使わないなら[GPU なしで動かす](#gpu-なしで動かす) |
+| 正常に表示される | ドライバはあるがコンテナから見えていない | 下記 |
+
+ドライバが正常なのに出る場合は、ツールキットの設定を作り直して Docker を再起動します。
+
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+カーネルを更新した後にドライバのモジュールが読み込まれていないこともあります
+（`nvidia-smi` が `couldn't communicate with the NVIDIA driver` を返す場合）。
+その場合は**再起動**すると直ることが多いです。
+
+**GPU を使う予定が無いなら、ドライバを入れる必要はありません。**
+[GPU なしで動かす](#gpu-なしで動かす)の 1 行で起動できます。
 
 ### `nvidia-smi` はホストで動くのにコンテナで動かない
 

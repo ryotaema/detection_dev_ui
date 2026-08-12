@@ -1,0 +1,25 @@
+# =============================================================================
+# GPU を使わずに起動するための上書き設定
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
+#
+# こんなときに使う:
+#   - GPU が無い PC で動かす
+#   - NVIDIA ドライバがまだ入っていない / 壊れている
+#     （`failed to initialize NVML: ERROR_LIBRARY_NOT_FOUND` で起動できない）
+#
+# `docker-compose.yml` を書き換えないので、git で更新を取り込んでも衝突しない。
+# アノテーション・データ整備・推論結果の確認は問題なく行える。
+# **学習だけは数十倍遅くなる**ので、GPU のある PC で学習したモデルを
+# データ管理タブから取り込む使い方を勧める。
+#
+# GPU を使えるようにする手順は docs/docker_setup.md を参照。
+# =============================================================================
+services:
+  streamlit_app:
+    # GPU の予約をまるごと取り消す。
+    # **`!reset` を使うこと。** deploy.resources.reservations.devices は配列なので、
+    # 普通に上書きしようとすると「追記」になり GPU の要求が残ってしまう。
+    # （`!reset` は Docker Compose 2.24 以降。それより古い場合は
+    #   docker-compose.yml の該当ブロックを手で消してください）
+    deploy: !reset null

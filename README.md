@@ -18,6 +18,10 @@ CVAT → YOLO → MLflow → FiftyOne を Docker Compose で統合した、**タ
 初めての人は [セットアップ手順](#セットアップ手順) を順に進めてください。
 
 > Docker がまだ入っていない場合 → **[Docker 環境の準備](docs/docker_setup.md)**
+>
+> GPU が無い / ドライバがまだの場合 → **[GPU なしで動かす](docs/docker_setup.md#gpu-なしで動かす)**
+> （`docker-compose.cpu.yml` を重ねるだけで起動できます。
+> `failed to initialize NVML: ERROR_LIBRARY_NOT_FOUND` で止まる場合もこれです）
 
 ```bash
 # 0. 前提の確認（3つとも通ればOK）
@@ -33,7 +37,8 @@ cd detection_dev_ui
 cat > .env << 'EOF'
 COMPOSE_PROJECT_NAME=mlops_workspace
 # CVAT の自動アノテーション（Nuclio）を使う場合はこの行を残す。
-# 素の `docker compose up -d` でも serverless 連携が保たれる
+# 素の `docker compose up -d` でも serverless 連携が保たれる。
+# GPU が無い環境では末尾に :docker-compose.cpu.yml を足す
 COMPOSE_FILE=docker-compose.yml:docker-compose.serverless.yml
 CVAT_USERNAME=admin
 CVAT_PASSWORD=ChangeMe#2024
@@ -78,7 +83,8 @@ CVAT は **http://localhost:8080**（`admin` / 上で設定したパスワード
 | nvidia-container-toolkit | 1.14 以上                       |
 
 > GPU非搭載環境でも動作しますが、YOLO学習はCPUのみとなり速度が大幅に低下します。
-> CPU動作時は `docker-compose.yml` の `streamlit_app` から `deploy.resources.reservations` ブロックを削除してください。
+> CPU動作時は `docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d` で起動してください
+> （ファイルの書き換えは不要です）。詳細は [GPU なしで動かす](docs/docker_setup.md#gpu-なしで動かす)。
 
 ### ディスク容量の目安
 
@@ -185,7 +191,8 @@ cd detection_dev_ui
 cat > .env << 'EOF'
 COMPOSE_PROJECT_NAME=mlops_workspace
 # CVAT の自動アノテーション（Nuclio）を使う場合はこの行を残す。
-# 素の `docker compose up -d` でも serverless 連携が保たれる
+# 素の `docker compose up -d` でも serverless 連携が保たれる。
+# GPU が無い環境では末尾に :docker-compose.cpu.yml を足す
 COMPOSE_FILE=docker-compose.yml:docker-compose.serverless.yml
 CVAT_USERNAME=admin
 CVAT_PASSWORD=your_password_here
