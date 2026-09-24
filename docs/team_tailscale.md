@@ -113,6 +113,9 @@ CVAT を動かしている PC の行の `⋯` → **Share…** → 相手のメ�
 
 ### 4. 確認する
 
+> 先に下の 5. の `.env` 設定（`CVAT_BIND=0.0.0.0`）を済ませてください。
+> 既定では CVAT はこの PC からしか開けないようにしてあります。
+
 メンバー側から次が「繋がる／繋がらない」になっていれば成功です。
 
 ```bash
@@ -126,16 +129,19 @@ nc -zv -w 3 100.101.102.103 22                                          # 失敗
 `.env` に次を足して、CVAT を再起動します。
 
 ```bash
+# 既定では CVAT は 127.0.0.1 にしか出ていない。メンバーから届くように開ける
+# （誰が届くかは 3. の ACL で絞る。Streamlit・MLflow などは開けないこと）
+CVAT_BIND=0.0.0.0
 # 100.101.102.103 の部分は自分の tailscale ip -4 の値
 CVAT_CSRF_ORIGINS=http://localhost:8080,http://localhost,http://127.0.0.1:8080,http://100.101.102.103:8080
 CVAT_UI_URL=http://100.101.102.103:8080
 ```
 
 ```bash
-docker compose up -d cvat_server
+docker compose up -d cvat_server cvat_proxy
 ```
 
-> この設定を入れなくても動く場合がありますが、CVAT が生成するリンクが
+> `CVAT_CSRF_ORIGINS` / `CVAT_UI_URL` を入れなくても動く場合がありますが、CVAT が生成するリンクが
 > `localhost` のままになるため、入れておくのが確実です。
 
 ### 6. メンバーのアカウントを作る

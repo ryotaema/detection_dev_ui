@@ -29,7 +29,9 @@ services:
       NUCLIO_CHECK_FUNCTION_CONTAINERS_HEALTHINESS: "true"
       NUCLIO_DASHBOARD_DEFAULT_FUNCTION_MOUNT_MODE: "volume"
     ports:
-      - "8070:8070"   # Nuclio ダッシュボード → http://localhost:8070
+      # docker.sock を持ち認証も無いので、この PC からだけ開けるようにする。
+      # CVAT からはポートではなく cvat_net の "nuclio" で届くので影響しない
+      - "${UI_BIND:-127.0.0.1}:8070:8070"   # Nuclio ダッシュボード → http://localhost:8070
     networks:
       # cvat_server / cvat_worker_annotation と同じネットワークに載せ、
       # コンテナ名 "nuclio" で相互解決できるようにする

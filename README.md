@@ -142,6 +142,13 @@ detection_dev_ui/
 | FiftyOne  | `streamlit_app` | http://localhost:5151 | 推論結果可視化         |
 | Nuclio    | `nuclio`        | http://localhost:8070 | 自動アノテーション基盤（任意・serverless有効時） |
 
+> **どのポートも、既定ではこの PC からしか開けません**（`127.0.0.1` にだけ公開）。
+> Streamlit と Nuclio は認証が無く、Docker を操作できる（= ホストの root 相当）ため、
+> LAN や Tailscale にそのまま出すと、届いた人が何でもできてしまいます。
+> 複数人で CVAT を使うときは `.env` に `CVAT_BIND=0.0.0.0` を書きます
+> （[複数人でアノテーションする](docs/team_tailscale.md)）。
+> それ以外（`UI_BIND`）は、理由が無い限り開けないでください。
+
 ### 起動後の画面
 
 セットアップ完了後、`http://localhost:8501` を開くと以下の画面が表示されます。
