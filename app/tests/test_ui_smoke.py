@@ -280,6 +280,8 @@ def test_プリセットを適用しても落ちず値が入る():
 #   いまどこで・何を試していて・どうだったかが出ていること。
 # ---------------------------------------------------------------------------
 def test_探索中は現在の設定と進捗が出る():
+    # 探索の画面は Ultralytics の既定値から項目を作る
+    pytest.importorskip("ultralytics")
     import time
 
     from streamlit.testing.v1 import AppTest
@@ -332,6 +334,9 @@ def test_探索中は現在の設定と進捗が出る():
 def test_探索の項目を自分で選べる():
     """既定のプリセットは 4 項目だが、26 項目から自由に選べること。
     1 回が学習まるごと 1 回なので、増やしすぎには警告を出す。"""
+    # 探索の画面は Ultralytics の既定値から項目を作る
+    pytest.importorskip("ultralytics")
+
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file(MAIN, default_timeout=300).run()
@@ -399,6 +404,11 @@ def test_sam3_重みがあるときも描画できる():
     **本物の重みがあるときは触らない。** 3.45GB を取り直すことになるので、
     ダミーを置くのは「元々無かったとき」だけ。
     """
+    from core import serverless_ready
+    if not serverless_ready():
+        # nuctl・docker.sock・docker CLI が揃わないと SAM の欄そのものが出ない
+        pytest.skip("Nuclio 連携の準備が無い環境（serverless_ready() が False）")
+
     from streamlit.testing.v1 import AppTest
 
     from core.config import SAM3_DIR, SAM3_WEIGHTS_NAME
@@ -419,3 +429,33 @@ def test_sam3_重みがあるときも描画できる():
     finally:
         if created:
             w.unlink(missing_ok=True)
+
+
+def test_学習中は進捗の欄だけを定期的に描き直す():
+    """学習中に画面全体を 2 秒ごとに再実行すると、全タブの描画が毎回走って重い。
+    進捗・停止ボタン・ログは st.fragment の中に置き、そこだけを描き直す。"""
+    from streamlit.testing.v1 import AppTest
+
+    from core.state import _get_train_shared
+
+    state, lock = _get_train_shared()
+    backup = dict(state)
+    with lock:
+        state.update({"running": True, "progress": 40, "log": ["epoch 1"],
+                      "metrics_history": [{"epoch": 1, "metrics/mAP50(B)": 0.1}],
+                      "stop_requested": False, "error": None})
+    try:
+        at = AppTest.from_file(MAIN, default_timeout=300)
+        at.run()
+        assert not at.exception, [e.value for e in at.exception]
+        _assert_all_tabs_rendered(at, "学習中")
+        assert any(b.key == "train_stop_btn" for b in at.button), "停止ボタンが無い"
+        assert any("進捗: 40%" in str(p.value) or getattr(p, "text", "") == "進捗: 40%"
+                   for p in at.get("progress")), "進捗が出ていない"
+        # 学習の追従はフラグメントが担うので、画面全体の再実行は予約しない
+        from core.state import POLL_KEY
+        assert POLL_KEY not in at.session_state
+    finally:
+        with lock:
+            state.clear()
+            state.update(backup)

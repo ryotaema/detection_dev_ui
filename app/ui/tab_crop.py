@@ -123,7 +123,7 @@ def _render_generate() -> None:
         _conf = st.slider("conf しきい値", 0.05, 0.95, step=0.05, key="cr_conf",
                           help="低いほど拾いますが、誤検出のクロップも増えます")
 
-    if st.button("🔍 対象を検出する", type="primary", use_container_width=True,
+    if st.button("🔍 対象を検出する", type="primary", width="stretch",
                  key="cr_detect"):
         _tmp = PREDICTIONS_DIR / "_crop_scan"
         if _tmp.exists():
@@ -278,7 +278,7 @@ def _render_generate() -> None:
             '<div style="padding-top:28px; color:var(--text-muted); font-size:.82rem;">'
             '設定を変えるとその場で作り直されます</div>', unsafe_allow_html=True)
 
-    if _found and st.button("👁 切り出しを試す", use_container_width=True,
+    if _found and st.button("👁 切り出しを試す", width="stretch",
                             key="cr_preview"):
         st.session_state["cr_prev"] = True
 
@@ -424,7 +424,7 @@ def _render_generate() -> None:
              "緑=検出した対象　青=学習で使う内側の範囲　灰=写り込んだ他の対象")
 
     if st.button(f"✂️ {_n_obj} 件のクロップを作る", type="primary",
-                 use_container_width=True, key="cr_run",
+                 width="stretch", key="cr_run",
                  disabled=not _found):
         _bar = st.progress(0.0, text="切り出しています…")
 
@@ -612,7 +612,7 @@ def _render_bg_selection() -> None:
     _a1, _a2 = st.columns([1, 3])
     with _a1:
         _apply = st.button(f"✅ 反映する（{_changed} 件の変更）", key="bgsel_apply",
-                           type="primary", use_container_width=True,
+                           type="primary", width="stretch",
                            disabled=not _changed)
     with _a2:
         st.caption("外したタイルは消えず `_unused/` に移るだけなので、"
@@ -657,7 +657,7 @@ def _render_contact_sheet(bgdir, state: dict) -> None:
             _cs_which = st.radio("並べる対象", ["すべて", "採用ぶん", "未採用ぶん"],
                                  key="cs_which")
 
-        if st.button("📄 シートを作る", key="cs_build", use_container_width=True):
+        if st.button("📄 シートを作る", key="cs_build", width="stretch"):
             _names = (None if _cs_which == "すべて"
                       else [k for k, v in state.items()
                             if v == (_cs_which == "採用ぶん")])
@@ -696,7 +696,7 @@ def _render_contact_sheet(bgdir, state: dict) -> None:
             st.caption(f"適用すると採用は **{_n} 枚** になります。")
 
         if st.button("✅ この内容にする", key="cs_apply", type="primary",
-                     disabled=not _picked, use_container_width=True):
+                     disabled=not _picked, width="stretch"):
             if _mode.startswith("書いた番号だけ"):
                 _final = list(_picked)
             else:
@@ -789,7 +789,7 @@ def _render_recut() -> None:
     _out = DATA_DIR / _out_name.strip() if _out_name.strip() else None
 
     if st.button("✂️ 切り直す", key="rc_run", type="primary",
-                 use_container_width=True, disabled=_out is None):
+                 width="stretch", disabled=_out is None):
         _bar = st.progress(0.0, text="切り直しています…")
 
         def _p(done, total):

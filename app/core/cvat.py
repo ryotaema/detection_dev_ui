@@ -195,59 +195,33 @@ def export_cvat_task_raw(task_id: int, out_dir: Path) -> Optional[Path]:
         return None
 
 
-def parse_cvat_xml(raw_dir: Path) -> Optional[dict]:
+def parse_cvat_xml(raw_dir) -> Optional[dict]:
     """CVAT for images 1.1 のXMLを解析してメタ情報を返す。
+
+    raw_dir 以下に XML が複数あれば（複数タスクをまとめたとき）すべてを合算する。
+    raw_dir にディレクトリのリストを渡すと、それらの XML だけを読む
+    （同じ親に古いエクスポートが残っていても拾わないように）。
 
     Returns:
         {
-          "xml_path": str,
-          "labels": [str, ...],           # タスク定義のラベル一覧
-          "annotation_types": [str, ...], # 実際に使われている種別 (box/polygon/points)
+          "xml_path": str,                # 先頭の XML（互換のため）
+          "xml_paths": [str, ...],        # 見つかったすべての XML
+          "labels": [str, ...],           # クラス候補（skeleton のキーポイント名は除く）
+          "skeletons": {str: [str, ...]}, # skeleton ラベル → キーポイント名の並び
+          "annotation_types": [str, ...], # 実際に使われている種別 (box/polygon/mask/skeleton...)
           "image_count": int,
           "annotated_count": int,         # 1件以上アノテーション付きの画像数
         }
     """
-    import xml.etree.ElementTree as ET
+    from .cvat_convert import find_cvat_xmls, summarize_cvat_xmls
 
-    xml_candidates = list(raw_dir.glob("**/*.xml"))
-    if not xml_candidates:
+    dirs = raw_dir if isinstance(raw_dir, (list, tuple)) else [raw_dir]
+    xml_paths = [x for d in dirs for x in find_cvat_xmls(Path(d))]
+    if not xml_paths:
         st.error("XMLファイルが見つかりません")
         return None
-
-    xml_path = xml_candidates[0]
     try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-
-        # タスク定義のラベル一覧
-        labels: list[str] = []
-        for lbl in root.findall(".//meta/task/labels/label"):
-            name = lbl.find("name")
-            if name is not None and name.text:
-                labels.append(name.text.strip())
-
-        # 画像・アノテーション統計
-        annotation_types: set[str] = set()
-        image_count = 0
-        annotated_count = 0
-        for img in root.findall("image"):
-            image_count += 1
-            has_annot = False
-            for child in img:
-                # tag は画像単位のラベル（画像分類のアノテーション）
-                if child.tag in ("box", "polygon", "polyline", "points", "ellipse", "tag"):
-                    annotation_types.add(child.tag)
-                    has_annot = True
-            if has_annot:
-                annotated_count += 1
-
-        return {
-            "xml_path": str(xml_path),
-            "labels": labels,
-            "annotation_types": sorted(annotation_types),
-            "image_count": image_count,
-            "annotated_count": annotated_count,
-        }
+        return summarize_cvat_xmls(xml_paths)
     except Exception as e:
         st.error(f"XML解析エラー: {e}")
         return None

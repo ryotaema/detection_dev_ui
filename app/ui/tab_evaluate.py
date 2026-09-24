@@ -228,7 +228,7 @@ def render_evaluate() -> None:
                 (not current_model and not (compare_mode and selected_compare_models))
                 or (not test_image_dir and not test_video_path)
             )
-            if st.button("▶ 推論実行", type="primary", use_container_width=True, key="infer_run",
+            if st.button("▶ 推論実行", type="primary", width="stretch", key="infer_run",
                         disabled=_infer_disabled):
 
                 # ── 動画推論 ──────────────────────────────────────────────
@@ -301,7 +301,7 @@ def render_evaluate() -> None:
                             st.success("✅ 比較推論完了")
                             import pandas as pd
                             df_cmp = pd.DataFrame(compare_results)
-                            st.dataframe(df_cmp, use_container_width=True, hide_index=True)
+                            st.dataframe(df_cmp, width="stretch", hide_index=True)
                     else:
                         with st.spinner("推論中…"):
                             record_use(current_model, "infer")
@@ -320,7 +320,7 @@ def render_evaluate() -> None:
         # --- FiftyOne 起動ボタン ---
         with col_vis:
             fo_dataset_name = st.text_input("FiftyOneデータセット名", value="yolo_predictions", key="fo_name")
-            if st.button("🔭 FiftyOne で可視化", use_container_width=True, key="fo_launch"):
+            if st.button("🔭 FiftyOne で可視化", width="stretch", key="fo_launch"):
                 with st.spinner("FiftyOne App を起動中…"):
                     port = launch_fiftyone(fo_dataset_name, PREDICTIONS_DIR)
                 if port:
@@ -367,7 +367,7 @@ def render_evaluate() -> None:
                         key="dl_video",
                         file_name=Path(_out_video).name,
                         mime="video/mp4",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 else:
                     st.warning("出力動画ファイルが見つかりません")
@@ -453,7 +453,7 @@ def render_evaluate() -> None:
                             unsafe_allow_html=True)
                     with _zh2:
                         if st.button("✕ 閉じる", key="pv_zoom_close",
-                                     use_container_width=True):
+                                     width="stretch"):
                             st.session_state.pv_zoom = None
                             st.rerun()
 
@@ -503,20 +503,20 @@ def render_evaluate() -> None:
                     with _zn1:
                         if st.button("← 前の画像", key="pv_zoom_prev",
                                      disabled=(_zoom == 0),
-                                     use_container_width=True):
+                                     width="stretch"):
                             st.session_state.pv_zoom = _zoom - 1
                             st.rerun()
                     with _zn2:
                         if st.button(
                                 "🚩 フラグ解除" if _zf else "🚩 再アノテーション要",
                                 key="pv_zoom_flag", type="primary",
-                                use_container_width=True):
+                                width="stretch"):
                             _toggle_flag(_zjf, _zf)
                             st.rerun()
                     with _zn3:
                         if st.button("次の画像 →", key="pv_zoom_next",
                                      disabled=(_zoom >= len(_preview_jsons) - 1),
-                                     use_container_width=True):
+                                     width="stretch"):
                             st.session_state.pv_zoom = _zoom + 1
                             st.rerun()
 
@@ -537,12 +537,12 @@ def render_evaluate() -> None:
                         _tb1, _tb2 = st.columns(2)
                         with _tb1:
                             if st.button("🔍 拡大", key=f"prev_zoom_{_jf.name}",
-                                         use_container_width=True):
+                                         width="stretch"):
                                 st.session_state.pv_zoom = _preview_jsons.index(_jf)
                                 st.rerun()
                         with _tb2:
                             if st.button(_flag_label, key=f"prev_flag_{_jf.name}",
-                                         use_container_width=True,
+                                         width="stretch",
                                          type="secondary"):
                                 _toggle_flag(_jf, _is_flagged)
                                 st.rerun()
@@ -585,15 +585,15 @@ def render_evaluate() -> None:
                 # ── ツールバー ──
                 _tb1, _tb2, _tb3, _tb4 = st.columns([2, 2, 2, 4])
                 with _tb1:
-                    if st.button("☑ 全件選択", key="exp_sel_all", use_container_width=True):
+                    if st.button("☑ 全件選択", key="exp_sel_all", width="stretch"):
                         st.session_state.exp_sel_set = {jf.name for jf in _pred_jsons}
                         st.rerun()
                 with _tb2:
-                    if st.button("☑ このページ", key="exp_sel_page_btn", use_container_width=True):
+                    if st.button("☑ このページ", key="exp_sel_page_btn", width="stretch"):
                         st.session_state.exp_sel_set.update(jf.name for jf in _page_jsons)
                         st.rerun()
                 with _tb3:
-                    if st.button("☐ すべて解除", key="exp_desel_all", use_container_width=True):
+                    if st.button("☐ すべて解除", key="exp_desel_all", width="stretch"):
                         st.session_state.exp_sel_set = set()
                         st.rerun()
                 with _tb4:
@@ -629,7 +629,7 @@ def render_evaluate() -> None:
                             _is_flagged_sel = _jf.name in st.session_state.reanno_set
                             _flag_lbl_sel = "🚩 解除" if _is_flagged_sel else "🚩 要再アノテ"
                             if st.button(_flag_lbl_sel, key=f"sel_flag_{_cur_page}_{_jf.name}",
-                                         use_container_width=True, type="secondary"):
+                                         width="stretch", type="secondary"):
                                 _toggle_flag(_jf, _is_flagged_sel)
                                 st.rerun()
 
@@ -637,7 +637,7 @@ def render_evaluate() -> None:
                 _pn1, _pn2, _pn3 = st.columns([1, 2, 1])
                 with _pn1:
                     if st.button("← 前へ", disabled=(_cur_page == 0),
-                                 key="exp_pg_prev", use_container_width=True):
+                                 key="exp_pg_prev", width="stretch"):
                         st.session_state.exp_sel_page = _cur_page - 1
                         st.rerun()
                 with _pn2:
@@ -648,7 +648,7 @@ def render_evaluate() -> None:
                     )
                 with _pn3:
                     if st.button("次へ →", disabled=(_cur_page == _total_pages - 1),
-                                 key="exp_pg_next", use_container_width=True):
+                                 key="exp_pg_next", width="stretch"):
                         st.session_state.exp_sel_page = _cur_page + 1
                         st.rerun()
 
@@ -686,7 +686,7 @@ def render_evaluate() -> None:
                     _exp_dest != _BROWSE_ROOT
                     and str(_exp_dest).startswith(str(_BROWSE_ROOT))
                 )
-                if st.button("↑ 上へ", key="exp_nav_up", use_container_width=True,
+                if st.button("↑ 上へ", key="exp_nav_up", width="stretch",
                              disabled=not _can_up):
                     st.session_state.exp_dest_dir = str(_exp_dest.parent)
                     st.rerun()
@@ -705,7 +705,7 @@ def render_evaluate() -> None:
                 for _ci, _sd in enumerate(_subdirs[:12]):
                     with _sd_cols[_ci % _COLS]:
                         if st.button(f"📁 {_sd.name}", key=f"exp_sd_{_ci}",
-                                     use_container_width=True):
+                                     width="stretch"):
                             st.session_state.exp_dest_dir = str(_sd)
                             st.rerun()
             else:
@@ -720,7 +720,7 @@ def render_evaluate() -> None:
                     label_visibility="collapsed",
                 )
             with _nf2:
-                if st.button("＋ 作成", key="exp_mkdir", use_container_width=True):
+                if st.button("＋ 作成", key="exp_mkdir", width="stretch"):
                     if _exp_new_folder.strip():
                         _nd = _exp_dest / _exp_new_folder.strip()
                         _nd.mkdir(parents=True, exist_ok=True)
@@ -729,7 +729,7 @@ def render_evaluate() -> None:
 
             # ── 書き出しボタン ──────────────────────────────────────────────────────
             _btn_disabled = (_exp_mode == "選択して書き出す" and _exp_count == 0)
-            if st.button(f"📥 {_exp_count} 件を書き出す", use_container_width=True,
+            if st.button(f"📥 {_exp_count} 件を書き出す", width="stretch",
                          type="primary", disabled=_btn_disabled, key="exp_images_run"):
                 _exp_out = _exp_dest
                 _prog_bar  = st.progress(0, text="書き出し準備中…")
@@ -762,7 +762,7 @@ def render_evaluate() -> None:
                             key="dl_exported_zip",
                             file_name=f"exports_{datetime.now():%Y%m%d_%H%M}.zip",
                             mime="application/zip",
-                            use_container_width=True,
+                            width="stretch",
                         )
                 if _ng > 0:
                     st.warning(f"⚠ {_ng} 件スキップ（元画像が見つからないため）")
@@ -860,7 +860,7 @@ def render_evaluate() -> None:
             _ev_key = f"{Path(_ev_yaml_path).parent.name}:{_ev_split}"
 
             if st.button(f"📊 {len(_ev_models_sel)} 件のモデルを評価",
-                         type="primary", use_container_width=True,
+                         type="primary", width="stretch",
                          disabled=_ev_running or not _ev_models_sel, key="ev_run"):
                 for _m in _ev_models_sel:
                     record_use(_model_map[_m], "eval")
@@ -926,7 +926,7 @@ def render_evaluate() -> None:
                     _ev_tbl.append(_row)
                 _sort_key = "top1 accuracy" if _is_cls_eval else "mAP50-95"
                 _df_ev = _pd_ev.DataFrame(_ev_tbl).sort_values(_sort_key, ascending=False)
-                st.dataframe(_df_ev, use_container_width=True, hide_index=True)
+                st.dataframe(_df_ev, width="stretch", hide_index=True)
 
                 _best = _df_ev.iloc[0]
                 if _is_cls_eval:
@@ -958,7 +958,7 @@ def render_evaluate() -> None:
                                 "Precision": round(c["precision"], 3),
                                 "Recall": round(c["recall"], 3),
                             } for c in _ev_detail["per_class"]]),
-                            use_container_width=True, hide_index=True,
+                            width="stretch", hide_index=True,
                         )
                     _pd_dir = _ev_detail.get("plots_dir")
                     if _pd_dir and Path(_pd_dir).exists():
@@ -1010,7 +1010,7 @@ def render_evaluate() -> None:
                     _aa_conflict = st.checkbox("クラス競合（迷っている）", value=True, key="aa_conflict")
                     _aa_tiny     = st.checkbox("極小ボックス（ノイズの疑い）", value=False, key="aa_tiny")
 
-            if st.button("🔍 要確認画像を抽出", use_container_width=True, key="aa_run"):
+            if st.button("🔍 要確認画像を抽出", width="stretch", key="aa_run"):
                 with st.spinner(f"{len(_pred_jsons)} 件を分析中…"):
                     st.session_state["aa_rows"] = analyze_predictions(
                         _pred_jsons, conf_low=_aa_conf)
@@ -1052,18 +1052,18 @@ def render_evaluate() -> None:
                         "最低conf": (f"{_h['min_conf']:.2f}" if _h["min_conf"] is not None else "—"),
                         "理由": ", ".join(_h["reasons"]),
                     } for _h in _aa_hits])
-                    st.dataframe(_df_aa, use_container_width=True, hide_index=True, height=260)
+                    st.dataframe(_df_aa, width="stretch", hide_index=True, height=260)
 
                     _ab1, _ab2 = st.columns(2)
                     with _ab1:
                         if st.button(f"🚩 {len(_aa_hits)} 件にまとめてフラグを立てる",
-                                     type="primary", use_container_width=True, key="aa_flag_all"):
+                                     type="primary", width="stretch", key="aa_flag_all"):
                             for _h in _aa_hits:
                                 st.session_state.reanno_set.add(_h["name"])
                             st.success(f"{len(_aa_hits)} 件にフラグを立てました")
                             st.rerun()
                     with _ab2:
-                        if st.button("抽出結果をクリア", use_container_width=True, key="aa_clear"):
+                        if st.button("抽出結果をクリア", width="stretch", key="aa_clear"):
                             st.session_state["aa_rows"] = []
                             st.rerun()
                 else:
@@ -1128,7 +1128,7 @@ def render_evaluate() -> None:
                         st.warning(f"⚠ {len(_ra_jsons)} 件を送信します。画像のアップロードに時間がかかります。")
 
                     if st.button(f"📤 CVAT に {len(_ra_jsons)} 件を送る",
-                                 type="primary", use_container_width=True,
+                                 type="primary", width="stretch",
                                  disabled=not _pu_name.strip(), key="push_run"):
                         _pu_labels = [s.strip() for s in _pu_extra.split(",") if s.strip()]
                         with st.spinner("CVAT にタスクを作成中…（画像アップロード中）"):
@@ -1159,7 +1159,7 @@ def render_evaluate() -> None:
                 _ra_c1, _ra_c2 = st.columns(2)
                 with _ra_c1:
                     if st.button("⬇ 再アノテーション用 ZIP を生成",
-                                 type="primary", use_container_width=True,
+                                 type="primary", width="stretch",
                                  key="reanno_zip"):
                         with st.spinner("ZIP を生成中…"):
                             _zip_bytes, _ok, _ng = build_reannotation_zip(_ra_jsons)
@@ -1170,12 +1170,12 @@ def render_evaluate() -> None:
                                 key="dl_reanno_zip",
                                 file_name=f"reannotation_{datetime.now():%Y%m%d_%H%M}.zip",
                                 mime="application/zip",
-                                use_container_width=True,
+                                width="stretch",
                             )
                         if _ng > 0:
                             st.warning(f"⚠ {_ng} 件は元画像が見つからずスキップしました")
                 with _ra_c2:
-                    if st.button("🗑 フラグをすべてクリア", use_container_width=True, key="reanno_clear"):
+                    if st.button("🗑 フラグをすべてクリア", width="stretch", key="reanno_clear"):
                         st.session_state.reanno_set = set()
                         st.rerun()
 
@@ -1215,7 +1215,7 @@ def render_evaluate() -> None:
                                               help="0 で全画像")
 
                 if st.button("🎚 しきい値を振って測る", type="primary",
-                             use_container_width=True, key="sw_run"):
+                             width="stretch", key="sw_run"):
                     with st.spinner("推論して各しきい値で評価しています…"):
                         st.session_state["sw_result"] = sweep_confidence(
                             Path(_model_map[_sw_model_sel]),
@@ -1262,7 +1262,7 @@ def render_evaluate() -> None:
                         "自動アノテーションの下書きなら少し低めが便利です"
                         "（消す方が描くより速いため）。"
                     )
-                    st.dataframe(_df_sw, use_container_width=True, hide_index=True, height=260)
+                    st.dataframe(_df_sw, width="stretch", hide_index=True, height=260)
 
         with st.expander("🔬 正解ラベルとの差分分析（アノテーション漏れを探す）", expanded=False):
             st.caption(
@@ -1301,7 +1301,7 @@ def render_evaluate() -> None:
                     _gd_max = st.number_input("最大画像数", 0, 100000, 500, 100, key="gd_max",
                                               help="0 で全画像。多いほど時間がかかります")
 
-                if st.button("🔬 差分を分析", type="primary", use_container_width=True,
+                if st.button("🔬 差分を分析", type="primary", width="stretch",
                              key="gd_run"):
                     with st.spinner("推論して GT と突き合わせています…"):
                         st.session_state["gd_result"] = compare_with_ground_truth(
@@ -1336,7 +1336,7 @@ def render_evaluate() -> None:
                         st.dataframe(_pd_gd.DataFrame([
                             {"クラス": k, "TP": v["tp"], "FP": v["fp"], "FN": v["fn"]}
                             for k, v in _gd["by_class"].items()
-                        ]), use_container_width=True, hide_index=True)
+                        ]), width="stretch", hide_index=True)
 
                     # 要確認画像の抽出条件
                     st.markdown("**要確認画像の抽出**")
@@ -1358,7 +1358,7 @@ def render_evaluate() -> None:
                         st.dataframe(_pd_gd.DataFrame([{
                             "ファイル": p["name"], "GT": p["n_gt"], "予測": p["n_pred"],
                             "TP": p["tp"], "FP": p["fp"], "FN": p["fn"],
-                        } for p in _gd_hits]), use_container_width=True, hide_index=True,
+                        } for p in _gd_hits]), width="stretch", hide_index=True,
                             height=260)
 
                         _ga1, _ga2 = st.columns(2)
@@ -1368,7 +1368,7 @@ def render_evaluate() -> None:
                                 value=f"labelfix_{datetime.now():%Y%m%d_%H%M}",
                                 key="gd_task_name")
                             if st.button(f"📤 {len(_gd_hits)} 件を CVAT に送る",
-                                         type="primary", use_container_width=True,
+                                         type="primary", width="stretch",
                                          disabled=not _gd_task.strip(), key="gd_push"):
                                 _gd_items = [{
                                     "path": Path(p["image"]), "width": p["width"],
@@ -1395,7 +1395,7 @@ def render_evaluate() -> None:
                                 "FiftyOne データセット名", value="gt_vs_pred",
                                 key="gd_fo_name")
                             if st.button("🔭 FiftyOne で GT と予測を見比べる",
-                                         use_container_width=True, key="gd_fo"):
+                                         width="stretch", key="gd_fo"):
                                 with st.spinner("FiftyOne App を起動中…"):
                                     _gd_port = launch_fiftyone_comparison(
                                         _gd_fo_name.strip() or "gt_vs_pred", _gd_hits)

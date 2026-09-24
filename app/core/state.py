@@ -42,9 +42,12 @@ def _get_deploy_shared() -> tuple[dict, threading.Lock]:
     return _DEPLOY_SHARED
 
 
+# 学習と探索の「始める」判定をまとめて守る（同じ GPU を奪い合わないように）
+_JOB_START_LOCK = threading.Lock()
+
 _TRAIN_SHARED = (
     {"log": [], "progress": 0, "running": False, "error": None, "model_path": None,
-    "metrics_history": [], "stop_requested": False},
+    "metrics_history": [], "stop_requested": False, "pid": None},
     threading.Lock(),
 )
 

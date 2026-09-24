@@ -16,7 +16,7 @@ from core import _DOC_AUG, _DOC_TRAIN  # ウィジェットの既定リンク先
 
 def _ph(name: str, desc: str, url: str) -> None:
     """ポップオーバー形式のパラメータヘルプボタン（❓）を描画する。"""
-    with st.popover("❓", use_container_width=True):
+    with st.popover("❓", width="stretch"):
         st.markdown(f"**`{name}`**\n\n{desc}")
         st.markdown(f"[📖 Ultralytics ドキュメント]({url})")
 
@@ -151,7 +151,7 @@ def open_folder(container_path, key: str, label: str = "📂 フォルダを開�
             st.caption(f"📁 `{container_path}`（コンテナ内のパス）")
         return
 
-    if st.button(label, key=f"openfd_{key}", use_container_width=inline,
+    if st.button(label, key=f"openfd_{key}", width=("stretch" if inline else "content"),
                  help=f"{host}\n\nホスト側のパスです"):
         res = request_open(container_path)
         if res["ok"]:
@@ -200,3 +200,23 @@ def folder_watcher_status() -> None:
         st.caption("その場だけ動かす場合:")
         st.code("./tools/open_folder_watcher.sh", language="bash")
         st.caption("解除: `./tools/install_folder_watcher.sh --uninstall`")
+
+
+def split_mode_inputs(key: str) -> tuple[str, int]:
+    """train / val の分け方を選ぶ部品（データ取込と「分け直す」で共通）"""
+    from core.dataset import DEFAULT_BLOCK_SIZE, SPLIT_MODES
+
+    modes = list(SPLIT_MODES)
+    mode = st.radio(
+        "分け方", modes, format_func=lambda m: SPLIT_MODES[m], key=f"{key}_split_mode",
+        help="動画から切り出したフレームを 1 枚ずつ振り分けると、ほぼ同じ画像が "
+             "train と val の両方に入り、mAP が実力より高く出ます。"
+             "連続した画像はまとめて同じ側に入れてください。",
+    )
+    block = DEFAULT_BLOCK_SIZE
+    if mode == "block":
+        block = int(st.number_input(
+            "1 つの塊のフレーム数", 5, 5000, DEFAULT_BLOCK_SIZE, step=5, key=f"{key}_block",
+            help="名前順に並べて、この枚数ずつを 1 つのまとまりにします。"
+                 "被写体が入れ替わる程度の長さにしてください"))
+    return mode, block

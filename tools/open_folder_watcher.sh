@@ -33,6 +33,22 @@ else
   exit 1
 fi
 
+# 開いてよい場所: リポジトリと、そこからマウントしている各フォルダの実体
+# （data/ を別ディスクへのシンボリックリンクにしている場合も開けるように）
+ALLOWED=("$ROOT")
+for d in data models predictions extensions serverless; do
+  real="$(readlink -f "$ROOT/$d" 2>/dev/null || true)"
+  [ -n "$real" ] && ALLOWED+=("$real")
+done
+
+allowed() {
+  local t="$1" a
+  for a in "${ALLOWED[@]}"; do
+    case "$t" in "$a"|"$a"/*) return 0 ;; esac
+  done
+  return 1
+}
+
 mkdir -p "$REQ_DIR"
 echo "📂 フォルダを開く係を起動しました"
 echo "   監視: $REQ_DIR"
@@ -58,8 +74,17 @@ while true; do
     rm -f "$req"
 
     [ -z "$target" ] && continue
-    if [ ! -e "$target" ]; then
-      echo "  ⚠ ありません: $target"
+    # 依頼ファイルはコンテナ側から誰でも置けるので、開くのは
+    # 「このリポジトリの中のフォルダ」だけにする（ファイルを渡されて実行されないように）
+    case "$target" in
+      *"/../"*|*"/..") echo "  ⚠ 開けません（.. を含む）: $target"; continue ;;
+    esac
+    if ! allowed "$target"; then
+      echo "  ⚠ 開けません（リポジトリの外）: $target"
+      continue
+    fi
+    if [ ! -d "$target" ]; then
+      echo "  ⚠ フォルダがありません: $target"
       continue
     fi
     echo "  → 開きます: $target"

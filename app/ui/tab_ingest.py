@@ -22,6 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
+from .widgets import split_mode_inputs
 
 
 
@@ -37,7 +38,7 @@ def render_ingest() -> None:
 
     col1, col2 = st.columns([3, 1])
     with col2:
-        if st.button("🔄 タスク一覧を取得", use_container_width=True, key="cvat_fetch_tasks"):
+        if st.button("🔄 タスク一覧を取得", width="stretch", key="cvat_fetch_tasks"):
             with st.spinner("CVATからタスクを取得中…"):
                 st.session_state.cvat_tasks = fetch_cvat_tasks()
 
@@ -51,7 +52,7 @@ def render_ingest() -> None:
             import pandas as pd
             df = pd.DataFrame(tasks)[["id","name","status","assignee","size"]]
             df.columns = ["ID","タスク名","ステータス","担当者","画像数"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
             st.markdown("---")
 
         # 複数タスク選択
@@ -72,7 +73,7 @@ def render_ingest() -> None:
         # ─── 手順① CVAT for images 1.1 エクスポート ─────────────────────────
         st.markdown("#### ① CVATエクスポート")
         if st.button("⬇️ エクスポート実行 (CVAT for images 1.1)", type="primary",
-                     use_container_width=True, key="cvat_export_run",
+                     width="stretch", key="cvat_export_run",
                      disabled=len(selected_ids) == 0):
             if not selected_ids:
                 st.warning("エクスポートするタスクを選択してください。")
@@ -92,23 +93,13 @@ def render_ingest() -> None:
                             st.error(f"タスク {task_id} のエクスポートに失敗しました")
 
                 if all_raw_dirs:
-                    # 複数タスクの場合は最初のrawディレクトリをメインとして設定
-                    # マージ: 全rawディレクトリのXMLを統合して最初のrawを基準にする
-                    if len(all_raw_dirs) == 1:
-                        merged_raw = all_raw_dirs[0]
-                    else:
-                        import shutil as _shutil
-                        merged_raw = out_dir / "merged_raw"
-                        merged_raw.mkdir(parents=True, exist_ok=True)
-                        for src_raw in all_raw_dirs:
-                            for item in src_raw.rglob("*"):
-                                if item.is_file():
-                                    rel = item.relative_to(src_raw)
-                                    dst = merged_raw / rel
-                                    dst.parent.mkdir(parents=True, exist_ok=True)
-                                    if not dst.exists():
-                                        _shutil.copy2(item, dst)
-                        st.success(f"✅ {len(all_raw_dirs)} タスクを統合: `{merged_raw}`")
+                    # 複数タスクのときは、各タスクの raw/ を束ねる親ディレクトリを渡す。
+                    # XML も画像もタスクごとのまま読み、出力名の衝突は生成時に解消する
+                    # （以前は 1 か所へコピーしていたため、同名の annotations.xml や
+                    #   frame_000000.jpg が上書きされず、2 タスク目以降が消えていた）。
+                    merged_raw = all_raw_dirs[0] if len(all_raw_dirs) == 1 else out_dir
+                    if len(all_raw_dirs) > 1:
+                        st.success(f"✅ {len(all_raw_dirs)} タスクをまとめて扱います: `{out_dir}`")
 
                     st.session_state.cvat_raw_dir = str(merged_raw)
                     # 来歴に残すため、どの CVAT タスクから取り込んだかを覚えておく
@@ -117,7 +108,7 @@ def render_ingest() -> None:
                         for t in tasks if t["id"] in selected_ids
                     ]
                     st.session_state.cvat_xml_info = None
-                    xml_info = parse_cvat_xml(merged_raw)
+                    xml_info = parse_cvat_xml(all_raw_dirs)
                     if xml_info:
                         st.session_state.cvat_xml_info = xml_info
 
@@ -144,13 +135,13 @@ def render_ingest() -> None:
 
             ann_types = set(xml_info.get("annotation_types", []))
             task_type_options = ["detect"]
-            if "polygon" in ann_types:
+            if ann_types & {"polygon", "mask", "ellipse"}:
                 task_type_options.append("segment")
-            if "points" in ann_types:
+            if ann_types & {"skeleton", "points"}:
                 task_type_options.append("pose")
             if "tag" in ann_types:
                 task_type_options.append("classify")
-            if "box" in ann_types or "polygon" in ann_types:
+            if ann_types & {"box", "polygon", "mask", "ellipse"}:
                 task_type_options.append("obb")
 
             col_task, col_val = st.columns(2)
@@ -158,8 +149,9 @@ def render_ingest() -> None:
                 task_type = st.selectbox(
                     "タスク種別",
                     task_type_options,
-                    help="detect: バウンディングボックス / segment: ポリゴン（box→矩形ポリゴンに変換） / "
-                         "pose: キーポイント / classify: 画像分類（CVAT の「タグ」から生成） / "
+                    help="detect: バウンディングボックス（回転付き box・楕円も可） / "
+                         "segment: ポリゴン・マスク（box・楕円はポリゴンに変換） / "
+                         "pose: キーポイント（CVAT の skeleton） / classify: 画像分類（CVAT の「タグ」から生成） / "
                          "obb: 回転バウンディングボックス（回転付き box・4点ポリゴンから生成）",
                 )
             if "tag" not in ann_types:
@@ -169,6 +161,24 @@ def render_ingest() -> None:
                 )
             with col_val:
                 val_ratio = st.slider("バリデーション割合", 0.05, 0.40, 0.20, step=0.05)
+
+            with st.expander("⚙️ train / val の分け方・背景画像（任意）"):
+                _sp_c1, _sp_c2 = st.columns([3, 1])
+                with _sp_c1:
+                    split_mode, block_size = split_mode_inputs("gen")
+                with _sp_c2:
+                    split_seed = int(st.number_input(
+                        "乱数シード", 0, 9999, 0, key="gen_seed",
+                        help="同じ値なら何度作っても同じ分け方になります"))
+                include_background = False
+                if task_type != "classify":
+                    include_background = st.checkbox(
+                        "対象が写っていない画像も「背景」として入れる", value=False,
+                        key="gen_background",
+                        help="何も写っていない画像を空のラベルで入れると、誤検出が減ります。"
+                             "**アノテーションし終えた画像だけのときに使ってください**"
+                             "（まだ手を付けていない画像も「何も無い」として学習されます）。",
+                    )
 
             # ─── 手順③ データセット生成 ──────────────────────────────────────
             st.markdown("---")
@@ -182,7 +192,7 @@ def render_ingest() -> None:
             if not selected_labels:
                 st.warning("少なくとも1つ以上のラベルを選択してください。")
             else:
-                if st.button("⚙️ データセット生成", type="primary", use_container_width=True,
+                if st.button("⚙️ データセット生成", type="primary", width="stretch",
                              key="dataset_generate_run"):
                     raw_dir_path = Path(st.session_state.cvat_raw_dir)
                     gen_dir = DATA_DIR / gen_dir_name
@@ -196,6 +206,10 @@ def render_ingest() -> None:
                             out_dir=gen_dir,
                             val_ratio=val_ratio,
                             cvat_tasks=st.session_state.get("cvat_export_tasks"),
+                            seed=split_seed,
+                            split_mode=split_mode,
+                            block_size=block_size,
+                            include_background=include_background,
                         )
                     if result:
                         yaml_path = result / "data.yaml"
@@ -211,7 +225,7 @@ def render_ingest() -> None:
             "既存のraw_dirパス（コンテナ内）",
             placeholder="/workspace/data/dataset_11_20260512/raw",
         )
-        if st.button("🔍 XMLを解析", use_container_width=True,
+        if st.button("🔍 XMLを解析", width="stretch",
                      key="xml_parse_run") and manual_raw:
             raw_p = Path(manual_raw)
             if raw_p.exists():
@@ -250,7 +264,7 @@ def render_ingest() -> None:
             if _ul_zip:
                 st.caption(f"選択中: {_ul_zip.name}  ({_ul_zip.size / 1024 / 1024:.1f} MB)")
                 if st.button("📤 展開して data/ に保存", key="ul_zip_btn",
-                             type="primary", use_container_width=True):
+                             type="primary", width="stretch"):
                     _ul_out = DATA_DIR / _ul_dir_name
                     _ul_out.mkdir(parents=True, exist_ok=True)
                     with zipfile.ZipFile(_io_ul.BytesIO(_ul_zip.read()), "r") as _zf:
@@ -280,7 +294,7 @@ def render_ingest() -> None:
                 st.caption(f"選択中: {len(_ul_imgs)} ファイル")
                 _ul_dst_preview = f"data/{_ul_dir_name}/images/{_ul_split}/"
                 if st.button(f"📤 {_ul_dst_preview} に保存", key="ul_imgs_btn",
-                             type="primary", use_container_width=True):
+                             type="primary", width="stretch"):
                     _ul_out = DATA_DIR / _ul_dir_name / "images" / _ul_split
                     _ul_out.mkdir(parents=True, exist_ok=True)
                     for _f in _ul_imgs:
@@ -310,7 +324,7 @@ def render_ingest() -> None:
             )
 
             if _le_selected:
-                if st.button("🔍 ラベルを取得", key="le_fetch_btn", use_container_width=True):
+                if st.button("🔍 ラベルを取得", key="le_fetch_btn", width="stretch"):
                     _le_ids = [_le_opts[k] for k in _le_selected]
                     with st.spinner("ラベル取得中..."):
                         st.session_state["le_labels_by_task"] = fetch_cvat_task_labels(_le_ids)
@@ -350,7 +364,7 @@ def render_ingest() -> None:
                         file_name="labels.yaml",
                         mime="text/yaml",
                         key="le_dl_yaml",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 with _le_c2:
                     st.download_button(
@@ -359,7 +373,7 @@ def render_ingest() -> None:
                         file_name="labels.txt",
                         mime="text/plain",
                         key="le_dl_txt",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 with _le_c3:
                     _le_cvat_json = json.dumps(
@@ -372,7 +386,7 @@ def render_ingest() -> None:
                         file_name="labels_cvat.json",
                         mime="application/json",
                         key="le_dl_cvat",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 st.markdown("---")

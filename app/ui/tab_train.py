@@ -29,6 +29,90 @@ from .presets import (_apply_preset, _BUILTIN_PRESETS, _collect_current_params,
 from .theme import active_theme
 
 
+def _render_training_live() -> None:
+    """学習中の進捗・グラフ・ログ（st.fragment で定期的にここだけ描き直す）"""
+    _train_state, _train_log_lock = _get_train_shared()
+    with _train_log_lock:
+        st.session_state.training_log = list(_train_state["log"])
+        st.session_state.training_progress = _train_state["progress"]
+        st.session_state.training_running = _train_state["running"]
+        st.session_state.training_metrics_history = list(_train_state["metrics_history"])
+    if not st.session_state.training_running:
+        # 終わった。完了表示・結果・ボタンの状態を出すため、画面全体を描き直す
+        st.rerun()
+
+    # ── 学習中: プログレスバー＋リアルタイムグラフ＋自動スクロールログ ──
+    prog = st.session_state.training_progress
+    st.progress(prog / 100, text=f"進捗: {prog}%")
+
+    # ── 停止（エポック末で安全に打ち切る）──
+    with _train_log_lock:
+        _stop_pending = _train_state.get("stop_requested", False)
+    _stop_c1, _stop_c2 = st.columns([1, 3])
+    with _stop_c1:
+        if st.button("⏹ 学習を停止", type="secondary", width="stretch",
+                     disabled=_stop_pending, key="train_stop_btn"):
+            with _train_log_lock:
+                _train_state["stop_requested"] = True
+            st.rerun(scope="fragment")
+    with _stop_c2:
+        if _stop_pending:
+            st.warning("⏳ 停止要求を受け付けました。現在のエポックが終わり次第停止します。")
+        else:
+            st.caption("停止してもその時点までの `best.pt` / `last.pt` は保存されます。"
+                       "`last.pt` があれば下の「中断した学習を再開」から続きから再開できます。")
+
+    _mh = st.session_state.training_metrics_history
+    if _mh:
+        import pandas as pd
+        df_live = pd.DataFrame(_mh)
+        if "epoch" in df_live.columns:
+            df_live = df_live.set_index("epoch")
+            _live_cols = [c for c in df_live.columns
+                          if any(k in c.lower() for k in ["map50", "loss"])
+                          and "95" not in c.lower()]
+            if _live_cols:
+                st.markdown("**📊 学習進捗グラフ（リアルタイム）**")
+                st.line_chart(df_live[_live_cols])
+
+    log_lines = st.session_state.training_log[-500:]
+    log_text_escaped = "\n".join(log_lines).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    # iframe の中は親ドキュメントの CSS 変数を継承しないため、
+    # ここだけはテーマから実際の色を取り出して埋め込む
+    _th = active_theme()
+    components.html(f"""
+<style>
+  body{{margin:0;background:{_th['bg_log']};}}
+  #log-box{{
+background:{_th['bg_log']};color:{_th['text_secondary']};
+font-family:'JetBrains Mono',monospace;font-size:12px;
+height:380px;overflow-y:auto;
+padding:12px;border:1px solid {_th['border']};border-radius:8px;
+white-space:pre-wrap;word-break:break-all;
+  }}
+</style>
+<div id="log-box">{log_text_escaped}</div>
+<script>
+  var box = document.getElementById('log-box');
+  var dist = 0;
+  try {{ dist = parseInt(window.parent.localStorage.getItem('log_dist_bottom') || '0'); }} catch(e) {{}}
+  setTimeout(function() {{
+if (dist > 100) {{
+  box.scrollTop = box.scrollHeight - box.clientHeight - dist;
+}} else {{
+  box.scrollTop = box.scrollHeight;
+}}
+  }}, 0);
+  var t = null;
+  box.addEventListener('scroll', function() {{
+clearTimeout(t);
+t = setTimeout(function() {{
+  var d = Math.max(0, box.scrollHeight - box.scrollTop - box.clientHeight);
+  try {{ window.parent.localStorage.setItem('log_dist_bottom', d); }} catch(e) {{}}
+}}, 100);
+  }}, {{passive:true}});
+</script>
+""", height=400)
 
 
 def render_train() -> None:
@@ -70,81 +154,8 @@ def render_train() -> None:
 
     # --- 進捗表示 ---
     if st.session_state.training_running:
-        # ── 学習中: プログレスバー＋リアルタイムグラフ＋自動スクロールログ ──
-        prog = st.session_state.training_progress
-        st.progress(prog / 100, text=f"進捗: {prog}%")
-
-        # ── 停止（エポック末で安全に打ち切る）──
-        with _train_log_lock:
-            _stop_pending = _train_state.get("stop_requested", False)
-        _stop_c1, _stop_c2 = st.columns([1, 3])
-        with _stop_c1:
-            if st.button("⏹ 学習を停止", type="secondary", use_container_width=True,
-                         disabled=_stop_pending, key="train_stop_btn"):
-                with _train_log_lock:
-                    _train_state["stop_requested"] = True
-                st.rerun()
-        with _stop_c2:
-            if _stop_pending:
-                st.warning("⏳ 停止要求を受け付けました。現在のエポックが終わり次第停止します。")
-            else:
-                st.caption("停止してもその時点までの `best.pt` / `last.pt` は保存されます。"
-                           "`last.pt` があれば下の「中断した学習を再開」から続きから再開できます。")
-
-        _mh = st.session_state.training_metrics_history
-        if _mh:
-            import pandas as pd
-            df_live = pd.DataFrame(_mh)
-            if "epoch" in df_live.columns:
-                df_live = df_live.set_index("epoch")
-                _live_cols = [c for c in df_live.columns
-                              if any(k in c.lower() for k in ["map50", "loss"])
-                              and "95" not in c.lower()]
-                if _live_cols:
-                    st.markdown("**📊 学習進捗グラフ（リアルタイム）**")
-                    st.line_chart(df_live[_live_cols])
-
-        log_lines = st.session_state.training_log[-500:]
-        log_text_escaped = "\n".join(log_lines).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        # iframe の中は親ドキュメントの CSS 変数を継承しないため、
-        # ここだけはテーマから実際の色を取り出して埋め込む
-        _th = active_theme()
-        components.html(f"""
-    <style>
-      body{{margin:0;background:{_th['bg_log']};}}
-      #log-box{{
-    background:{_th['bg_log']};color:{_th['text_secondary']};
-    font-family:'JetBrains Mono',monospace;font-size:12px;
-    height:380px;overflow-y:auto;
-    padding:12px;border:1px solid {_th['border']};border-radius:8px;
-    white-space:pre-wrap;word-break:break-all;
-      }}
-    </style>
-    <div id="log-box">{log_text_escaped}</div>
-    <script>
-      var box = document.getElementById('log-box');
-      var dist = 0;
-      try {{ dist = parseInt(window.parent.localStorage.getItem('log_dist_bottom') || '0'); }} catch(e) {{}}
-      setTimeout(function() {{
-    if (dist > 100) {{
-      box.scrollTop = box.scrollHeight - box.clientHeight - dist;
-    }} else {{
-      box.scrollTop = box.scrollHeight;
-    }}
-      }}, 0);
-      var t = null;
-      box.addEventListener('scroll', function() {{
-    clearTimeout(t);
-    t = setTimeout(function() {{
-      var d = Math.max(0, box.scrollHeight - box.scrollTop - box.clientHeight);
-      try {{ window.parent.localStorage.setItem('log_dist_bottom', d); }} catch(e) {{}}
-    }}, 100);
-      }}, {{passive:true}});
-    </script>
-    """, height=400)
-
-        # ここで st.rerun() すると以降のタブが描画されないため予約だけする
-        request_rerun_poll()
+        # 学習中はこの欄だけを定期的に描き直す（画面全体を 2 秒ごとに再実行しない）
+        st.fragment(_render_training_live, run_every=2.0)()
 
     elif st.session_state.training_progress == 100:
         # ── 学習完了: プログレスバー＋ログ（expander / 静的表示） ──
@@ -188,7 +199,7 @@ def render_train() -> None:
             if metric_cols:
                 st.line_chart(df_r[metric_cols])
             with st.expander("📄 生データ（末尾5行）"):
-                st.dataframe(df_r.tail(5), use_container_width=True)
+                st.dataframe(df_r.tail(5), width="stretch")
 
     # ── 学習の設定 ───────────────────────────────────────────────────────────
     if st.session_state.training_running:
@@ -214,7 +225,7 @@ def render_train() -> None:
             label_visibility="collapsed",
         )
     with _pr2:
-        if st.button("▶ 適用", key="preset_apply", use_container_width=True,
+        if st.button("▶ 適用", key="preset_apply", width="stretch",
                      disabled=(_preset_sel == _PRESET_NONE)):
             _preset_target = _all_presets.get(_preset_sel)
             if _preset_target:
@@ -222,7 +233,7 @@ def render_train() -> None:
             else:
                 st.warning("適用するプリセットを選んでください。")
     with _pr3:
-        if st.button("💾 現在の設定を保存", key="preset_save_btn", use_container_width=True):
+        if st.button("💾 現在の設定を保存", key="preset_save_btn", width="stretch"):
             st.session_state["preset_save_mode"] = True
 
     if st.session_state.get("preset_save_mode", False):
@@ -235,7 +246,7 @@ def render_train() -> None:
                     placeholder="例: 小物体むけ 高解像度", label_visibility="collapsed",
                 )
             with _sv2:
-                if st.button("✅ 保存", key="preset_save_confirm", use_container_width=True):
+                if st.button("✅ 保存", key="preset_save_confirm", width="stretch"):
                     if _new_pname.strip():
                         _ups = _load_user_presets()
                         _ups[_new_pname.strip()] = _collect_current_params()
@@ -246,7 +257,7 @@ def render_train() -> None:
                     else:
                         st.warning("プリセット名を入力してください")
             with _sv3:
-                if st.button("✕ キャンセル", key="preset_save_cancel", use_container_width=True):
+                if st.button("✕ キャンセル", key="preset_save_cancel", width="stretch"):
                     st.session_state["preset_save_mode"] = False
                     st.rerun()
 
@@ -263,15 +274,15 @@ def render_train() -> None:
                 )
                 st.caption(_param_summary)
                 with _up1:
-                    if st.button("▶ 適用", key=f"upr_apply_{_uname}", use_container_width=True):
+                    if st.button("▶ 適用", key=f"upr_apply_{_uname}", width="stretch"):
                         _apply_preset(_uparams)
                 with _up2:
-                    if st.button("✏️ 編集", key=f"upr_edit_{_uname}", use_container_width=True):
+                    if st.button("✏️ 編集", key=f"upr_edit_{_uname}", width="stretch"):
                         st.session_state["preset_editing_name"] = _uname
                         st.session_state["preset_editing_vals"] = dict(_uparams)
                         st.rerun()
                 with _up3:
-                    if st.button("🗑 削除", key=f"upr_del_{_uname}", use_container_width=True):
+                    if st.button("🗑 削除", key=f"upr_del_{_uname}", width="stretch"):
                         _ups = _load_user_presets()
                         _ups.pop(_uname, None)
                         _save_user_presets(_ups)
@@ -332,7 +343,7 @@ def render_train() -> None:
 
                 _ec1, _ec2 = st.columns(2)
                 with _ec1:
-                    if st.button("✅ 変更を保存", key="pe_save", use_container_width=True, type="primary"):
+                    if st.button("✅ 変更を保存", key="pe_save", width="stretch", type="primary"):
                         _ups = _load_user_presets()
                         _ups[_editing] = dict(_ev)
                         _save_user_presets(_ups)
@@ -341,7 +352,7 @@ def render_train() -> None:
                         st.toast(f"✅ プリセット「{_editing}」を更新しました", icon="💾")
                         st.rerun()
                 with _ec2:
-                    if st.button("✕ キャンセル", key="pe_cancel", use_container_width=True):
+                    if st.button("✕ キャンセル", key="pe_cancel", width="stretch"):
                         st.session_state.pop("preset_editing_name", None)
                         st.session_state.pop("preset_editing_vals", None)
                         st.rerun()
@@ -756,7 +767,7 @@ def render_train() -> None:
             with _apc2:
                 _ap_n = st.slider("表示するパターン数", 1, 4, 3, key="ap_n")
 
-            if st.button("👁 プレビューを作る", use_container_width=True, key="ap_run"):
+            if st.button("👁 プレビューを作る", width="stretch", key="ap_run"):
                 with st.spinner("生成中…"):
                     st.session_state["ap_preview"] = build_augment_preview(
                         _ap_imgs, _ap_params, seed=int(_ap_seed), n_variants=int(_ap_n))
@@ -852,25 +863,17 @@ def render_train() -> None:
             _rs_target = _resume_cands[_rs_labels.index(_rs_sel)]
             st.caption(f"再開元: `{_rs_target['last']}`")
 
-            if st.button("⏯ この学習を再開する", type="primary", use_container_width=True,
+            if st.button("⏯ この学習を再開する", type="primary", width="stretch",
                          disabled=st.session_state.training_running, key="resume_btn"):
-                with _train_log_lock:
-                    _train_state["log"] = []
-                    _train_state["progress"] = 0
-                    _train_state["running"] = True
-                    _train_state["error"] = None
-                    _train_state["model_path"] = None
-                    _train_state["metrics_history"] = []
-                    _train_state["stop_requested"] = False
-                threading.Thread(
-                    target=_train_worker,
-                    # resume=True のとき data / epochs 等は last.pt 側の設定が使われる
-                    args=(data_yaml_path, str(_rs_target["last"]), 0, 0,
-                          mlflow_project, _rs_target["run"], {"resume": True}),
-                    daemon=True,
-                ).start()
-                st.session_state.training_notified = False
-                st.rerun()
+                # resume=True のとき data / epochs 等は last.pt 側の設定が使われる
+                _ok, _why = start_training(
+                    data_yaml_path, str(_rs_target["last"]), 0, 0,
+                    mlflow_project, _rs_target["run"], {"resume": True})
+                if _ok:
+                    st.session_state.training_notified = False
+                    st.rerun()
+                else:
+                    st.warning(_why)
 
     # ── 学習ボタン ───────────────────────────────────────────────────────────
     btn_col1, btn_col2 = st.columns([2, 1])
@@ -879,7 +882,7 @@ def render_train() -> None:
             "▶ 学習開始",
             type="primary",
             disabled=st.session_state.training_running,
-            use_container_width=True,
+            width="stretch",
             key="train_start",
         )
     with btn_col2:
@@ -887,6 +890,9 @@ def render_train() -> None:
             st.markdown('<span class="badge-warn">RUNNING</span>', unsafe_allow_html=True)
         elif st.session_state.training_progress == 100:
             st.markdown('<span class="badge-ok">COMPLETED</span>', unsafe_allow_html=True)
+
+    if default_train_device() == "cpu":
+        st.caption("⚠️ GPU が見つからないため CPU で学習します（GPU より数十倍遅くなります）。")
 
     if start_btn:
         yaml_p = Path(data_yaml_path)
@@ -896,7 +902,7 @@ def render_train() -> None:
             _train_kwargs: dict = {
                 # ── 基本 ──────────────────────────────────────────────────
                 "imgsz": int(imgsz),
-                "device": 0,
+                "device": default_train_device(),
                 "workers": int(workers),
                 "nbs": int(nbs),
                 # ── 最適化 ────────────────────────────────────────────────
@@ -946,23 +952,14 @@ def render_train() -> None:
             if save_period > 0:
                 _train_kwargs["save_period"] = int(save_period)
 
-            with _train_log_lock:
-                _train_state["log"] = []
-                _train_state["progress"] = 0
-                _train_state["running"] = True
-                _train_state["error"] = None
-                _train_state["model_path"] = None
-                _train_state["metrics_history"] = []
-
-            t = threading.Thread(
-                target=_train_worker,
-                args=(data_yaml_path, model_name, epochs, batch_size,
-                      mlflow_project, run_name, _train_kwargs),
-                daemon=True,
-            )
-            t.start()
-            st.session_state.training_notified = False   # 新規学習開始 → 通知リセット
-            st.rerun()
+            _ok, _why = start_training(
+                data_yaml_path, model_name, epochs, batch_size,
+                mlflow_project, run_name, _train_kwargs)
+            if _ok:
+                st.session_state.training_notified = False   # 新規学習開始 → 通知リセット
+                st.rerun()
+            else:
+                st.warning(_why)
 
 
     # --- 既存モデル選択 ---
@@ -1013,7 +1010,7 @@ def render_train() -> None:
                                    "duration_min"]
                                   if c in _df_mf.columns]
                     st.markdown(f"**{len(_mf_runs)} 件の学習**")
-                    st.dataframe(_df_mf[_show_cols], use_container_width=True,
+                    st.dataframe(_df_mf[_show_cols], width="stretch",
                                  hide_index=True)
 
                     _mf_pick = st.multiselect(
@@ -1058,7 +1055,7 @@ def render_train() -> None:
                             st.dataframe(
                                 _pd_mf.DataFrame(sorted(_det["params"].items()),
                                                  columns=["名前", "値"]),
-                                use_container_width=True, hide_index=True, height=240)
+                                width="stretch", hide_index=True, height=240)
                         with _dc2:
                             st.markdown("**最終メトリクス**")
                             st.dataframe(
@@ -1066,7 +1063,7 @@ def render_train() -> None:
                                     sorted((k, round(v, 5))
                                            for k, v in _det["metrics"].items()),
                                     columns=["名前", "値"]),
-                                use_container_width=True, hide_index=True, height=240)
+                                width="stretch", hide_index=True, height=240)
 
         # MLflow が使えないときでも学習経過を見られるようにする
         st.markdown("---")
@@ -1151,6 +1148,21 @@ def _tune_table(df):
 def _render_tuning(data_yaml_path: str, model_name: str) -> None:
     _st, _lock = _get_tune_shared()
     with _lock:
+        _running_now = _st["running"]
+    if _running_now:
+        # 探索中はこの欄だけを定期的に描き直す（画面全体を再実行しない）
+        st.fragment(_render_tuning_live, run_every=3.0)()
+        return
+    _render_tuning_body(data_yaml_path, model_name)
+
+
+def _render_tuning_live() -> None:
+    _render_tuning_body("", "", live=True)
+
+
+def _render_tuning_body(data_yaml_path: str, model_name: str, live: bool = False) -> None:
+    _st, _lock = _get_tune_shared()
+    with _lock:
         _running = _st["running"]
         _iter, _total = _st["iteration"], _st["total"]
         _best_fit = _st["best_fitness"]
@@ -1164,6 +1176,10 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
         _cur_ep, _cur_tot = _st["current_epoch"], _st["current_total_epochs"]
         _cur_metrics = _st["current_metrics"]
         _iter_started = _st["iter_started_at"]
+
+    if live and not _running:
+        # 終わった。結果や設定の欄を出すため、画面全体を描き直す
+        st.rerun()
 
     # ── 実行中 ──────────────────────────────────────────────────────
     if _running:
@@ -1198,9 +1214,9 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
         _tc1, _tc2 = st.columns([1, 3])
         with _tc1:
             if st.button("⏹ 探索を停止", key="tune_stop", disabled=_stop_req,
-                         use_container_width=True):
+                         width="stretch"):
                 request_stop_tuning()
-                st.rerun()
+                st.rerun(scope="fragment" if live else "app")
         with _tc2:
             if _stop_req:
                 st.warning("⏳ いま回している学習が終わり次第、停止します。")
@@ -1231,13 +1247,15 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
                     st.line_chart(_df.set_index("iteration")["fitness"])
                 with _c2:
                     st.markdown("**これまでの成績**")
-                    st.dataframe(_tune_table(_df), use_container_width=True,
+                    st.dataframe(_tune_table(_df), width="stretch",
                                  hide_index=True, height=240)
 
         with st.expander("📜 ログ", expanded=not bool(_cur_params)):
             st.markdown(f'<div class="log-area">{"<br>".join(_log[-40:])}</div>',
                         unsafe_allow_html=True)
-        request_rerun_poll()
+        if not live:
+            # 描画の途中で探索が始まった（fragment の外）ときだけ、全体で追う
+            request_rerun_poll()
         return
 
     if _err:
@@ -1378,14 +1396,14 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
         st.warning("先に ② でデータセットを選んでください。")
 
     if st.button(f"🔬 探索を始める（{int(_iters)} 回）", type="primary",
-                 use_container_width=True, key="tune_start",
+                 width="stretch", key="tune_start",
                  disabled=not _ready or not _space):
         if start_tuning(data_yaml_path, model_name, int(_iters), int(_tepochs),
                         _space, _tune_name.strip(), extra=_cond,
                         method=_method, pinned=_pinned):
             st.rerun()
         else:
-            st.warning("すでに探索が動いています。")
+            st.warning("すでに探索か学習が動いています。終わってから始めてください。")
 
     # ── 過去の結果 ──────────────────────────────────────────────────
     _dirs = find_tune_dirs()
@@ -1425,7 +1443,7 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
             st.markdown('<div style="margin-top:28px"></div>',
                         unsafe_allow_html=True)
             if st.button("📋 この設定をプリセットに保存", key="tune_save_preset",
-                         use_container_width=True,
+                         width="stretch",
                          disabled=not _pname.strip()):
                 _ups = _load_user_presets()
                 _ups[_pname.strip()] = params_to_preset(
@@ -1443,4 +1461,4 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
         )
 
     with st.expander(f"全 {len(_rows)} 回の記録"):
-        st.dataframe(_dfr, use_container_width=True, hide_index=True)
+        st.dataframe(_dfr, width="stretch", hide_index=True)

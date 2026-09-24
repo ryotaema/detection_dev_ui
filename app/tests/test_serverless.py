@@ -400,3 +400,13 @@ def test_重みが無ければエラーを返す(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path)
     saved, err = cm.import_model_weights("run3", [])
     assert saved == [] and err
+
+
+@pytest.mark.parametrize("task,expected", [
+    ("detect", "rectangle"), ("segment", "polygon"), ("obb", "polygon"),
+    ("classify", "tag"), ("pose", "rectangle")])
+def test_タスクごとにラベル種別をそろえる(fn_dir: Path, task, expected):
+    """ハンドラが返す形と宣言がずれると CVAT が結果を捨てる"""
+    out, _ = sl.generate_function_files("m", "run1", ["a"], task=task)
+    spec = json.loads(_load(out / "function.yaml")["metadata"]["annotations"]["spec"])
+    assert spec[0]["type"] == expected

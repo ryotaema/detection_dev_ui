@@ -15,6 +15,182 @@ from .config import IMG_EXTS
 from .provenance import record_dataset_provenance
 
 
+# ---------------------------------------------------------------------------
+# train / val の分け方
+#
+#   画像を 1 枚ずつランダムに振ると、動画から切り出した連続フレームが
+#   train と val の両方に入る。ほぼ同じ画像で検証することになり、
+#   mAP が実力より高く出る（本番で急に当たらなくなる典型）。
+#   まとまり（フォルダ・タスク・連続フレームの塊）ごとに振れるようにする。
+# ---------------------------------------------------------------------------
+SPLIT_MODES = {
+    "image":  "画像ごとにランダム",
+    "folder": "フォルダ・タスクごと（カメラ・撮影日・動画ごとにフォルダが分かれているとき）",
+    "block":  "連続フレームの塊ごと（1 本の動画から切り出したとき）",
+}
+DEFAULT_BLOCK_SIZE = 50
+
+
+def split_group_of(name: str, mode: str, index: int = 0,
+                   block_size: int = DEFAULT_BLOCK_SIZE) -> str:
+    """画像がどのまとまりに属するかを返す。
+
+    name は CVAT の画像名（cam1/0001.jpg）か、生成後の出力名（task_1__cam1__0001）。
+    index は並び順（block のときだけ使う）。
+    """
+    if mode == "folder":
+        n = str(name).replace("\\", "/")
+        if "/" in n:
+            return n.rsplit("/", 1)[0]
+        stem = Path(n).stem
+        return stem.rsplit("__", 1)[0] if "__" in stem else ""
+    if mode == "block":
+        # 別フォルダ・別タスクの塊は混ぜない
+        return f"{split_group_of(name, 'folder')}#{index // max(1, int(block_size))}"
+    return f"#{index}"
+
+
+def split_train_val(items: list, groups: list[str], val_ratio: float,
+                    seed: int = 0) -> tuple[list, list, str]:
+    """まとまりを崩さずに train / val へ分ける。(train, val, 注意書き) を返す。
+
+    シードを固定するので、同じ入力なら何度やっても同じ分け方になる。
+    """
+    import random
+
+    order: dict[str, list[int]] = {}
+    for i, g in enumerate(groups):
+        order.setdefault(g, []).append(i)
+    keys = sorted(order)
+    random.Random(seed).shuffle(keys)
+
+    n = len(items)
+    target = n * val_ratio
+    note = ""
+    if len(keys) < 2:
+        # まとまりが 1 つしかないと分けられないので、画像ごとに分ける
+        note = ("まとまりが 1 つしか無いため、画像ごとに分けました。"
+                "連続フレームなら「連続フレームの塊ごと」を選んでください。")
+        keys = [f"#{i}" for i in range(n)]
+        order = {k: [i] for i, k in enumerate(keys)}
+        random.Random(seed).shuffle(keys)
+
+    val_idx: list[int] = []
+    for k in keys[:-1]:                      # 最後の 1 つは必ず train に残す
+        if len(val_idx) >= target and val_idx:
+            break
+        val_idx.extend(order[k])
+    val_set = set(val_idx)
+    train = [items[i] for i in range(n) if i not in val_set]
+    val = [items[i] for i in range(n) if i in val_set]
+    if not note and n and abs(len(val) / n - val_ratio) > 0.1:
+        note = (f"まとまりの大きさがそろっていないため、val は {len(val) / n:.0%} になりました"
+                f"（指定 {val_ratio:.0%}）。")
+    return train, val, note
+
+
+def _xml_prefix(xml_path: Path, raw_dir: Path) -> str:
+    """複数の XML をまとめるとき、出力名の頭に付ける目印（task_12 など）"""
+    try:
+        rel = Path(xml_path).resolve().relative_to(Path(raw_dir).resolve())
+        return rel.parts[0] if len(rel.parts) > 1 else rel.stem
+    except ValueError:
+        return Path(xml_path).parent.name
+
+
+def _place_image(src: Path, dst: Path) -> None:
+    """画像はシンボリックリンクで置く（張れなければコピー）"""
+    if dst.exists() or dst.is_symlink():
+        return
+    try:
+        dst.symlink_to(src.resolve())
+    except Exception:
+        import shutil
+        shutil.copy2(src, dst)
+
+
+def _image_lines(img_elem, task_type: str, label2id: dict, w: int, h: int,
+                 kpt_names: Optional[list[str]] = None) -> list[str]:
+    """画像 1 枚ぶんの YOLO ラベル行を作る"""
+    from .cvat_convert import (fmt_bbox, fmt_polygon, fmt_pose, obb_corners,
+                               parse_points, shape_polygon, skeleton_keypoints)
+
+    lines: list[str] = []
+    for el in img_elem:
+        lbl = el.get("label", "")
+        if lbl not in label2id:
+            continue
+        cid = label2id[lbl]
+
+        if task_type == "detect":
+            # 矩形として描かれたもの（回転付き box・楕円）から作る。
+            # polygon / mask は segment 用に描かれることが多く、
+            # 同じ物体に box も付いていると二重になるため使わない。
+            if el.tag in ("box", "ellipse"):
+                s = fmt_bbox(shape_polygon(el), w, h)
+                if s:
+                    lines.append(f"{cid} {s}")
+
+        elif task_type == "segment":
+            if el.tag in ("polygon", "box", "ellipse", "mask"):
+                s = fmt_polygon(shape_polygon(el), w, h)
+                if s:
+                    lines.append(f"{cid} {s}")
+
+        elif task_type == "obb":
+            if el.tag in ("box", "polygon", "ellipse", "mask"):
+                s = fmt_polygon(obb_corners(shape_polygon(el)), w, h)
+                if s:
+                    lines.append(f"{cid} {s}")
+
+        elif task_type == "pose":
+            if el.tag == "skeleton":
+                kpts = skeleton_keypoints(el, kpt_names or [])
+            elif el.tag == "points":
+                # skeleton を使わず、1 つの points に全キーポイントを打った場合
+                pts = parse_points(el.get("points", ""))
+                if kpt_names and len(pts) != len(kpt_names):
+                    continue
+                kpts = [(x, y, 2) for x, y in pts]
+            else:
+                continue
+            s = fmt_pose(kpts, w, h)
+            if s:
+                lines.append(f"{cid} {s}")
+    return lines
+
+
+def _pose_keypoint_names(xml_info: dict, selected_labels: list[str],
+                         roots: list) -> tuple[Optional[list[str]], str]:
+    """pose のキーポイント名の並びを決める。(名前, エラー文) を返す。
+
+    YOLO の pose は 1 データセットにつき kpt_shape が 1 つなので、
+    選んだラベルのキーポイント数がそろっていないと作れない。
+    """
+    skeletons = xml_info.get("skeletons") or {}
+    found: dict[str, list[str]] = {}
+    for lbl in selected_labels:
+        if skeletons.get(lbl):
+            found[lbl] = list(skeletons[lbl])
+    if not found:
+        # skeleton ではなく points で打った場合は、点の数を名前代わりにする
+        for root in roots:
+            for el in root.iter("points"):
+                lbl = el.get("label", "")
+                if lbl in selected_labels and lbl not in found:
+                    n = len(el.get("points", "").split(";"))
+                    found[lbl] = [f"kp{i}" for i in range(n)]
+    if not found:
+        return None, ("選択したラベルにキーポイント（skeleton / points）がありません。"
+                      "pose を作るには CVAT で skeleton ラベルを使ってください。")
+    counts = {k: len(v) for k, v in found.items()}
+    if len(set(counts.values())) > 1:
+        detail = "、".join(f"{k}={v}点" for k, v in counts.items())
+        return None, (f"選択したラベルでキーポイントの数が違います（{detail}）。"
+                      "YOLO の pose は 1 データセットで点の数をそろえる必要があります。")
+    return next(iter(found.values())), ""
+
+
 def generate_yolo_dataset(
     raw_dir: Path,
     xml_info: dict,
@@ -23,97 +199,34 @@ def generate_yolo_dataset(
     out_dir: Path,
     val_ratio: float = 0.2,
     cvat_tasks: Optional[list[dict]] = None,
+    seed: int = 0,
+    split_mode: str = "image",
+    block_size: int = DEFAULT_BLOCK_SIZE,
+    include_background: bool = False,
 ) -> Optional[Path]:
     """選択ラベル × タスク種別で YOLO 形式データセットを生成する。
 
-    - 画像は raw_dir 内から探してシンボリックリンクを張る（大容量でもコピー不要）
-    - train/val は annotated サンプルを 80/20 でランダム分割
+    - train / val は split_mode のまとまりごとに、seed で決まった分け方をする
+    - include_background=True なら、対象が写っていない画像も空ラベルで入れる
+      （誤検出を減らせる。ただしアノテーションし終えた画像だけのときに使うこと）
+
+    - raw_dir 以下の XML をすべて読む（複数タスクをまとめて取り込めるように）
+    - 画像はシンボリックリンクで置く（大容量でもコピー不要）
+    - 出力名は重ならないように振り直す（別フォルダ・別タスクの同名画像を潰さない）
     - data.yaml は絶対パス + names リスト形式で生成
     """
     import xml.etree.ElementTree as ET
-    import random
     import yaml
 
+    from .cvat_convert import ImageLocator, NameAllocator, infer_flip_idx
+
+    raw_dir = Path(raw_dir)
     label2id = {lbl: i for i, lbl in enumerate(selected_labels)}
-    xml_path = Path(xml_info["xml_path"])
-
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-
-    # 画像ディレクトリを探す（ZIPの構造に依存するため複数候補）
-    img_roots: list[Path] = []
-    for d in raw_dir.rglob("*"):
-        if d.is_dir() and d.name in ("images", "train", "val"):
-            img_roots.append(d)
-    if not img_roots:
-        img_roots = [raw_dir]
-
-    def _find_image(name: str) -> Optional[Path]:
-        for base in img_roots:
-            p = base / name
-            if p.exists():
-                return p
-        for p in raw_dir.rglob(Path(name).name):
-            if p.is_file():
-                return p
-        return None
-
-    def _box_to_detect(box, w: int, h: int) -> str:
-        xtl, ytl = float(box.get("xtl", 0)), float(box.get("ytl", 0))
-        xbr, ybr = float(box.get("xbr", 0)), float(box.get("ybr", 0))
-        cx = (xtl + xbr) / 2 / w
-        cy = (ytl + ybr) / 2 / h
-        bw = (xbr - xtl) / w
-        bh = (ybr - ytl) / h
-        return f"{cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
-
-    def _box_to_obb(box, w: int, h: int) -> str:
-        """CVAT の box を OBB 形式（4隅の正規化座標）に変換する。
-        CVAT の box は rotation 属性（度・中心周り）を持つことがある。
-        """
-        import math
-
-        xtl, ytl = float(box.get("xtl", 0)), float(box.get("ytl", 0))
-        xbr, ybr = float(box.get("xbr", 0)), float(box.get("ybr", 0))
-        rot = float(box.get("rotation", 0) or 0)
-        corners = [(xtl, ytl), (xbr, ytl), (xbr, ybr), (xtl, ybr)]
-        if rot:
-            cx, cy = (xtl + xbr) / 2, (ytl + ybr) / 2
-            a = math.radians(rot)
-            ca, sa = math.cos(a), math.sin(a)
-            corners = [
-                (cx + (x - cx) * ca - (y - cy) * sa,
-                 cy + (x - cx) * sa + (y - cy) * ca)
-                for x, y in corners
-            ]
-        return " ".join(f"{x / w:.6f} {y / h:.6f}" for x, y in corners)
-
-    def _polygon_to_obb(polygon, w: int, h: int) -> Optional[str]:
-        """4点ポリゴンをそのまま OBB として使う（点数が違う場合は外接矩形で代用）"""
-        pts = []
-        for pt in polygon.get("points", "").split(";"):
-            pt = pt.strip()
-            if "," in pt:
-                x, y = pt.split(",")
-                pts.append((float(x), float(y)))
-        if len(pts) == 4:
-            return " ".join(f"{x / w:.6f} {y / h:.6f}" for x, y in pts)
-        if len(pts) >= 3:
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
-            return " ".join(f"{x / w:.6f} {y / h:.6f}"
-                            for x, y in [(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
-        return None
-
-    def _polygon_to_segment(polygon, w: int, h: int) -> str:
-        pts = []
-        for pt in polygon.get("points", "").split(";"):
-            pt = pt.strip()
-            if "," in pt:
-                x, y = pt.split(",")
-                pts.append(f"{float(x)/w:.6f} {float(y)/h:.6f}")
-        return " ".join(pts)
+    xml_paths = [Path(p) for p in (xml_info.get("xml_paths") or [xml_info["xml_path"]])]
+    multi = len(xml_paths) > 1
+    roots = [(xp, ET.parse(xp).getroot()) for xp in xml_paths]
+    names = NameAllocator()
+    missing = 0
 
     # ── 画像分類 (classify) ────────────────────────────────────────────────
     # YOLO の分類はラベル txt ではなく「クラス名ディレクトリ」でデータを表現する:
@@ -121,14 +234,23 @@ def generate_yolo_dataset(
     # 元データは CVAT の tag（画像単位のラベル）。
     if task_type == "classify":
         cls_samples: list[dict] = []
-        for img_elem in root.findall("image"):
-            img_name = img_elem.get("name", "")
-            tags = [t.get("label", "") for t in img_elem.findall("tag")]
-            tags = [t for t in tags if t in label2id]
-            if not tags:
-                continue
-            # 分類は1画像1クラス。複数付いている場合は最初のものを採用する
-            cls_samples.append({"name": img_name, "cls": tags[0]})
+        for xp, root in roots:
+            loc = ImageLocator(xp)
+            prefix = _xml_prefix(xp, raw_dir) if multi else ""
+            for img_elem in root.iter("image"):
+                img_name = img_elem.get("name", "")
+                tags = [t.get("label", "") for t in img_elem.findall("tag")]
+                tags = [t for t in tags if t in label2id]
+                if not tags:
+                    continue
+                src = loc.find(img_name, img_elem.get("subset", ""))
+                if src is None:
+                    missing += 1
+                    continue
+                # 分類は1画像1クラス。複数付いている場合は最初のものを採用する
+                cls_samples.append({"src": src, "cls": tags[0],
+                                    "stem": names.allocate(img_name, prefix),
+                                    "group_name": f"{prefix}/{img_name}" if prefix else img_name})
 
         if not cls_samples:
             st.error(
@@ -137,27 +259,26 @@ def generate_yolo_dataset(
             )
             return None
 
-        random.shuffle(cls_samples)
-        split = max(1, int(len(cls_samples) * (1 - val_ratio)))
-        cls_splits = {"train": cls_samples[:split], "val": cls_samples[split:]}
+        _tr, _va, split_note = split_train_val(
+            cls_samples,
+            [split_group_of(c["group_name"], split_mode, i, block_size)
+             for i, c in enumerate(cls_samples)],
+            val_ratio, seed)
+        cls_splits = {"train": _tr, "val": _va}
+        if split_note:
+            st.info(split_note)
 
         used_classes: list[str] = []
         for sp, sp_samples in cls_splits.items():
             for s in sp_samples:
-                img_src = _find_image(s["name"])
-                if img_src is None:
-                    continue
                 dst_dir = out_dir / sp / s["cls"]
                 dst_dir.mkdir(parents=True, exist_ok=True)
-                img_dst = dst_dir / img_src.name
-                if not img_dst.exists():
-                    try:
-                        img_dst.symlink_to(img_src.resolve())
-                    except Exception:
-                        import shutil
-                        shutil.copy2(img_src, img_dst)
+                _place_image(s["src"], dst_dir / f"{s['stem']}{s['src'].suffix}")
                 if s["cls"] not in used_classes:
                     used_classes.append(s["cls"])
+
+        if missing:
+            st.warning(f"画像が見つからなかったため {missing} 枚をスキップしました。")
 
         # 学習時は data=<このディレクトリ> を渡す。data.yaml は
         # 「このUIがデータセットとして認識するため」のメタ情報として置く。
@@ -174,78 +295,53 @@ def generate_yolo_dataset(
         record_dataset_provenance(
             out_dir, source="cvat", task_type=task_type,
             labels=sorted(used_classes), cvat_tasks=cvat_tasks,
-            extra={"val_ratio": val_ratio, "xml_path": str(xml_path)},
+            extra={"val_ratio": val_ratio, "seed": seed, "split_mode": split_mode,
+                   "xml_path": [str(p) for p in xml_paths] if multi else str(xml_paths[0])},
         )
         return out_dir
 
+    kpt_names: Optional[list[str]] = None
+    if task_type == "pose":
+        kpt_names, err = _pose_keypoint_names(xml_info, selected_labels,
+                                              [r for _, r in roots])
+        if kpt_names is None:
+            st.error(err)
+            return None
+
     samples: list[dict] = []
-    for img_elem in root.findall("image"):
-        img_name = img_elem.get("name", "")
-        w = int(img_elem.get("width", 1))
-        h = int(img_elem.get("height", 1))
-        lines: list[str] = []
+    for xp, root in roots:
+        loc = ImageLocator(xp)
+        prefix = _xml_prefix(xp, raw_dir) if multi else ""
+        for img_elem in root.iter("image"):
+            img_name = img_elem.get("name", "")
+            w = int(float(img_elem.get("width", 1)))
+            h = int(float(img_elem.get("height", 1)))
+            lines = _image_lines(img_elem, task_type, label2id, w, h, kpt_names)
+            if not lines and not include_background:
+                continue
+            src = loc.find(img_name, img_elem.get("subset", ""))
+            if src is None:
+                missing += 1
+                continue
+            samples.append({"src": src, "lines": lines,
+                            "stem": names.allocate(img_name, prefix),
+                            "group_name": f"{prefix}/{img_name}" if prefix else img_name})
 
+    if not any(smp["lines"] for smp in samples):
+        hint = ""
         if task_type == "detect":
-            for box in img_elem.findall("box"):
-                lbl = box.get("label", "")
-                if lbl not in label2id:
-                    continue
-                lines.append(f"{label2id[lbl]} {_box_to_detect(box, w, h)}")
-
-        elif task_type == "segment":
-            for polygon in img_elem.findall("polygon"):
-                lbl = polygon.get("label", "")
-                if lbl not in label2id:
-                    continue
-                seg = _polygon_to_segment(polygon, w, h)
-                if seg:
-                    lines.append(f"{label2id[lbl]} {seg}")
-            for box in img_elem.findall("box"):
-                lbl = box.get("label", "")
-                if lbl not in label2id:
-                    continue
-                xtl, ytl = float(box.get("xtl", 0)), float(box.get("ytl", 0))
-                xbr, ybr = float(box.get("xbr", 0)), float(box.get("ybr", 0))
-                pts = " ".join([
-                    f"{xtl/w:.6f} {ytl/h:.6f}",
-                    f"{xbr/w:.6f} {ytl/h:.6f}",
-                    f"{xbr/w:.6f} {ybr/h:.6f}",
-                    f"{xtl/w:.6f} {ybr/h:.6f}",
-                ])
-                lines.append(f"{label2id[lbl]} {pts}")
-
-        elif task_type == "obb":
-            # 回転BBOX。CVAT の回転付き box と 4点ポリゴンの両方から作れる
-            for box in img_elem.findall("box"):
-                lbl = box.get("label", "")
-                if lbl not in label2id:
-                    continue
-                lines.append(f"{label2id[lbl]} {_box_to_obb(box, w, h)}")
-            for polygon in img_elem.findall("polygon"):
-                lbl = polygon.get("label", "")
-                if lbl not in label2id:
-                    continue
-                obb = _polygon_to_obb(polygon, w, h)
-                if obb:
-                    lines.append(f"{label2id[lbl]} {obb}")
-
-        elif task_type == "pose":
-            for box in img_elem.findall("box"):
-                lbl = box.get("label", "")
-                if lbl not in label2id:
-                    continue
-                lines.append(f"{label2id[lbl]} {_box_to_detect(box, w, h)}")
-
-        if lines:
-            samples.append({"name": img_name, "lines": lines})
-
-    if not samples:
-        st.error("選択したラベルにマッチするアノテーションがありません")
+            hint = "（detect は矩形・楕円から作ります。ポリゴンやマスクで描いた場合は segment を選んでください）"
+        st.error("選択したラベルにマッチするアノテーションがありません" + hint)
         return None
 
-    random.shuffle(samples)
-    split = max(1, int(len(samples) * (1 - val_ratio)))
-    splits = {"train": samples[:split], "val": samples[split:]}
+    _tr, _va, split_note = split_train_val(
+        samples,
+        [split_group_of(smp["group_name"], split_mode, i, block_size)
+         for i, smp in enumerate(samples)],
+        val_ratio, seed)
+    splits = {"train": _tr, "val": _va}
+    if split_note:
+        st.info(split_note)
 
     for sp in ("train", "val"):
         (out_dir / "images" / sp).mkdir(parents=True, exist_ok=True)
@@ -253,20 +349,13 @@ def generate_yolo_dataset(
 
     for sp, sp_samples in splits.items():
         for s in sp_samples:
-            img_src = _find_image(s["name"])
-            if img_src is None:
-                continue
-            stem = Path(s["name"]).stem
-            img_dst = out_dir / "images" / sp / img_src.name
-            lbl_dst = out_dir / "labels" / sp / f"{stem}.txt"
-            if not img_dst.exists():
-                try:
-                    img_dst.symlink_to(img_src.resolve())
-                except Exception:
-                    import shutil
-                    shutil.copy2(img_src, img_dst)
-            with open(lbl_dst, "w") as f:
-                f.write("\n".join(s["lines"]))
+            _place_image(s["src"], out_dir / "images" / sp / f"{s['stem']}{s['src'].suffix}")
+            with open(out_dir / "labels" / sp / f"{s['stem']}.txt", "w") as f:
+                # 背景画像は空のラベル（「何も写っていない」が正解）
+                f.write("\n".join(s["lines"]) + ("\n" if s["lines"] else ""))
+
+    if missing:
+        st.warning(f"画像が見つからなかったため {missing} 枚をスキップしました。")
 
     cfg = {
         "path": str(out_dir.resolve()),
@@ -276,15 +365,25 @@ def generate_yolo_dataset(
         "nc": len(selected_labels),
         "names": selected_labels,
     }
+    if task_type == "pose":
+        # pose は kpt_shape が無いと学習できない
+        cfg["kpt_shape"] = [len(kpt_names), 3]
+        cfg["kpt_names"] = {i: list(kpt_names) for i in range(len(selected_labels))}
+        flip = infer_flip_idx(kpt_names)
+        if flip is not None:
+            cfg["flip_idx"] = flip
     with open(out_dir / "data.yaml", "w") as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 
     record_dataset_provenance(
         out_dir, source="cvat", task_type=task_type,
         labels=selected_labels, cvat_tasks=cvat_tasks,
-        extra={"val_ratio": val_ratio, "xml_path": str(xml_path)},
+        extra={"val_ratio": val_ratio, "seed": seed, "split_mode": split_mode,
+               "background_images": sum(1 for smp in samples if not smp["lines"]),
+               "xml_path": [str(p) for p in xml_paths] if multi else str(xml_paths[0])},
     )
     return out_dir
+
 
 
 def check_dataset_quality(dataset_dir: Path, tiny_area: float = 0.0005) -> dict:
@@ -506,8 +605,12 @@ def resplit_dataset(
     dataset_dir: Path,
     val_ratio: float = 0.2,
     seed: int = 0,
+    split_mode: str = "image",
+    block_size: int = DEFAULT_BLOCK_SIZE,
 ) -> dict:
     """既存データセットの train / val を混ぜ直して分割し直す。
+
+    split_mode でまとまりごとに分けられる（SPLIT_MODES を参照）。
 
     生成時に決めた比率のままでは「val が偏っていて評価が信用できない」ときに
     手が出せないため。画像とラベルを対で動かす。
@@ -532,15 +635,34 @@ def resplit_dataset(
     task = dataset_task_type(str(yaml_path)) if yaml_path.exists() else "detect"
     res["task"] = task
 
+    def _taken(p: Path) -> bool:
+        return p.exists() or p.is_symlink()
+
+    def _free_stem(stem: str, suffix: str, img_dir: Path,
+                   lbl_dir: Optional[Path] = None) -> str:
+        """移動先で使われていない名前を返す。
+
+        train と val に同じ名前（0.png など）があると、移した先の同名ファイルを
+        上書きして**画像が消えていた**。重なるときは _1, _2 ... を付ける。
+        detect などはラベルも同じ名前で動かすので、両方が空いている名前にする。
+        """
+        cand, i = stem, 1
+        while _taken(img_dir / f"{cand}{suffix}") or (
+                lbl_dir is not None and _taken(lbl_dir / f"{cand}.txt")):
+            cand = f"{stem}_{i}"
+            i += 1
+        return cand
+
     def _move(src: Path, dst: Path) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.resolve() == dst.resolve():
+        if src.absolute() == dst.absolute():
             return
+        if _taken(dst):
+            # 呼び出し側で空いている名前を選んでいるので、ここに来たら不具合
+            raise FileExistsError(f"移動先が既にあります: {dst}")
         # シンボリックリンクを壊さないよう、リンク自体を張り直す
         if src.is_symlink():
             target = os.readlink(src)
-            if dst.exists() or dst.is_symlink():
-                dst.unlink()
             os.symlink(target, dst)
             src.unlink()
         else:
@@ -557,21 +679,35 @@ def resplit_dataset(
                 for cdir in sp_dir.iterdir():
                     if not cdir.is_dir():
                         continue
-                    per_class.setdefault(cdir.name, []).extend(
-                        p for p in cdir.iterdir()
-                        if p.is_file() and p.suffix.lower() in IMG_EXTS
-                    )
+                    # 並びはファイルシステム任せにしない（同じ seed で同じ結果にするため）
+                    per_class.setdefault(cdir.name, []).extend(sorted(
+                        (p for p in cdir.iterdir()
+                         if p.is_file() and p.suffix.lower() in IMG_EXTS),
+                        key=lambda p: (p.parent.parent.name, p.name)))
             if not per_class:
                 res["error"] = "画像が見つかりません"
                 return res
 
             for cname, files in per_class.items():
-                rng.shuffle(files)
-                n_val = max(1, int(len(files) * val_ratio)) if len(files) > 1 else 0
-                for i, f in enumerate(files):
-                    sp = "val" if i < n_val else "train"
-                    dst = ds / sp / cname / f.name
-                    if f.parent != dst.parent:
+                if split_mode == "image":
+                    rng.shuffle(files)
+                    n_val = max(1, int(len(files) * val_ratio)) if len(files) > 1 else 0
+                    val_set = set(files[:n_val])
+                else:
+                    files.sort(key=lambda p: p.name)
+                    _, _va, note = split_train_val(
+                        files,
+                        [split_group_of(f.name, split_mode, i, block_size)
+                         for i, f in enumerate(files)],
+                        val_ratio, seed)
+                    val_set = set(_va)
+                    if note:
+                        res.setdefault("notes", []).append(f"{cname}: {note}")
+                for f in files:
+                    sp = "val" if f in val_set else "train"
+                    dst_dir = ds / sp / cname
+                    if f.parent != dst_dir:
+                        dst = dst_dir / f"{_free_stem(f.stem, f.suffix, dst_dir)}{f.suffix}"
                         _move(f, dst)
                         res["moved"] += 1
         else:
@@ -595,18 +731,31 @@ def resplit_dataset(
                 res["error"] = "画像が見つかりません"
                 return res
 
-            rng.shuffle(samples)
-            n_val = max(1, int(len(samples) * val_ratio)) if len(samples) > 1 else 0
-            for i, (img, lbl) in enumerate(samples):
-                sp = "val" if i < n_val else "train"
-                img_dst = img_root / sp / img.name
-                if img.parent != img_dst.parent:
-                    _move(img, img_dst)
-                    res["moved"] += 1
+            if split_mode == "image":
+                # 以前と同じ分け方（同じ seed なら同じ結果になるように保つ）
+                rng.shuffle(samples)
+                n_val = max(1, int(len(samples) * val_ratio)) if len(samples) > 1 else 0
+                val_set = {img for img, _ in samples[:n_val]}
+            else:
+                samples.sort(key=lambda t: t[0].name)
+                _, _va, note = split_train_val(
+                    samples,
+                    [split_group_of(img.name, split_mode, i, block_size)
+                     for i, (img, _) in enumerate(samples)],
+                    val_ratio, seed)
+                val_set = {img for img, _ in _va}
+                if note:
+                    res.setdefault("notes", []).append(note)
+            for img, lbl in samples:
+                sp = "val" if img in val_set else "train"
+                if img.parent == img_root / sp:
+                    continue
+                # 画像とラベルは同じ名前のまま対で動かす
+                stem = _free_stem(img.stem, img.suffix, img_root / sp, lbl_root / sp)
+                _move(img, img_root / sp / f"{stem}{img.suffix}")
+                res["moved"] += 1
                 if lbl is not None:
-                    lbl_dst = lbl_root / sp / lbl.name
-                    if lbl.parent != lbl_dst.parent:
-                        _move(lbl, lbl_dst)
+                    _move(lbl, lbl_root / sp / f"{stem}.txt")
 
         res["after"] = dataset_split_counts(ds)
         res["ok"] = True
