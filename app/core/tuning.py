@@ -646,15 +646,21 @@ def start_tuning(data_yaml: str, base_model: str, iterations: int, epochs: int,
     """探索をバックグラウンドで始める。既に走っていれば何もしない。"""
     import threading
 
-    from .state import _get_tune_shared
+    from .state import _JOB_START_LOCK, _get_train_shared, _get_tune_shared
 
     state, lock = _get_tune_shared()
-    with lock:
-        if state["running"]:
-            return False
-        state["log"] = []
-        state["running"] = True
-        state["stop_requested"] = False
+    train_state, train_lock = _get_train_shared()
+    with _JOB_START_LOCK:
+        # 学習と同じ GPU を奪い合うので、学習中は始めない
+        with train_lock:
+            if train_state["running"]:
+                return False
+        with lock:
+            if state["running"]:
+                return False
+            state["log"] = []
+            state["running"] = True
+            state["stop_requested"] = False
 
     threading.Thread(
         target=_tune_worker,

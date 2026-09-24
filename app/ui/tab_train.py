@@ -854,23 +854,15 @@ def render_train() -> None:
 
             if st.button("⏯ この学習を再開する", type="primary", use_container_width=True,
                          disabled=st.session_state.training_running, key="resume_btn"):
-                with _train_log_lock:
-                    _train_state["log"] = []
-                    _train_state["progress"] = 0
-                    _train_state["running"] = True
-                    _train_state["error"] = None
-                    _train_state["model_path"] = None
-                    _train_state["metrics_history"] = []
-                    _train_state["stop_requested"] = False
-                threading.Thread(
-                    target=_train_worker,
-                    # resume=True のとき data / epochs 等は last.pt 側の設定が使われる
-                    args=(data_yaml_path, str(_rs_target["last"]), 0, 0,
-                          mlflow_project, _rs_target["run"], {"resume": True}),
-                    daemon=True,
-                ).start()
-                st.session_state.training_notified = False
-                st.rerun()
+                # resume=True のとき data / epochs 等は last.pt 側の設定が使われる
+                _ok, _why = start_training(
+                    data_yaml_path, str(_rs_target["last"]), 0, 0,
+                    mlflow_project, _rs_target["run"], {"resume": True})
+                if _ok:
+                    st.session_state.training_notified = False
+                    st.rerun()
+                else:
+                    st.warning(_why)
 
     # ── 学習ボタン ───────────────────────────────────────────────────────────
     btn_col1, btn_col2 = st.columns([2, 1])
@@ -949,23 +941,14 @@ def render_train() -> None:
             if save_period > 0:
                 _train_kwargs["save_period"] = int(save_period)
 
-            with _train_log_lock:
-                _train_state["log"] = []
-                _train_state["progress"] = 0
-                _train_state["running"] = True
-                _train_state["error"] = None
-                _train_state["model_path"] = None
-                _train_state["metrics_history"] = []
-
-            t = threading.Thread(
-                target=_train_worker,
-                args=(data_yaml_path, model_name, epochs, batch_size,
-                      mlflow_project, run_name, _train_kwargs),
-                daemon=True,
-            )
-            t.start()
-            st.session_state.training_notified = False   # 新規学習開始 → 通知リセット
-            st.rerun()
+            _ok, _why = start_training(
+                data_yaml_path, model_name, epochs, batch_size,
+                mlflow_project, run_name, _train_kwargs)
+            if _ok:
+                st.session_state.training_notified = False   # 新規学習開始 → 通知リセット
+                st.rerun()
+            else:
+                st.warning(_why)
 
 
     # --- 既存モデル選択 ---
@@ -1388,7 +1371,7 @@ def _render_tuning(data_yaml_path: str, model_name: str) -> None:
                         method=_method, pinned=_pinned):
             st.rerun()
         else:
-            st.warning("すでに探索が動いています。")
+            st.warning("すでに探索か学習が動いています。終わってから始めてください。")
 
     # ── 過去の結果 ──────────────────────────────────────────────────
     _dirs = find_tune_dirs()
