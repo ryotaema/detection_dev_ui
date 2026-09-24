@@ -229,3 +229,36 @@ def test_Ultralyticsがposeのdata_yamlを読める(tmp_path):
     out = generate_yolo_dataset(raw, parse_cvat_xml(raw), ["person"], "pose", tmp_path / "ds")
     data = check_det_dataset(str(out / "data.yaml"))
     assert data["kpt_shape"] == [3, 3]
+
+
+# ---------------------------------------------------------------------------
+# 分割・背景画像
+# ---------------------------------------------------------------------------
+def test_フォルダごとに分けると同じカメラは片側に入る(tmp_path):
+    imgs = {f"cam{c}/{i:03d}.jpg": _box() for c in range(4) for i in range(5)}
+    raw = _write_task(tmp_path / "raw", imgs)
+    out = generate_yolo_dataset(raw, parse_cvat_xml(raw), ["car"], "detect",
+                                tmp_path / "ds", val_ratio=0.25, split_mode="folder")
+    tr = {p.stem.split("__")[0] for p in (out / "labels" / "train").iterdir()}
+    va = {p.stem.split("__")[0] for p in (out / "labels" / "val").iterdir()}
+    assert va and tr.isdisjoint(va)
+
+
+def test_同じシードなら何度作っても同じ分け方(tmp_path):
+    raw = _write_task(tmp_path / "raw", {f"{i:03d}.jpg": _box() for i in range(20)})
+    info = parse_cvat_xml(raw)
+    a = generate_yolo_dataset(raw, info, ["car"], "detect", tmp_path / "a", seed=3)
+    b = generate_yolo_dataset(raw, info, ["car"], "detect", tmp_path / "b", seed=3)
+    assert (sorted(p.name for p in (a / "labels" / "val").iterdir())
+            == sorted(p.name for p in (b / "labels" / "val").iterdir()))
+
+
+def test_背景画像は選んだときだけ空ラベルで入る(tmp_path):
+    raw = _write_task(tmp_path / "raw", {"a.jpg": _box(), "empty.jpg": ""})
+    info = parse_cvat_xml(raw)
+    no = generate_yolo_dataset(raw, info, ["car"], "detect", tmp_path / "no")
+    assert "empty" not in _labels(no)
+    yes = generate_yolo_dataset(raw, info, ["car"], "detect", tmp_path / "yes",
+                                include_background=True)
+    assert _labels(yes)["empty"] == []
+    assert len(list(yes.glob("images/*/*.jpg"))) == 2

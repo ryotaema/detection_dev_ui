@@ -264,3 +264,63 @@ def test_yolo_txt_segment_format(tmp_path: Path):
 
 def test_yolo_txt_missing_file(tmp_path: Path):
     assert _yolo_txt_to_xyxy(tmp_path / "none.txt", 10, 10, ["x"]) == []
+
+
+# ---------------------------------------------------------------------------
+# まとまりごとの分割（連続フレームが train と val に割れないように）
+# ---------------------------------------------------------------------------
+from core.dataset import split_group_of, split_train_val  # noqa: E402
+
+
+def test_まとまりの判定():
+    assert split_group_of("cam1/0001.jpg", "folder") == "cam1"
+    assert split_group_of("task_1__cam1__0001.jpg", "folder") == "task_1__cam1"
+    assert split_group_of("0001.jpg", "folder") == ""
+    assert split_group_of("cam1/0001.jpg", "block", index=120, block_size=50) == "cam1#2"
+    assert split_group_of("a.jpg", "image", index=3) != split_group_of("b.jpg", "image", index=4)
+
+
+def test_まとまりは片側にだけ入る():
+    names = [f"cam{c}/{i:04d}.jpg" for c in range(5) for i in range(20)]
+    groups = [split_group_of(n, "folder") for n in names]
+    tr, va, note = split_train_val(names, groups, 0.2, seed=0)
+    assert len(tr) + len(va) == 100 and va
+    assert {n.split("/")[0] for n in tr}.isdisjoint({n.split("/")[0] for n in va})
+    assert note == ""
+
+
+def test_同じシードなら同じ分け方になる():
+    names = [f"{i:04d}.jpg" for i in range(100)]
+    groups = [split_group_of(n, "block", i, 10) for i, n in enumerate(names)]
+    a = split_train_val(names, groups, 0.2, seed=5)
+    b = split_train_val(names, groups, 0.2, seed=5)
+    c = split_train_val(names, groups, 0.2, seed=6)
+    assert a == b and a[1] != c[1]
+    # 塊ごとに入る = val は 10 枚ずつの連続
+    assert len(a[1]) == 20
+
+
+def test_まとまりが1つなら画像ごとに分けて知らせる():
+    names = [f"{i}.jpg" for i in range(10)]
+    tr, va, note = split_train_val(names, [""] * 10, 0.2, seed=0)
+    assert len(va) == 2 and "1 つ" in note
+
+
+def test_再分割もまとまりごとにできる(tmp_path):
+    import yaml
+    ds = tmp_path / "ds"
+    for c in range(4):
+        for i in range(5):
+            img = ds / "images" / "train" / f"task_{c}__{i:04d}.png"
+            img.parent.mkdir(parents=True, exist_ok=True)
+            img.write_bytes(b"x")
+            lbl = ds / "labels" / "train" / f"task_{c}__{i:04d}.txt"
+            lbl.parent.mkdir(parents=True, exist_ok=True)
+            lbl.write_text("0 0.5 0.5 0.1 0.1\n")
+    (ds / "data.yaml").write_text(yaml.dump({"task": "detect", "names": ["a"]}))
+    r = resplit_dataset(ds, val_ratio=0.25, seed=0, split_mode="folder")
+    assert r["ok"], r
+    val = sorted(p.stem for p in (ds / "images" / "val").iterdir())
+    assert len(val) == 5 and len({v.split("__")[0] for v in val}) == 1
+    # ラベルも一緒に動いている
+    assert sorted(p.stem for p in (ds / "labels" / "val").iterdir()) == val

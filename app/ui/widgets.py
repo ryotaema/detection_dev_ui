@@ -200,3 +200,23 @@ def folder_watcher_status() -> None:
         st.caption("その場だけ動かす場合:")
         st.code("./tools/open_folder_watcher.sh", language="bash")
         st.caption("解除: `./tools/install_folder_watcher.sh --uninstall`")
+
+
+def split_mode_inputs(key: str) -> tuple[str, int]:
+    """train / val の分け方を選ぶ部品（データ取込と「分け直す」で共通）"""
+    from core.dataset import DEFAULT_BLOCK_SIZE, SPLIT_MODES
+
+    modes = list(SPLIT_MODES)
+    mode = st.radio(
+        "分け方", modes, format_func=lambda m: SPLIT_MODES[m], key=f"{key}_split_mode",
+        help="動画から切り出したフレームを 1 枚ずつ振り分けると、ほぼ同じ画像が "
+             "train と val の両方に入り、mAP が実力より高く出ます。"
+             "連続した画像はまとめて同じ側に入れてください。",
+    )
+    block = DEFAULT_BLOCK_SIZE
+    if mode == "block":
+        block = int(st.number_input(
+            "1 つの塊のフレーム数", 5, 5000, DEFAULT_BLOCK_SIZE, step=5, key=f"{key}_block",
+            help="名前順に並べて、この枚数ずつを 1 つのまとまりにします。"
+                 "被写体が入れ替わる程度の長さにしてください"))
+    return mode, block

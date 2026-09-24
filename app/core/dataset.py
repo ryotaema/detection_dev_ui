@@ -15,6 +15,80 @@ from .config import IMG_EXTS
 from .provenance import record_dataset_provenance
 
 
+# ---------------------------------------------------------------------------
+# train / val の分け方
+#
+#   画像を 1 枚ずつランダムに振ると、動画から切り出した連続フレームが
+#   train と val の両方に入る。ほぼ同じ画像で検証することになり、
+#   mAP が実力より高く出る（本番で急に当たらなくなる典型）。
+#   まとまり（フォルダ・タスク・連続フレームの塊）ごとに振れるようにする。
+# ---------------------------------------------------------------------------
+SPLIT_MODES = {
+    "image":  "画像ごとにランダム",
+    "folder": "フォルダ・タスクごと（カメラ・撮影日・動画ごとにフォルダが分かれているとき）",
+    "block":  "連続フレームの塊ごと（1 本の動画から切り出したとき）",
+}
+DEFAULT_BLOCK_SIZE = 50
+
+
+def split_group_of(name: str, mode: str, index: int = 0,
+                   block_size: int = DEFAULT_BLOCK_SIZE) -> str:
+    """画像がどのまとまりに属するかを返す。
+
+    name は CVAT の画像名（cam1/0001.jpg）か、生成後の出力名（task_1__cam1__0001）。
+    index は並び順（block のときだけ使う）。
+    """
+    if mode == "folder":
+        n = str(name).replace("\\", "/")
+        if "/" in n:
+            return n.rsplit("/", 1)[0]
+        stem = Path(n).stem
+        return stem.rsplit("__", 1)[0] if "__" in stem else ""
+    if mode == "block":
+        # 別フォルダ・別タスクの塊は混ぜない
+        return f"{split_group_of(name, 'folder')}#{index // max(1, int(block_size))}"
+    return f"#{index}"
+
+
+def split_train_val(items: list, groups: list[str], val_ratio: float,
+                    seed: int = 0) -> tuple[list, list, str]:
+    """まとまりを崩さずに train / val へ分ける。(train, val, 注意書き) を返す。
+
+    シードを固定するので、同じ入力なら何度やっても同じ分け方になる。
+    """
+    import random
+
+    order: dict[str, list[int]] = {}
+    for i, g in enumerate(groups):
+        order.setdefault(g, []).append(i)
+    keys = sorted(order)
+    random.Random(seed).shuffle(keys)
+
+    n = len(items)
+    target = n * val_ratio
+    note = ""
+    if len(keys) < 2:
+        # まとまりが 1 つしかないと分けられないので、画像ごとに分ける
+        note = ("まとまりが 1 つしか無いため、画像ごとに分けました。"
+                "連続フレームなら「連続フレームの塊ごと」を選んでください。")
+        keys = [f"#{i}" for i in range(n)]
+        order = {k: [i] for i, k in enumerate(keys)}
+        random.Random(seed).shuffle(keys)
+
+    val_idx: list[int] = []
+    for k in keys[:-1]:                      # 最後の 1 つは必ず train に残す
+        if len(val_idx) >= target and val_idx:
+            break
+        val_idx.extend(order[k])
+    val_set = set(val_idx)
+    train = [items[i] for i in range(n) if i not in val_set]
+    val = [items[i] for i in range(n) if i in val_set]
+    if not note and n and abs(len(val) / n - val_ratio) > 0.1:
+        note = (f"まとまりの大きさがそろっていないため、val は {len(val) / n:.0%} になりました"
+                f"（指定 {val_ratio:.0%}）。")
+    return train, val, note
+
+
 def _xml_prefix(xml_path: Path, raw_dir: Path) -> str:
     """複数の XML をまとめるとき、出力名の頭に付ける目印（task_12 など）"""
     try:
@@ -125,8 +199,16 @@ def generate_yolo_dataset(
     out_dir: Path,
     val_ratio: float = 0.2,
     cvat_tasks: Optional[list[dict]] = None,
+    seed: int = 0,
+    split_mode: str = "image",
+    block_size: int = DEFAULT_BLOCK_SIZE,
+    include_background: bool = False,
 ) -> Optional[Path]:
     """選択ラベル × タスク種別で YOLO 形式データセットを生成する。
+
+    - train / val は split_mode のまとまりごとに、seed で決まった分け方をする
+    - include_background=True なら、対象が写っていない画像も空ラベルで入れる
+      （誤検出を減らせる。ただしアノテーションし終えた画像だけのときに使うこと）
 
     - raw_dir 以下の XML をすべて読む（複数タスクをまとめて取り込めるように）
     - 画像はシンボリックリンクで置く（大容量でもコピー不要）
@@ -134,7 +216,6 @@ def generate_yolo_dataset(
     - data.yaml は絶対パス + names リスト形式で生成
     """
     import xml.etree.ElementTree as ET
-    import random
     import yaml
 
     from .cvat_convert import ImageLocator, NameAllocator, infer_flip_idx
@@ -168,7 +249,8 @@ def generate_yolo_dataset(
                     continue
                 # 分類は1画像1クラス。複数付いている場合は最初のものを採用する
                 cls_samples.append({"src": src, "cls": tags[0],
-                                    "stem": names.allocate(img_name, prefix)})
+                                    "stem": names.allocate(img_name, prefix),
+                                    "group_name": f"{prefix}/{img_name}" if prefix else img_name})
 
         if not cls_samples:
             st.error(
@@ -177,9 +259,14 @@ def generate_yolo_dataset(
             )
             return None
 
-        random.shuffle(cls_samples)
-        split = max(1, int(len(cls_samples) * (1 - val_ratio)))
-        cls_splits = {"train": cls_samples[:split], "val": cls_samples[split:]}
+        _tr, _va, split_note = split_train_val(
+            cls_samples,
+            [split_group_of(c["group_name"], split_mode, i, block_size)
+             for i, c in enumerate(cls_samples)],
+            val_ratio, seed)
+        cls_splits = {"train": _tr, "val": _va}
+        if split_note:
+            st.info(split_note)
 
         used_classes: list[str] = []
         for sp, sp_samples in cls_splits.items():
@@ -208,7 +295,7 @@ def generate_yolo_dataset(
         record_dataset_provenance(
             out_dir, source="cvat", task_type=task_type,
             labels=sorted(used_classes), cvat_tasks=cvat_tasks,
-            extra={"val_ratio": val_ratio,
+            extra={"val_ratio": val_ratio, "seed": seed, "split_mode": split_mode,
                    "xml_path": [str(p) for p in xml_paths] if multi else str(xml_paths[0])},
         )
         return out_dir
@@ -230,25 +317,31 @@ def generate_yolo_dataset(
             w = int(float(img_elem.get("width", 1)))
             h = int(float(img_elem.get("height", 1)))
             lines = _image_lines(img_elem, task_type, label2id, w, h, kpt_names)
-            if not lines:
+            if not lines and not include_background:
                 continue
             src = loc.find(img_name, img_elem.get("subset", ""))
             if src is None:
                 missing += 1
                 continue
             samples.append({"src": src, "lines": lines,
-                            "stem": names.allocate(img_name, prefix)})
+                            "stem": names.allocate(img_name, prefix),
+                            "group_name": f"{prefix}/{img_name}" if prefix else img_name})
 
-    if not samples:
+    if not any(smp["lines"] for smp in samples):
         hint = ""
         if task_type == "detect":
             hint = "（detect は矩形・楕円から作ります。ポリゴンやマスクで描いた場合は segment を選んでください）"
         st.error("選択したラベルにマッチするアノテーションがありません" + hint)
         return None
 
-    random.shuffle(samples)
-    split = max(1, int(len(samples) * (1 - val_ratio)))
-    splits = {"train": samples[:split], "val": samples[split:]}
+    _tr, _va, split_note = split_train_val(
+        samples,
+        [split_group_of(smp["group_name"], split_mode, i, block_size)
+         for i, smp in enumerate(samples)],
+        val_ratio, seed)
+    splits = {"train": _tr, "val": _va}
+    if split_note:
+        st.info(split_note)
 
     for sp in ("train", "val"):
         (out_dir / "images" / sp).mkdir(parents=True, exist_ok=True)
@@ -258,7 +351,8 @@ def generate_yolo_dataset(
         for s in sp_samples:
             _place_image(s["src"], out_dir / "images" / sp / f"{s['stem']}{s['src'].suffix}")
             with open(out_dir / "labels" / sp / f"{s['stem']}.txt", "w") as f:
-                f.write("\n".join(s["lines"]) + "\n")
+                # 背景画像は空のラベル（「何も写っていない」が正解）
+                f.write("\n".join(s["lines"]) + ("\n" if s["lines"] else ""))
 
     if missing:
         st.warning(f"画像が見つからなかったため {missing} 枚をスキップしました。")
@@ -284,7 +378,8 @@ def generate_yolo_dataset(
     record_dataset_provenance(
         out_dir, source="cvat", task_type=task_type,
         labels=selected_labels, cvat_tasks=cvat_tasks,
-        extra={"val_ratio": val_ratio,
+        extra={"val_ratio": val_ratio, "seed": seed, "split_mode": split_mode,
+               "background_images": sum(1 for smp in samples if not smp["lines"]),
                "xml_path": [str(p) for p in xml_paths] if multi else str(xml_paths[0])},
     )
     return out_dir
@@ -510,8 +605,12 @@ def resplit_dataset(
     dataset_dir: Path,
     val_ratio: float = 0.2,
     seed: int = 0,
+    split_mode: str = "image",
+    block_size: int = DEFAULT_BLOCK_SIZE,
 ) -> dict:
     """既存データセットの train / val を混ぜ直して分割し直す。
+
+    split_mode でまとまりごとに分けられる（SPLIT_MODES を参照）。
 
     生成時に決めた比率のままでは「val が偏っていて評価が信用できない」ときに
     手が出せないため。画像とラベルを対で動かす。
@@ -570,10 +669,22 @@ def resplit_dataset(
                 return res
 
             for cname, files in per_class.items():
-                rng.shuffle(files)
-                n_val = max(1, int(len(files) * val_ratio)) if len(files) > 1 else 0
-                for i, f in enumerate(files):
-                    sp = "val" if i < n_val else "train"
+                if split_mode == "image":
+                    rng.shuffle(files)
+                    n_val = max(1, int(len(files) * val_ratio)) if len(files) > 1 else 0
+                    val_set = set(files[:n_val])
+                else:
+                    files.sort(key=lambda p: p.name)
+                    _, _va, note = split_train_val(
+                        files,
+                        [split_group_of(f.name, split_mode, i, block_size)
+                         for i, f in enumerate(files)],
+                        val_ratio, seed)
+                    val_set = set(_va)
+                    if note:
+                        res.setdefault("notes", []).append(f"{cname}: {note}")
+                for f in files:
+                    sp = "val" if f in val_set else "train"
                     dst = ds / sp / cname / f.name
                     if f.parent != dst.parent:
                         _move(f, dst)
@@ -599,10 +710,23 @@ def resplit_dataset(
                 res["error"] = "画像が見つかりません"
                 return res
 
-            rng.shuffle(samples)
-            n_val = max(1, int(len(samples) * val_ratio)) if len(samples) > 1 else 0
-            for i, (img, lbl) in enumerate(samples):
-                sp = "val" if i < n_val else "train"
+            if split_mode == "image":
+                # 以前と同じ分け方（同じ seed なら同じ結果になるように保つ）
+                rng.shuffle(samples)
+                n_val = max(1, int(len(samples) * val_ratio)) if len(samples) > 1 else 0
+                val_set = {img for img, _ in samples[:n_val]}
+            else:
+                samples.sort(key=lambda t: t[0].name)
+                _, _va, note = split_train_val(
+                    samples,
+                    [split_group_of(img.name, split_mode, i, block_size)
+                     for i, (img, _) in enumerate(samples)],
+                    val_ratio, seed)
+                val_set = {img for img, _ in _va}
+                if note:
+                    res.setdefault("notes", []).append(note)
+            for img, lbl in samples:
+                sp = "val" if img in val_set else "train"
                 img_dst = img_root / sp / img.name
                 if img.parent != img_dst.parent:
                     _move(img, img_dst)

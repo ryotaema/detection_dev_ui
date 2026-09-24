@@ -22,7 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
-from .widgets import empty_state, metric_row, open_folder, show_error
+from .widgets import empty_state, metric_row, open_folder, show_error, split_mode_inputs
 from .features import feature_enabled
 
 
@@ -272,11 +272,14 @@ def render_manage() -> None:
                         _rs_seed = st.number_input(
                             "乱数シード", 0, 9999, 0, key=f"rs_seed_{ds.name}",
                             help="同じ値なら同じ分け方になります。変えると別の組み合わせを試せます")
+                    _rs_mode, _rs_block = split_mode_inputs(f"rs_{ds.name}")
                     if st.button("✂️ 分け直す", key=f"rs_run_{ds.name}",
                                  use_container_width=True):
                         with st.spinner("分割し直しています…"):
                             _rs = resplit_dataset(ds, val_ratio=float(_rs_ratio),
-                                                  seed=int(_rs_seed))
+                                                  seed=int(_rs_seed),
+                                                  split_mode=_rs_mode,
+                                                  block_size=_rs_block)
                         if _rs["error"]:
                             show_error(_rs["error"], prefix="❌ 分割に失敗しました: ")
                         else:
@@ -285,7 +288,11 @@ def render_manage() -> None:
                                 + " / ".join(f"{k} {v}枚" for k, v in _rs["after"].items())
                                 + f"（{_rs['moved']} 件を移動）"
                             )
-                            st.rerun()
+                            if _rs.get("notes"):
+                                for _n in _rs["notes"]:
+                                    st.warning(_n)
+                            else:
+                                st.rerun()
 
                 elif _ds_op == "🏷 クラス名":
                     _cls_names = dataset_class_names(ds)

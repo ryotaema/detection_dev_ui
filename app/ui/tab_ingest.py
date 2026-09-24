@@ -22,6 +22,7 @@ from core import (  # noqa: F401
     _get_eval_shared, _get_train_shared, _iou, _MODEL_OPTS, _nuctl,
     _StdoutCapture, _train_worker, _yolo_txt_to_xyxy,
 )
+from .widgets import split_mode_inputs
 
 
 
@@ -161,6 +162,24 @@ def render_ingest() -> None:
             with col_val:
                 val_ratio = st.slider("バリデーション割合", 0.05, 0.40, 0.20, step=0.05)
 
+            with st.expander("⚙️ train / val の分け方・背景画像（任意）"):
+                _sp_c1, _sp_c2 = st.columns([3, 1])
+                with _sp_c1:
+                    split_mode, block_size = split_mode_inputs("gen")
+                with _sp_c2:
+                    split_seed = int(st.number_input(
+                        "乱数シード", 0, 9999, 0, key="gen_seed",
+                        help="同じ値なら何度作っても同じ分け方になります"))
+                include_background = False
+                if task_type != "classify":
+                    include_background = st.checkbox(
+                        "対象が写っていない画像も「背景」として入れる", value=False,
+                        key="gen_background",
+                        help="何も写っていない画像を空のラベルで入れると、誤検出が減ります。"
+                             "**アノテーションし終えた画像だけのときに使ってください**"
+                             "（まだ手を付けていない画像も「何も無い」として学習されます）。",
+                    )
+
             # ─── 手順③ データセット生成 ──────────────────────────────────────
             st.markdown("---")
             st.markdown("#### ③ データセット生成")
@@ -187,6 +206,10 @@ def render_ingest() -> None:
                             out_dir=gen_dir,
                             val_ratio=val_ratio,
                             cvat_tasks=st.session_state.get("cvat_export_tasks"),
+                            seed=split_seed,
+                            split_mode=split_mode,
+                            block_size=block_size,
+                            include_background=include_background,
                         )
                     if result:
                         yaml_path = result / "data.yaml"
