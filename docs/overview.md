@@ -457,7 +457,10 @@ CVAT 経由だけを前提にしないでください。ZIP、画像単体、他
 - **タブの描画途中で `st.rerun()` を呼ばない**
   スクリプトがそこで打ち切られ、**それ以降のタブが描画されません**
   （データ管理やトピックスが真っ白になる、他の入力が操作できなくなる）。
-  進捗を追うための定期実行は `request_rerun_poll()` で予約し、
+  進捗を追う欄は **`st.fragment(..., run_every=秒)` の中に置き、その欄だけを描き直します**
+  （学習・ハイパーパラメータ探索がこの形。画面全体を数秒ごとに再実行しないので軽い）。
+  終わったら fragment の中から `st.rerun()` で一度だけ全体を描き直します。
+  fragment にしていない処理（評価・デプロイ）は `request_rerun_poll()` で予約し、
   すべて描き終えた `main.py` の末尾で `consume_rerun_poll()` がまとめて実行します。
 - **条件によってトップレベルの要素を増減させない**
   Streamlit は要素を「上から何番目か」で識別します。`st.tabs` の前にある要素が
@@ -524,6 +527,11 @@ CVAT 経由だけを前提にしないでください。ZIP、画像単体、他
 ```bash
 docker compose exec -w /app streamlit_app python -m pytest tests/ -q
 ```
+
+GitHub に push すると、同じテストが GitHub Actions でも回ります
+（`.github/workflows/test.yml`。GPU が無いので torch は CPU 版）。
+Ultralytics が無い環境では、それに頼るテストは skip されます。
+学習のテスト（`test_training_process.py`）は CPU で極小のモデルを実際に回します。
 
 機能を追加したらテストも足してください。特に
 **データを壊しうる処理**（ラベルの修正、再分割、クラス編集）は必ず書きます。

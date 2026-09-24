@@ -133,14 +133,14 @@ def render_annotate() -> None:
                     with _fc4:
                         if _d.get("dir"):
                             if st.button("🔄 再デプロイ", key=f"redeploy_{_fn['name']}",
-                                         use_container_width=True, disabled=_dep_running,
+                                         width="stretch", disabled=_dep_running,
                                          type="primary" if _d.get("weights_changed") else "secondary",
                                          help="モデルを差し替えた後に実行すると最新の重みが反映されます"):
                                 start_deploy(_d["dir"], use_gpu=_fn["gpu"])
                                 cached_nuclio_functions.clear()
                                 st.rerun()
                         if st.button("🗑 削除", key=f"delfn_{_fn['name']}",
-                                     use_container_width=True, disabled=_dep_running):
+                                     width="stretch", disabled=_dep_running):
                             _ok, _msg = delete_nuclio_function(_fn["name"])
                             cached_nuclio_functions.clear()
                             if _ok:
@@ -178,7 +178,7 @@ def render_annotate() -> None:
             if _up_pt:
                 st.caption(f"選択中: `{_up_pt.name}` ({_up_pt.size / 1024 / 1024:.1f} MB)"
                            f" → `models/{safe_run_name(_up_name)}/weights/`")
-                if st.button("📥 取り込む", key="dep_up_btn", use_container_width=True,
+                if st.button("📥 取り込む", key="dep_up_btn", width="stretch",
                              disabled=_dep_running):
                     _saved, _err = import_model_weights(
                         _up_name, [(_up_pt.name, _up_pt.getbuffer())])
@@ -229,8 +229,9 @@ def render_annotate() -> None:
                 )
             else:
                 _dep_task = _dep_meta.get("task") or "detect"
-                _dep_shape = "polygon（ポリゴン）" if _dep_task == "segment" \
-                    else "rectangle（矩形）"
+                _dep_shape = {
+                    "polygon": "polygon（ポリゴン）", "tag": "tag（タグ）",
+                }.get(function_shape_type(_dep_task), "rectangle（矩形）")
                 st.success(f"🏷 ラベル定義（モデルのクラス名から自動生成）: "
                            f"**{', '.join(_dep_classes)}**")
                 st.caption(
@@ -273,7 +274,6 @@ def render_annotate() -> None:
                     st.caption(f"Nuclio 関数名: `custom-{_dep_slug}`"
                                + ("　⚠ 同名の定義が既にあります（上書きされます）" if _exists_def else ""))
 
-                _dep_task = _dep_meta.get("task") or "detect"
                 if _dep_task == "pose":
                     st.caption("ℹ️ pose モデルは CVAT へボックスだけを返します"
                                "（キーポイントは付きません）。")
@@ -282,7 +282,7 @@ def render_annotate() -> None:
                 elif _dep_task == "classify":
                     st.caption("ℹ️ 画像分類モデルは CVAT に「タグ」（画像単位のラベル）を付けます。")
 
-                if st.button("🚀 CVAT にデプロイ", type="primary", use_container_width=True,
+                if st.button("🚀 CVAT にデプロイ", type="primary", width="stretch",
                              disabled=_dep_running or not _dep_dir, key="dep_run_btn"):
                     _out_dir, _fn_name = generate_function_files(
                         fn_dir=_dep_dir,
@@ -427,7 +427,7 @@ def render_annotate() -> None:
             st.caption(f"Nuclio 関数名: `{_sm_key}-{_sv_key}`　"
                        "初回はビルドとモデル読み込みで 10 分以上かかることがあります。")
 
-            if st.button("🚀 デプロイ", type="primary", use_container_width=True,
+            if st.button("🚀 デプロイ", type="primary", width="stretch",
                          disabled=_dep_running or not _sm_ready, key="sam_deploy_btn"):
                 generate_sam_function_files(
                     version=_sm_key,
@@ -535,7 +535,7 @@ def render_annotate() -> None:
         st.caption(f"💡 取得済みのラベル: {', '.join(_nt_known)}")
 
     if st.button(f"➕ CVAT にタスクを作成（{len(_nt_images)} 枚）",
-                 type="primary", use_container_width=True,
+                 type="primary", width="stretch",
                  disabled=not _nt_images or not _nt_labels or not _nt_name.strip(),
                  key="nt_create"):
         with st.spinner("CVAT にタスクを作成中…（画像アップロード中）"):
@@ -565,7 +565,7 @@ def render_annotate() -> None:
     )
     _pc1, _pc2 = st.columns([3, 1])
     with _pc2:
-        if st.button("🔄 CVATから進捗を取得", use_container_width=True, key="anno_fetch_tasks"):
+        if st.button("🔄 CVATから進捗を取得", width="stretch", key="anno_fetch_tasks"):
             with st.spinner("CVATからタスク・ジョブを取得中…"):
                 st.session_state.cvat_tasks = fetch_cvat_tasks()
                 st.session_state.cvat_jobs  = fetch_cvat_jobs()
@@ -602,13 +602,13 @@ def render_annotate() -> None:
             _by_state = _df_j.groupby("state").agg(
                 ジョブ数=("job_id", "count"), フレーム数=("frames", "sum")
             ).reset_index().rename(columns={"state": "状態"})
-            st.dataframe(_by_state, use_container_width=True, hide_index=True)
+            st.dataframe(_by_state, width="stretch", hide_index=True)
         with _st2:
             st.markdown("**工程 (stage)**")
             _by_stage = _df_j.groupby("stage").agg(
                 ジョブ数=("job_id", "count"), フレーム数=("frames", "sum")
             ).reset_index().rename(columns={"stage": "工程"})
-            st.dataframe(_by_stage, use_container_width=True, hide_index=True)
+            st.dataframe(_by_stage, width="stretch", hide_index=True)
 
         # 担当者別（ジョブ単位。4人以上で分担するときの主指標）
         st.markdown("**👥 担当者別**")
@@ -625,7 +625,7 @@ def render_annotate() -> None:
             _by_user["完了フレーム数"] / _by_user["フレーム数"].replace(0, 1) * 100
         ).round(1).astype(str) + "%"
         st.dataframe(_by_user.sort_values("フレーム数", ascending=False),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
         _unassigned = _df_j[_df_j["担当者"] == "（未割当）"]
         if len(_unassigned) > 0:
@@ -657,7 +657,7 @@ def render_annotate() -> None:
         _tp_show = _task_prog[_task_prog["進捗"] < 1.0] if _only_incomplete else _task_prog
         st.dataframe(
             _tp_show[["ID", "タスク名", "担当者", "ジョブ数", "フレーム数", "完了フレーム", "進捗"]],
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
             column_config={"進捗": st.column_config.ProgressColumn(
                 "進捗", min_value=0.0, max_value=1.0, format="%.0f%%")},
         )

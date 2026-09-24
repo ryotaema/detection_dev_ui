@@ -279,7 +279,7 @@ def test_本家GAは値が0の項目をほとんど動かせない():
     import tempfile
     from pathlib import Path
 
-    import ultralytics.engine.tuner as TU
+    TU = pytest.importorskip("ultralytics.engine.tuner")
     from ultralytics.engine.tuner import Tuner
 
     space = {"lr0": (1e-5, 1e-1), "degrees": (0.0, 45.0)}
@@ -323,6 +323,8 @@ def test_知らない項目を固定しても無視する():
 
 
 def test_空間なし_すべて_でも固定できる():
+    # 既定の探索空間は Ultralytics の既定値から作る
+    pytest.importorskip("ultralytics")
     """「すべて（既定 26 項目）」は space=None で本家に任せるが、
     固定するには具体的な空間が要る。実行時に取り出せること。"""
     from core.tuning import apply_pins, default_space

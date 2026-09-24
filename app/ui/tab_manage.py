@@ -245,7 +245,7 @@ def render_manage() -> None:
                         placeholder="照明条件が偏っているので追加撮影の予定あり など",
                     )
                     if st.button("💾 保存", key=f"ds_meta_save_{ds.name}",
-                                 type="primary", use_container_width=True):
+                                 type="primary", width="stretch"):
                         _up = update_provenance(
                             ds, kind="dataset", status=_new_st,
                             tags=_new_tags, note=_new_note)
@@ -274,7 +274,7 @@ def render_manage() -> None:
                             help="同じ値なら同じ分け方になります。変えると別の組み合わせを試せます")
                     _rs_mode, _rs_block = split_mode_inputs(f"rs_{ds.name}")
                     if st.button("✂️ 分け直す", key=f"rs_run_{ds.name}",
-                                 use_container_width=True):
+                                 width="stretch"):
                         with st.spinner("分割し直しています…"):
                             _rs = resplit_dataset(ds, val_ratio=float(_rs_ratio),
                                                   seed=int(_rs_seed),
@@ -326,7 +326,7 @@ def render_manage() -> None:
                             if not _new_list:
                                 st.error("すべてのクラスが削除対象です。1つ以上残してください。")
                             elif st.button("🏷 クラスを更新する", key=f"cls_run_{ds.name}",
-                                           type="primary", use_container_width=True):
+                                           type="primary", width="stretch"):
                                 with st.spinner("ラベルを書き換えています…"):
                                     _rm = remap_dataset_classes(
                                         ds, {k: (v or None) for k, v in _mapping.items()})
@@ -370,7 +370,7 @@ def render_manage() -> None:
                         )
 
                     if st.button("📦 ZIP を生成", key=f"ex_build_{ds.name}",
-                                 use_container_width=True):
+                                 width="stretch"):
                         _ex_out = (PREDICTIONS_DIR / "_exports" /
                                    f"{ds.name}{'_labels' if _ex_labels_only else ''}.zip")
                         with st.spinner("ZIP を生成中…（サイズによっては数分かかります）"):
@@ -389,7 +389,7 @@ def render_manage() -> None:
                         with open(_ex_p, "rb") as _fz:
                             st.download_button(
                                 "⬇ ダウンロード", _fz, file_name=_ex_p.name,
-                                mime="application/zip", use_container_width=True,
+                                mime="application/zip", width="stretch",
                                 key=f"ex_dl_{ds.name}",
                             )
                         st.caption(f"生成先: `{_ex_p}`（不要になったら削除して構いません）")
@@ -400,7 +400,7 @@ def render_manage() -> None:
                         "外部から持ち込んだデータや複数人で分担したデータほど確認する価値があります。"
                     )
                     if st.button("🔍 チェックを実行", key=f"qc_run_{ds.name}",
-                                 use_container_width=True):
+                                 width="stretch"):
                         with st.spinner(f"{ds.name} を検査中…"):
                             st.session_state[f"qc_{ds.name}"] = check_dataset_quality(ds)
                             st.session_state[f"qcdup_{ds.name}"] = \
@@ -440,7 +440,7 @@ def render_manage() -> None:
                             } for sp, v in _qc["splits"].items()]
                             if _rows_qc:
                                 st.dataframe(_pd_qc.DataFrame(_rows_qc),
-                                             use_container_width=True, hide_index=True)
+                                             width="stretch", hide_index=True)
 
                             # クラス分布
                             if _qc["class_counts"]:
@@ -450,7 +450,7 @@ def render_manage() -> None:
                                            key=lambda kv: -kv[1]),
                                     columns=["クラス", "件数"],
                                 )
-                                st.dataframe(_df_cls, use_container_width=True, hide_index=True)
+                                st.dataframe(_df_cls, width="stretch", hide_index=True)
 
                             # 指摘の内訳と詳細
                             if _qc["issue_counts"]:
@@ -496,7 +496,7 @@ def render_manage() -> None:
                                             key=f"fx_orphan_{ds.name}")
 
                                     if st.button("🔧 修正を実行", key=f"fx_run_{ds.name}",
-                                                 type="primary", use_container_width=True):
+                                                 type="primary", width="stretch"):
                                         with st.spinner("修正中…"):
                                             _fx = fix_dataset_labels(
                                                 ds,
@@ -543,7 +543,7 @@ def render_manage() -> None:
                             f"📤 images/{_add_split}/ に追加",
                             key=f"add_btn_{ds.name}",
                             type="primary",
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             _add_dst.mkdir(parents=True, exist_ok=True)
                             for _f in _add_imgs:
@@ -609,7 +609,7 @@ def render_manage() -> None:
                 )
                 st.caption(f"保存先: `models/{_mu_run}/weights/`")
                 if st.button("📥 models/ に取り込む", key="mu_pt_btn",
-                             type="primary", use_container_width=True):
+                             type="primary", width="stretch"):
                     # 保存そのものは core 側（Step1 のデプロイ画面からも同じ経路を使う）
                     _mu_saved, _mu_err = import_model_weights(
                         _mu_run,
@@ -631,7 +631,7 @@ def render_manage() -> None:
                 st.caption(f"選択中: {_mu_zip.name}  ({_mu_zip.size / 1024 / 1024:.1f} MB)")
                 st.caption(f"展開先: `models/{_mu_run}/`")
                 if st.button("📥 展開して models/ に取り込む", key="mu_zip_btn",
-                             type="primary", use_container_width=True):
+                             type="primary", width="stretch"):
                     with zipfile.ZipFile(_io_mu.BytesIO(_mu_zip.read()), "r") as _zf:
                         _bad = [n for n in _zf.namelist()
                                 if n.startswith("/") or ".." in Path(n).parts]
@@ -734,13 +734,13 @@ def render_manage() -> None:
                             + f"　{status_label(_n['status'], 'model')}")
                     with _nc2:
                         if st.button("✅ これを使う", key=f"newuse_{_np}",
-                                     use_container_width=True):
+                                     width="stretch"):
                             record_use(_np, "select")
                             st.session_state.last_model_path = str(_np)
                             st.rerun()
                     with _nc3:
                         if st.button("🙈 今は使わない", key=f"newskip_{_np}",
-                                     use_container_width=True,
+                                     width="stretch",
                                      help="この一覧から外します（使用回数に1を記録）"):
                             record_use(_np, "dismiss")
                             st.rerun()
@@ -892,11 +892,11 @@ def render_manage() -> None:
                         st.caption("mAP50: -")
                 with _use_col:
                     if st.button("⭐ 解除" if _minfo["favorite"] else "☆ お気に入り",
-                                 key=f"fav_{mp}", use_container_width=True,
+                                 key=f"fav_{mp}", width="stretch",
                                  help="よく使うモデルに印を付けます（おすすめ順で先頭に来ます）"):
                         toggle_favorite(mp)
                         st.rerun()
-                    if st.button("✅ 使用", key=f"use_model_{mp}", use_container_width=True,
+                    if st.button("✅ 使用", key=f"use_model_{mp}", width="stretch",
                                  type="primary" if not is_current else "secondary"):
                         record_use(mp, "select")
                         st.session_state.last_model_path = str(mp)
@@ -930,7 +930,7 @@ def render_manage() -> None:
                         key=f"md_note_{mp}", height=70,
                     )
                     if st.button("💾 保存", key=f"md_meta_save_{mp}",
-                                 type="primary", use_container_width=True):
+                                 type="primary", width="stretch"):
                         _mup = update_provenance(
                             _run_dir, kind="model", status=_md_new,
                             tags=_md_new_tags, note=_md_new_note)
@@ -946,14 +946,14 @@ def render_manage() -> None:
                     with open(mp, "rb") as _fm:
                         st.download_button(
                             f"⬇ {mp.name} をダウンロード", _fm, file_name=mp.name,
-                            mime="application/octet-stream", use_container_width=True,
+                            mime="application/octet-stream", width="stretch",
                             key=f"dl_pt_{mp}",
                             help="重みファイル単体。相手側の UI でそのまま取り込めます",
                         )
                 with _dl2:
                     _bundle_key = f"bundle_{mp}"
                     if st.button("📦 一式ZIPを生成", key=f"mkbundle_{mp}",
-                                 use_container_width=True,
+                                 width="stretch",
                                  help="重み + results.csv + 評価結果 + プロットをまとめます"):
                         _b_out = (PREDICTIONS_DIR / "_exports" /
                                   f"{mp.parent.parent.name}_bundle.zip")
@@ -971,7 +971,7 @@ def render_manage() -> None:
                             st.download_button(
                                 f"⬇ 一式ZIP ({_b_p.stat().st_size / 1024 / 1024:.0f}MB)",
                                 _fb, file_name=_b_p.name, mime="application/zip",
-                                use_container_width=True, key=f"dl_bundle_{mp}",
+                                width="stretch", key=f"dl_bundle_{mp}",
                             )
 
     st.markdown("---")
@@ -1008,7 +1008,7 @@ def render_manage() -> None:
         if _lin_rows:
             import pandas as _pd_lin
             st.dataframe(_pd_lin.DataFrame(_lin_rows),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
 
             # 1件を選んで詳細（データセット側の来歴まで辿る）
             _lin_names = [r["モデル"] for r in _lin_rows]
@@ -1154,7 +1154,7 @@ def render_manage() -> None:
         # 混ぜる前に気づけるようにする
         if len(merge_targets) >= 2:
             if st.button("🔍 重複画像を調べる", key="merge_dupcheck",
-                         use_container_width=True):
+                         width="stretch"):
                 _dbar = st.progress(0.0, text="照合しています…")
 
                 def _dprog(done, total):
@@ -1266,7 +1266,7 @@ def _mosaic_face_ui(ds, key: str, image_paths):
         st.info("YuNet のモデルファイル（約 230KB）がまだありません。"
                 "1 回だけ取得すれば以降は不要です。")
         if st.button("⬇ YuNet を取得する", key=f"{key}_getyunet",
-                     use_container_width=True):
+                     width="stretch"):
             with st.spinner("取得しています…"):
                 _dl = download_yunet()
             if _dl["ok"]:
@@ -1287,7 +1287,7 @@ def _mosaic_face_ui(ds, key: str, image_paths):
         st.caption("ℹ Haar にはしきい値の概念がありません。"
                    "正面向き以外は取りこぼしやすいので、結果を必ず確認してください。")
 
-    if st.button("👤 顔を検出する", key=f"{key}_facerun", use_container_width=True):
+    if st.button("👤 顔を検出する", key=f"{key}_facerun", width="stretch"):
         _fbar = st.progress(0.0, text="検出しています…")
 
         def _fprog(done, total):
@@ -1352,7 +1352,7 @@ def _mosaic_regions_ui(ds, key: str):
         _targets = st.multiselect(
             "隠すクラス（空なら全部）", _classes, key=f"{key}_cls") if _classes else []
 
-        if st.button("🔍 検出する", key=f"{key}_detect", use_container_width=True):
+        if st.button("🔍 検出する", key=f"{key}_detect", width="stretch"):
             _tmp = PREDICTIONS_DIR / "_mosaic_scan"
             if _tmp.exists():
                 shutil.rmtree(_tmp)
@@ -1436,7 +1436,7 @@ def _render_mosaic(ds) -> None:
             st.info(f"↩ このデータセットには適用済みの画像があります"
                     f"（原本を {count_backup(ds)} 枚退避中）。")
         with _rc2:
-            if st.button("↩ 元に戻す", key=f"{_key}_restore", use_container_width=True):
+            if st.button("↩ 元に戻す", key=f"{_key}_restore", width="stretch"):
                 with st.spinner("戻しています…"):
                     _rs = restore_mosaic(ds)
                 if _rs["ok"]:
@@ -1548,7 +1548,7 @@ def _render_mosaic(ds) -> None:
 
     # --- プレビュー（適用前に必ず見せる）---
     if st.button("👁 プレビュー（3枚）", key=f"{_key}_preview",
-                 use_container_width=True):
+                 width="stretch"):
         st.session_state[f"{_key}_prev"] = True
 
     if st.session_state.get(f"{_key}_prev"):
@@ -1566,7 +1566,7 @@ def _render_mosaic(ds) -> None:
     # --- 適用 ---
     st.markdown("---")
     if st.button(f"🟦 {_n_img} 枚に適用する（上書き）", type="primary",
-                 use_container_width=True, key=f"{_key}_apply",
+                 width="stretch", key=f"{_key}_apply",
                  disabled=not _ack):
         _bar = st.progress(0.0, text="適用しています…")
 
@@ -1668,7 +1668,7 @@ def _render_cleanup() -> None:
 
         if _pick_ds and st.button(
                 f"🗑 データセット {len(_pick_ds)} 件を削除",
-                key="cl_del_ds", type="primary", use_container_width=True):
+                key="cl_del_ds", type="primary", width="stretch"):
             _r = delete_paths(_pick_ds, guard_root=DATA_DIR)
             if _r["ok"]:
                 st.success(f"✅ {len(_r['deleted'])} 件を削除しました")
@@ -1696,11 +1696,11 @@ def _render_cleanup() -> None:
                 "ファイル数": r["files"],
                 "サイズ": _fmt_size(r["size"]),
             } for r in _runs]),
-            use_container_width=True, hide_index=True)
+            width="stretch", hide_index=True)
 
         if st.checkbox(f"上の {len(_runs)} 件をすべて削除する", key="cl_runs_ok"):
             if st.button(f"🗑 {len(_runs)} 件を削除", key="cl_del_runs",
-                         type="primary", use_container_width=True):
+                         type="primary", width="stretch"):
                 _r = delete_paths([r["dir"] for r in _runs], guard_root=MODELS_DIR)
                 if _r["ok"]:
                     st.success(f"✅ {len(_r['deleted'])} 件を削除しました")
@@ -1722,7 +1722,7 @@ def _render_cleanup() -> None:
                 _pick_t.append(_t["dir"])
         if _pick_t and st.button(
                 f"🗑 {len(_pick_t)} 件をクリア", key="cl_del_t",
-                type="primary", use_container_width=True):
+                type="primary", width="stretch"):
             _r = delete_paths(_pick_t, guard_root=PREDICTIONS_DIR)
             if _r["ok"]:
                 st.success(f"✅ {len(_r['deleted'])} 件をクリアしました")
@@ -1740,7 +1740,7 @@ def _render_cleanup() -> None:
                if d.is_dir() and (d / "data.yaml").exists()] if DATA_DIR.exists() else []
     if len(_ds_all) < 2:
         st.caption("比べられるデータセットが 2 件未満です。")
-    elif st.button("🔍 重複を調べる", key="cl_dup", use_container_width=True):
+    elif st.button("🔍 重複を調べる", key="cl_dup", width="stretch"):
         _b = st.progress(0.0, text="照合しています…")
         _r = find_duplicate_images(
             _ds_all,

@@ -38,7 +38,7 @@ def render_ingest() -> None:
 
     col1, col2 = st.columns([3, 1])
     with col2:
-        if st.button("🔄 タスク一覧を取得", use_container_width=True, key="cvat_fetch_tasks"):
+        if st.button("🔄 タスク一覧を取得", width="stretch", key="cvat_fetch_tasks"):
             with st.spinner("CVATからタスクを取得中…"):
                 st.session_state.cvat_tasks = fetch_cvat_tasks()
 
@@ -52,7 +52,7 @@ def render_ingest() -> None:
             import pandas as pd
             df = pd.DataFrame(tasks)[["id","name","status","assignee","size"]]
             df.columns = ["ID","タスク名","ステータス","担当者","画像数"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
             st.markdown("---")
 
         # 複数タスク選択
@@ -73,7 +73,7 @@ def render_ingest() -> None:
         # ─── 手順① CVAT for images 1.1 エクスポート ─────────────────────────
         st.markdown("#### ① CVATエクスポート")
         if st.button("⬇️ エクスポート実行 (CVAT for images 1.1)", type="primary",
-                     use_container_width=True, key="cvat_export_run",
+                     width="stretch", key="cvat_export_run",
                      disabled=len(selected_ids) == 0):
             if not selected_ids:
                 st.warning("エクスポートするタスクを選択してください。")
@@ -192,7 +192,7 @@ def render_ingest() -> None:
             if not selected_labels:
                 st.warning("少なくとも1つ以上のラベルを選択してください。")
             else:
-                if st.button("⚙️ データセット生成", type="primary", use_container_width=True,
+                if st.button("⚙️ データセット生成", type="primary", width="stretch",
                              key="dataset_generate_run"):
                     raw_dir_path = Path(st.session_state.cvat_raw_dir)
                     gen_dir = DATA_DIR / gen_dir_name
@@ -225,7 +225,7 @@ def render_ingest() -> None:
             "既存のraw_dirパス（コンテナ内）",
             placeholder="/workspace/data/dataset_11_20260512/raw",
         )
-        if st.button("🔍 XMLを解析", use_container_width=True,
+        if st.button("🔍 XMLを解析", width="stretch",
                      key="xml_parse_run") and manual_raw:
             raw_p = Path(manual_raw)
             if raw_p.exists():
@@ -264,7 +264,7 @@ def render_ingest() -> None:
             if _ul_zip:
                 st.caption(f"選択中: {_ul_zip.name}  ({_ul_zip.size / 1024 / 1024:.1f} MB)")
                 if st.button("📤 展開して data/ に保存", key="ul_zip_btn",
-                             type="primary", use_container_width=True):
+                             type="primary", width="stretch"):
                     _ul_out = DATA_DIR / _ul_dir_name
                     _ul_out.mkdir(parents=True, exist_ok=True)
                     with zipfile.ZipFile(_io_ul.BytesIO(_ul_zip.read()), "r") as _zf:
@@ -294,7 +294,7 @@ def render_ingest() -> None:
                 st.caption(f"選択中: {len(_ul_imgs)} ファイル")
                 _ul_dst_preview = f"data/{_ul_dir_name}/images/{_ul_split}/"
                 if st.button(f"📤 {_ul_dst_preview} に保存", key="ul_imgs_btn",
-                             type="primary", use_container_width=True):
+                             type="primary", width="stretch"):
                     _ul_out = DATA_DIR / _ul_dir_name / "images" / _ul_split
                     _ul_out.mkdir(parents=True, exist_ok=True)
                     for _f in _ul_imgs:
@@ -324,7 +324,7 @@ def render_ingest() -> None:
             )
 
             if _le_selected:
-                if st.button("🔍 ラベルを取得", key="le_fetch_btn", use_container_width=True):
+                if st.button("🔍 ラベルを取得", key="le_fetch_btn", width="stretch"):
                     _le_ids = [_le_opts[k] for k in _le_selected]
                     with st.spinner("ラベル取得中..."):
                         st.session_state["le_labels_by_task"] = fetch_cvat_task_labels(_le_ids)
@@ -364,7 +364,7 @@ def render_ingest() -> None:
                         file_name="labels.yaml",
                         mime="text/yaml",
                         key="le_dl_yaml",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 with _le_c2:
                     st.download_button(
@@ -373,7 +373,7 @@ def render_ingest() -> None:
                         file_name="labels.txt",
                         mime="text/plain",
                         key="le_dl_txt",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 with _le_c3:
                     _le_cvat_json = json.dumps(
@@ -386,7 +386,7 @@ def render_ingest() -> None:
                         file_name="labels_cvat.json",
                         mime="application/json",
                         key="le_dl_cvat",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 st.markdown("---")

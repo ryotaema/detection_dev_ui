@@ -16,7 +16,7 @@ from core import _DOC_AUG, _DOC_TRAIN  # ウィジェットの既定リンク先
 
 def _ph(name: str, desc: str, url: str) -> None:
     """ポップオーバー形式のパラメータヘルプボタン（❓）を描画する。"""
-    with st.popover("❓", use_container_width=True):
+    with st.popover("❓", width="stretch"):
         st.markdown(f"**`{name}`**\n\n{desc}")
         st.markdown(f"[📖 Ultralytics ドキュメント]({url})")
 
@@ -151,7 +151,7 @@ def open_folder(container_path, key: str, label: str = "📂 フォルダを開�
             st.caption(f"📁 `{container_path}`（コンテナ内のパス）")
         return
 
-    if st.button(label, key=f"openfd_{key}", use_container_width=inline,
+    if st.button(label, key=f"openfd_{key}", width=("stretch" if inline else "content"),
                  help=f"{host}\n\nホスト側のパスです"):
         res = request_open(container_path)
         if res["ok"]:
