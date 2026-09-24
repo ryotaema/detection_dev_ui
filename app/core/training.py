@@ -35,6 +35,23 @@ def init_mlflow(project_name: str, run_name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 学習に使うデバイス
+#
+#   `device=0` 決め打ちだと、GPU の無い構成（docker-compose.cpu.yml）で
+#   「Invalid CUDA 'device=0' requested」になり学習が必ず失敗する。
+# ---------------------------------------------------------------------------
+def default_train_device():
+    """GPU が使えれば 0、使えなければ "cpu" を返す"""
+    try:
+        import torch
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return 0
+    except Exception:
+        pass
+    return "cpu"
+
+
+# ---------------------------------------------------------------------------
 # YOLO 学習ワーカー (別スレッドで実行)
 # ---------------------------------------------------------------------------
 

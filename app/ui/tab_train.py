@@ -888,6 +888,9 @@ def render_train() -> None:
         elif st.session_state.training_progress == 100:
             st.markdown('<span class="badge-ok">COMPLETED</span>', unsafe_allow_html=True)
 
+    if default_train_device() == "cpu":
+        st.caption("⚠️ GPU が見つからないため CPU で学習します（GPU より数十倍遅くなります）。")
+
     if start_btn:
         yaml_p = Path(data_yaml_path)
         if not yaml_p.exists():
@@ -896,7 +899,7 @@ def render_train() -> None:
             _train_kwargs: dict = {
                 # ── 基本 ──────────────────────────────────────────────────
                 "imgsz": int(imgsz),
-                "device": 0,
+                "device": default_train_device(),
                 "workers": int(workers),
                 "nbs": int(nbs),
                 # ── 最適化 ────────────────────────────────────────────────
