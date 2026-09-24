@@ -81,7 +81,7 @@ def render_ingest() -> None:
                 out_dir = DATA_DIR / export_dir_name
                 out_dir.mkdir(parents=True, exist_ok=True)
                 all_raw_dirs = []
-                with st.spinner("エクスポート中…（最大3分×タスク数）"):
+                with st.spinner("エクスポート中…（画像の多いタスクは数分以上かかります）"):
                     for task_id in selected_ids:
                         task_out = out_dir / f"task_{task_id}"
                         task_out.mkdir(parents=True, exist_ok=True)

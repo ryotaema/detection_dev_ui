@@ -12,7 +12,7 @@ from typing import Optional
 
 import streamlit as st
 
-from .config import (CVAT_HOST, CVAT_PASS, CVAT_USER, CVAT_WEB)
+from .config import (CVAT_EXPORT_TIMEOUT, CVAT_HOST, CVAT_PASS, CVAT_USER, CVAT_WEB)
 
 
 
@@ -128,6 +128,34 @@ def fetch_cvat_task_labels(task_ids: list[int]) -> dict[str, list[str]]:
         return {}
 
 
+# CVAT への 1 回の問い合わせの待ち時間（秒）。無いと CVAT が固まったときに永久に待つ
+_HTTP_TIMEOUT = 60
+
+
+def wait_cvat_request(get_status, timeout: float, sleep=time.sleep,
+                      clock=time.monotonic) -> dict:
+    """CVAT の非同期処理（書き出しなど）が終わるのを待つ。
+
+    get_status() は /api/requests/<id> の JSON を返す関数。
+    最初は 1 秒おき、長引いたら 5 秒おきまで間隔を広げる（長時間のときに問い合わせすぎない）。
+    戻り値: {"state": "finished" | "failed" | "timeout", "data": 最後の JSON}
+    """
+    start = clock()
+    interval = 1.0
+    data: dict = {}
+    while True:
+        data = get_status() or {}
+        status = data.get("status")
+        if status == "finished":
+            return {"state": "finished", "data": data}
+        if status == "failed":
+            return {"state": "failed", "data": data}
+        if clock() - start >= timeout:
+            return {"state": "timeout", "data": data}
+        sleep(interval)
+        interval = min(interval * 1.5, 5.0)
+
+
 def export_cvat_task_raw(task_id: int, out_dir: Path) -> Optional[Path]:
     """指定タスクを「CVAT for images 1.1」(XML形式) でエクスポートし、
     out_dir/raw/ に解凍したパスを返す。
@@ -144,6 +172,7 @@ def export_cvat_task_raw(task_id: int, out_dir: Path) -> Optional[Path]:
         login = session.post(
             f"{CVAT_HOST}/api/auth/login",
             json={"username": CVAT_USER, "password": CVAT_PASS},
+            timeout=_HTTP_TIMEOUT,
         )
         login.raise_for_status()
         token = login.json().get("key")
@@ -155,6 +184,7 @@ def export_cvat_task_raw(task_id: int, out_dir: Path) -> Optional[Path]:
                 "save_images": "True",
                 "format": "CVAT for images 1.1",
             },
+            timeout=_HTTP_TIMEOUT,
         )
         export.raise_for_status()
         rq_id = export.json().get("rq_id")
@@ -162,24 +192,25 @@ def export_cvat_task_raw(task_id: int, out_dir: Path) -> Optional[Path]:
             st.error("エクスポートジョブID が取得できませんでした")
             return None
 
-        result_url = None
-        for _ in range(180):
-            status_resp = session.get(f"{CVAT_HOST}/api/requests/{rq_id}")
-            status_resp.raise_for_status()
-            data = status_resp.json()
-            status = data.get("status")
-            if status == "finished":
-                result_url = data.get("result_url")
-                break
-            elif status == "failed":
-                st.error(f"エクスポートに失敗しました: {data}")
-                return None
-            time.sleep(1)
-        else:
-            st.error("エクスポートがタイムアウトしました（180秒）")
-            return None
+        def _status() -> dict:
+            r = session.get(f"{CVAT_HOST}/api/requests/{rq_id}", timeout=_HTTP_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
 
-        dl = session.get(result_url, stream=True)
+        done = wait_cvat_request(_status, timeout=CVAT_EXPORT_TIMEOUT)
+        if done["state"] == "failed":
+            st.error(f"エクスポートに失敗しました: {done['data']}")
+            return None
+        if done["state"] == "timeout":
+            st.error(
+                f"エクスポートが {CVAT_EXPORT_TIMEOUT} 秒で終わりませんでした。"
+                "画像の多いタスクは時間がかかります。`.env` の "
+                "`CVAT_EXPORT_TIMEOUT`（秒）を増やして streamlit_app を起動し直してください。")
+            return None
+        result_url = done["data"].get("result_url")
+
+        # 書き出した ZIP は大きいことがあるので、読み取りの待ち時間は長めにとる
+        dl = session.get(result_url, stream=True, timeout=(_HTTP_TIMEOUT, 600))
         dl.raise_for_status()
         with open(zip_path, "wb") as f:
             for chunk in dl.iter_content(chunk_size=8192):

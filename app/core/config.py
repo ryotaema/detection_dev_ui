@@ -25,6 +25,8 @@ CVAT_HOST      = os.getenv("CVAT_HOST",     "http://cvat-server:8080")  # コン
 CVAT_WEB       = os.getenv("CVAT_WEB_HOST", "http://localhost:8080")    # ブラウザ表示用
 CVAT_USER      = os.getenv("CVAT_USERNAME","admin")
 CVAT_PASS      = os.getenv("CVAT_PASSWORD","admin")
+# CVAT からの書き出しを待つ上限（秒）。画像の多いタスクは数分〜数十分かかる
+CVAT_EXPORT_TIMEOUT = int(os.getenv("CVAT_EXPORT_TIMEOUT", "1800"))
 MLFLOW_URI     = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 MLFLOW_WEB     = os.getenv("MLFLOW_WEB_HOST", "http://localhost:5000")
 FIFTYONE_PORT  = int(os.getenv("FIFTYONE_PORT","5151"))

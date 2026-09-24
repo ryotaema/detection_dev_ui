@@ -465,6 +465,8 @@ services:
       CVAT_WEB_HOST: ${CVAT_WEB_HOST:-http://localhost:8080}
       CVAT_USERNAME: ${CVAT_USERNAME:-admin}
       CVAT_PASSWORD: ${CVAT_PASSWORD:-admin}
+      # CVAT からの書き出しを待つ上限（秒）。画像の多いタスクで打ち切られるときに増やす
+      CVAT_EXPORT_TIMEOUT: ${CVAT_EXPORT_TIMEOUT:-1800}
       # MLflow接続情報
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # パス設定
