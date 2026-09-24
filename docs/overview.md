@@ -71,8 +71,17 @@ Step1 のアノテーション作業そのものが速くなり、この流れ�
 
 ### データ取込（Step2）
 
-- CVAT からのエクスポート → YOLO 形式への変換
+- CVAT からのエクスポート → YOLO 形式への変換（`core/cvat_convert.py`）
 - 対応タスク種別: `detect` / `segment` / `pose` / `obb` / `classify`
+  - detect … 矩形（回転付きなら外接矩形）・楕円から作る
+  - segment … ポリゴン・マスク（RLE）・矩形・楕円から作る
+  - obb … 回転付き矩形・4 点ポリゴン（それ以外の形は最小外接回転矩形）
+  - pose … CVAT の skeleton から作る。`kpt_shape` と、名前から推定した
+    `flip_idx`（left_* ↔ right_* など）を data.yaml に書く
+  - 座標は画像内に収める
+- **複数タスクをまとめて取り込める** … XML はタスクごとに読み、
+  `frame_000000.jpg` のような同名画像は出力名を振り直して潰さない
+  （別フォルダの `cam1/0001.jpg` と `cam2/0001.jpg` も `cam1__0001` / `cam2__0001` になる）
 - CVAT を経由しない取込（YOLO 形式 ZIP、画像の直接アップロード）
 - チーム共通ラベルのエクスポート（YAML / TXT / CVAT JSON）
 

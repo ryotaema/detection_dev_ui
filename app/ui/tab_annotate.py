@@ -273,6 +273,15 @@ def render_annotate() -> None:
                     st.caption(f"Nuclio 関数名: `custom-{_dep_slug}`"
                                + ("　⚠ 同名の定義が既にあります（上書きされます）" if _exists_def else ""))
 
+                _dep_task = _dep_meta.get("task") or "detect"
+                if _dep_task == "pose":
+                    st.caption("ℹ️ pose モデルは CVAT へボックスだけを返します"
+                               "（キーポイントは付きません）。")
+                elif _dep_task == "obb":
+                    st.caption("ℹ️ 回転矩形は 4 点のポリゴンとして CVAT に入ります。")
+                elif _dep_task == "classify":
+                    st.caption("ℹ️ 画像分類モデルは CVAT に「タグ」（画像単位のラベル）を付けます。")
+
                 if st.button("🚀 CVAT にデプロイ", type="primary", use_container_width=True,
                              disabled=_dep_running or not _dep_dir, key="dep_run_btn"):
                     _out_dir, _fn_name = generate_function_files(

@@ -206,6 +206,15 @@ def list_serverless_defs() -> list[dict]:
     return defs
 
 
+def function_shape_type(task: str) -> str:
+    """モデルのタスクごとに、Nuclio 関数が CVAT へ返す形状の種別"""
+    return {
+        "segment": "polygon",
+        "obb": "polygon",        # 回転矩形は 4 点ポリゴンで返す
+        "classify": "tag",       # 画像単位のラベル
+    }.get(str(task), "rectangle")  # detect / pose（pose はボックスだけ返す）
+
+
 def generate_function_files(
     fn_dir: str,
     model_run: str,
@@ -228,8 +237,8 @@ def generate_function_files(
     desc     = description or f"自作 YOLO 検出器 ({model_run} / Ultralytics)"
 
     # ラベル定義はモデルのクラス名から生成（json.dumps でエスケープを担保）。
-    # セグメンテーションモデルは polygon を返すため、ラベル種別も合わせる。
-    shape_type = "polygon" if str(task) == "segment" else "rectangle"
+    # ラベル種別はハンドラが返す形（serverless/_common/model_handler.py）に合わせる。
+    shape_type = function_shape_type(task)
     items = [{"id": i, "name": n, "type": shape_type} for i, n in enumerate(class_names)]
     spec_block = "\n".join(
         "      " + line for line in json.dumps(items, ensure_ascii=False, indent=2).splitlines()

@@ -92,23 +92,13 @@ def render_ingest() -> None:
                             st.error(f"タスク {task_id} のエクスポートに失敗しました")
 
                 if all_raw_dirs:
-                    # 複数タスクの場合は最初のrawディレクトリをメインとして設定
-                    # マージ: 全rawディレクトリのXMLを統合して最初のrawを基準にする
-                    if len(all_raw_dirs) == 1:
-                        merged_raw = all_raw_dirs[0]
-                    else:
-                        import shutil as _shutil
-                        merged_raw = out_dir / "merged_raw"
-                        merged_raw.mkdir(parents=True, exist_ok=True)
-                        for src_raw in all_raw_dirs:
-                            for item in src_raw.rglob("*"):
-                                if item.is_file():
-                                    rel = item.relative_to(src_raw)
-                                    dst = merged_raw / rel
-                                    dst.parent.mkdir(parents=True, exist_ok=True)
-                                    if not dst.exists():
-                                        _shutil.copy2(item, dst)
-                        st.success(f"✅ {len(all_raw_dirs)} タスクを統合: `{merged_raw}`")
+                    # 複数タスクのときは、各タスクの raw/ を束ねる親ディレクトリを渡す。
+                    # XML も画像もタスクごとのまま読み、出力名の衝突は生成時に解消する
+                    # （以前は 1 か所へコピーしていたため、同名の annotations.xml や
+                    #   frame_000000.jpg が上書きされず、2 タスク目以降が消えていた）。
+                    merged_raw = all_raw_dirs[0] if len(all_raw_dirs) == 1 else out_dir
+                    if len(all_raw_dirs) > 1:
+                        st.success(f"✅ {len(all_raw_dirs)} タスクをまとめて扱います: `{out_dir}`")
 
                     st.session_state.cvat_raw_dir = str(merged_raw)
                     # 来歴に残すため、どの CVAT タスクから取り込んだかを覚えておく
@@ -117,7 +107,7 @@ def render_ingest() -> None:
                         for t in tasks if t["id"] in selected_ids
                     ]
                     st.session_state.cvat_xml_info = None
-                    xml_info = parse_cvat_xml(merged_raw)
+                    xml_info = parse_cvat_xml(all_raw_dirs)
                     if xml_info:
                         st.session_state.cvat_xml_info = xml_info
 
@@ -144,13 +134,13 @@ def render_ingest() -> None:
 
             ann_types = set(xml_info.get("annotation_types", []))
             task_type_options = ["detect"]
-            if "polygon" in ann_types:
+            if ann_types & {"polygon", "mask", "ellipse"}:
                 task_type_options.append("segment")
-            if "points" in ann_types:
+            if ann_types & {"skeleton", "points"}:
                 task_type_options.append("pose")
             if "tag" in ann_types:
                 task_type_options.append("classify")
-            if "box" in ann_types or "polygon" in ann_types:
+            if ann_types & {"box", "polygon", "mask", "ellipse"}:
                 task_type_options.append("obb")
 
             col_task, col_val = st.columns(2)
@@ -158,8 +148,9 @@ def render_ingest() -> None:
                 task_type = st.selectbox(
                     "タスク種別",
                     task_type_options,
-                    help="detect: バウンディングボックス / segment: ポリゴン（box→矩形ポリゴンに変換） / "
-                         "pose: キーポイント / classify: 画像分類（CVAT の「タグ」から生成） / "
+                    help="detect: バウンディングボックス（回転付き box・楕円も可） / "
+                         "segment: ポリゴン・マスク（box・楕円はポリゴンに変換） / "
+                         "pose: キーポイント（CVAT の skeleton） / classify: 画像分類（CVAT の「タグ」から生成） / "
                          "obb: 回転バウンディングボックス（回転付き box・4点ポリゴンから生成）",
                 )
             if "tag" not in ann_types:
