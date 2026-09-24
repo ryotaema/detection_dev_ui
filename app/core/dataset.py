@@ -781,6 +781,27 @@ def dataset_class_names(dataset_dir: Path) -> list[str]:
     return []
 
 
+def _free_backup_path(label_path: Path) -> Path:
+    """ラベルの退避先。既にあれば x.1.txt.bak, x.2.txt.bak ... と空いている名前にする"""
+    p = label_path.with_suffix(".txt.bak")
+    i = 1
+    while p.exists():
+        p = label_path.with_name(f"{label_path.stem}.{i}.txt.bak")
+        i += 1
+    return p
+
+
+def _backup_label_once(label_path: Path, lines: list[str]) -> None:
+    """書き換える前のラベルを `.txt.bak` に残す。**既にあれば触らない。**
+
+    以前は操作のたびに上書きしていたので、自動修正やクラス編集を 2 回すると
+    最初の元データに戻せなくなっていた。いちばん古い状態（= 元データ）を残す。
+    """
+    bak = label_path.with_suffix(".txt.bak")
+    if not bak.exists():
+        bak.write_text("\n".join(lines) + "\n")
+
+
 def remap_dataset_classes(
     dataset_dir: Path,
     mapping: dict[str, Optional[str]],
@@ -883,8 +904,7 @@ def remap_dataset_classes(
                             kept.append(" ".join([str(new_id)] + parts[1:]))
                         if changed:
                             if backup:
-                                lp.with_suffix(".txt.bak").write_text(
-                                    "\n".join(lines) + "\n")
+                                _backup_label_once(lp, lines)
                             lp.write_text(("\n".join(kept) + "\n") if kept else "")
                             res["files_changed"] += 1
                             res["lines_removed"] += removed
@@ -969,7 +989,7 @@ def fix_dataset_labels(
         for lp in sorted(lbl_dir.glob("*.txt")):
             # 画像が存在しないラベルの削除
             if delete_orphan_labels and img_stems and lp.stem not in img_stems:
-                lp.rename(lp.with_suffix(".txt.bak"))
+                lp.rename(_free_backup_path(lp))
                 res["orphans_deleted"] += 1
                 res["details"].append(f"{sp}/{lp.name}: 画像が無いため退避")
                 continue
@@ -1008,7 +1028,7 @@ def fix_dataset_labels(
                 kept.append(s)
 
             if removed:
-                lp.with_suffix(".txt.bak").write_text("\n".join(lines) + "\n")
+                _backup_label_once(lp, lines)
                 lp.write_text(("\n".join(kept) + "\n") if kept else "")
                 res["files_changed"] += 1
                 res["lines_removed"] += removed

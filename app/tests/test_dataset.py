@@ -366,3 +366,49 @@ def test_同名があっても分け直しで画像とラベルが対のまま�
     for tag, img in imgs.items():
         lbl = ds / "labels" / img.parent.name / f"{img.stem}.txt"
         assert tag in lbl.read_text(), f"{img} のラベルが入れ替わった"
+
+
+# ---------------------------------------------------------------------------
+# バックアップは最初の状態（元データ）を残す
+#   以前は操作のたびに .txt.bak を上書きしていたので、2 回目で元に戻せなくなった
+# ---------------------------------------------------------------------------
+def test_クラス編集を2回しても元のラベルに戻せる(detect_dataset):
+    lbl = detect_dataset / "labels" / "train" / "train1.txt"
+    original = lbl.read_text()
+    # 1 回目: red と green を統合（green の ID 1 → 0 に書き換わる）
+    remap_dataset_classes(detect_dataset, {"red": "x", "green": "x", "blue": "blue"})
+    assert lbl.read_text() != original
+    # 2 回目: 統合したクラスを削除
+    remap_dataset_classes(detect_dataset, {"x": None, "blue": "blue"})
+    assert lbl.with_suffix(".txt.bak").read_text() == original
+
+
+def test_自動修正を2回しても元のラベルに戻せる(tmp_path):
+    ds = tmp_path / "ds"
+    img = ds / "images" / "train" / "a.png"
+    img.parent.mkdir(parents=True)
+    img.write_bytes(b"x")
+    lbl = ds / "labels" / "train" / "a.txt"
+    lbl.parent.mkdir(parents=True)
+    original = "0 0.5 0.5 0.1 0.1\n0 1.5 0.5 0.1 0.1\n0 0.5 0.5 0.0001 0.0001\n"
+    lbl.write_text(original)
+    (ds / "data.yaml").write_text(yaml.dump({"task": "detect", "names": ["a"]}))
+    fix_dataset_labels(ds)                       # 範囲外を落とす
+    fix_dataset_labels(ds, drop_tiny=True)       # 極小を落とす
+    assert lbl.read_text() == "0 0.5 0.5 0.1 0.1\n"
+    assert lbl.with_suffix(".txt.bak").read_text() == original
+
+
+def test_画像の無いラベルの退避で既存のバックアップを潰さない(tmp_path):
+    ds = tmp_path / "ds"
+    (ds / "images" / "train").mkdir(parents=True)
+    (ds / "images" / "train" / "keep.png").write_bytes(b"x")
+    lbl_dir = ds / "labels" / "train"
+    lbl_dir.mkdir(parents=True)
+    (lbl_dir / "gone.txt").write_text("now\n")
+    (lbl_dir / "gone.txt.bak").write_text("original\n")
+    (ds / "data.yaml").write_text(yaml.dump({"task": "detect", "names": ["a"]}))
+    fix_dataset_labels(ds, delete_orphan_labels=True)
+    assert (lbl_dir / "gone.txt.bak").read_text() == "original\n"
+    assert (lbl_dir / "gone.1.txt.bak").read_text() == "now\n"
+    assert not (lbl_dir / "gone.txt").exists()
