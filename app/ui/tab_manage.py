@@ -560,7 +560,6 @@ def render_manage() -> None:
 
     # --- 外部モデルの取り込み ---
     with st.expander("📤 学習済みモデル (.pt) をアップロード（他PCで学習したモデルの取り込み）"):
-        import io as _io_mu
 
         st.caption(
             "他の環境で学習した YOLO の重みを `models/` に取り込みます。"
@@ -634,7 +633,7 @@ def render_manage() -> None:
                 st.caption(f"展開先: `models/{_mu_run}/`")
                 if st.button("📥 展開して models/ に取り込む", key="mu_zip_btn",
                              type="primary", width="stretch"):
-                    with zipfile.ZipFile(_io_mu.BytesIO(_mu_zip.read()), "r") as _zf:
+                    with zipfile.ZipFile(_mu_zip, "r") as _zf:
                         _bad = [n for n in _zf.namelist()
                                 if n.startswith("/") or ".." in Path(n).parts]
                         if _bad:

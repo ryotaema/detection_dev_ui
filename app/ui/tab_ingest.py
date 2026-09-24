@@ -239,7 +239,6 @@ def render_ingest() -> None:
                 st.error(f"ディレクトリが存在しません: {raw_p}")
 
     with st.expander("📁 ローカルからデータを直接追加（CVATなし）"):
-        import io as _io_ul
         st.caption(
             "CVATを経由せず、手元の画像やYOLOデータセットZIPを直接 data/ に追加します。"
         )
@@ -261,13 +260,16 @@ def render_ingest() -> None:
                 type=["zip"],
                 key="ul_zip",
             )
+            st.caption("アップロードできるのは 4GB まで（`app/.streamlit/config.toml`）。"
+                       "それより大きいものは、展開してホストの `data/` に直接置けば"
+                       "ここから使えます。")
             if _ul_zip:
                 st.caption(f"選択中: {_ul_zip.name}  ({_ul_zip.size / 1024 / 1024:.1f} MB)")
                 if st.button("📤 展開して data/ に保存", key="ul_zip_btn",
                              type="primary", width="stretch"):
                     _ul_out = DATA_DIR / _ul_dir_name
                     _ul_out.mkdir(parents=True, exist_ok=True)
-                    with zipfile.ZipFile(_io_ul.BytesIO(_ul_zip.read()), "r") as _zf:
+                    with zipfile.ZipFile(_ul_zip, "r") as _zf:
                         _zf.extractall(_ul_out)
                     st.success(f"✅ 展開完了: `{_ul_out}`")
                     record_dataset_provenance(
