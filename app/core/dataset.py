@@ -635,15 +635,34 @@ def resplit_dataset(
     task = dataset_task_type(str(yaml_path)) if yaml_path.exists() else "detect"
     res["task"] = task
 
+    def _taken(p: Path) -> bool:
+        return p.exists() or p.is_symlink()
+
+    def _free_stem(stem: str, suffix: str, img_dir: Path,
+                   lbl_dir: Optional[Path] = None) -> str:
+        """移動先で使われていない名前を返す。
+
+        train と val に同じ名前（0.png など）があると、移した先の同名ファイルを
+        上書きして**画像が消えていた**。重なるときは _1, _2 ... を付ける。
+        detect などはラベルも同じ名前で動かすので、両方が空いている名前にする。
+        """
+        cand, i = stem, 1
+        while _taken(img_dir / f"{cand}{suffix}") or (
+                lbl_dir is not None and _taken(lbl_dir / f"{cand}.txt")):
+            cand = f"{stem}_{i}"
+            i += 1
+        return cand
+
     def _move(src: Path, dst: Path) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.resolve() == dst.resolve():
+        if src.absolute() == dst.absolute():
             return
+        if _taken(dst):
+            # 呼び出し側で空いている名前を選んでいるので、ここに来たら不具合
+            raise FileExistsError(f"移動先が既にあります: {dst}")
         # シンボリックリンクを壊さないよう、リンク自体を張り直す
         if src.is_symlink():
             target = os.readlink(src)
-            if dst.exists() or dst.is_symlink():
-                dst.unlink()
             os.symlink(target, dst)
             src.unlink()
         else:
@@ -660,10 +679,11 @@ def resplit_dataset(
                 for cdir in sp_dir.iterdir():
                     if not cdir.is_dir():
                         continue
-                    per_class.setdefault(cdir.name, []).extend(
-                        p for p in cdir.iterdir()
-                        if p.is_file() and p.suffix.lower() in IMG_EXTS
-                    )
+                    # 並びはファイルシステム任せにしない（同じ seed で同じ結果にするため）
+                    per_class.setdefault(cdir.name, []).extend(sorted(
+                        (p for p in cdir.iterdir()
+                         if p.is_file() and p.suffix.lower() in IMG_EXTS),
+                        key=lambda p: (p.parent.parent.name, p.name)))
             if not per_class:
                 res["error"] = "画像が見つかりません"
                 return res
@@ -685,8 +705,9 @@ def resplit_dataset(
                         res.setdefault("notes", []).append(f"{cname}: {note}")
                 for f in files:
                     sp = "val" if f in val_set else "train"
-                    dst = ds / sp / cname / f.name
-                    if f.parent != dst.parent:
+                    dst_dir = ds / sp / cname
+                    if f.parent != dst_dir:
+                        dst = dst_dir / f"{_free_stem(f.stem, f.suffix, dst_dir)}{f.suffix}"
                         _move(f, dst)
                         res["moved"] += 1
         else:
@@ -727,14 +748,14 @@ def resplit_dataset(
                     res.setdefault("notes", []).append(note)
             for img, lbl in samples:
                 sp = "val" if img in val_set else "train"
-                img_dst = img_root / sp / img.name
-                if img.parent != img_dst.parent:
-                    _move(img, img_dst)
-                    res["moved"] += 1
+                if img.parent == img_root / sp:
+                    continue
+                # 画像とラベルは同じ名前のまま対で動かす
+                stem = _free_stem(img.stem, img.suffix, img_root / sp, lbl_root / sp)
+                _move(img, img_root / sp / f"{stem}{img.suffix}")
+                res["moved"] += 1
                 if lbl is not None:
-                    lbl_dst = lbl_root / sp / lbl.name
-                    if lbl.parent != lbl_dst.parent:
-                        _move(lbl, lbl_dst)
+                    _move(lbl, lbl_root / sp / f"{stem}.txt")
 
         res["after"] = dataset_split_counts(ds)
         res["ok"] = True

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
 import yaml
 
 from core import (check_dataset_quality, dataset_class_names, dataset_task_type,
@@ -324,3 +325,44 @@ def test_再分割もまとまりごとにできる(tmp_path):
     assert len(val) == 5 and len({v.split("__")[0] for v in val}) == 1
     # ラベルも一緒に動いている
     assert sorted(p.stem for p in (ds / "labels" / "val").iterdir()) == val
+
+
+# ---------------------------------------------------------------------------
+# train と val に同じ名前があっても消えない
+#   以前は移動先の同名ファイルを上書きしていたため、分け直すと画像が減っていた
+#   （並び順がファイルシステム任せで、環境によって起きたり起きなかったりした）
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("seed", range(8))
+def test_同名があっても分け直しで画像が消えない_classify(classify_dataset, seed):
+    before = sorted(p.read_bytes() for p in classify_dataset.rglob("*.png"))
+    for _ in range(3):
+        r = resplit_dataset(classify_dataset, val_ratio=0.25, seed=seed)
+        assert r["ok"], r
+    after = sorted(p.read_bytes() for p in classify_dataset.rglob("*.png"))
+    assert len(after) == len(before)
+    for cname in ("a", "b"):
+        assert list((classify_dataset / "val" / cname).iterdir())
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_同名があっても分け直しで画像とラベルが対のまま残る_detect(tmp_path, seed):
+    import yaml
+    ds = tmp_path / "ds"
+    # train/0.png と val/0.png のように、両側に同じ名前を置く
+    for sp in ("train", "val"):
+        for i in range(4):
+            img = ds / "images" / sp / f"{i}.png"
+            img.parent.mkdir(parents=True, exist_ok=True)
+            img.write_bytes(f"{sp}{i}".encode())
+            lbl = ds / "labels" / sp / f"{i}.txt"
+            lbl.parent.mkdir(parents=True, exist_ok=True)
+            lbl.write_text(f"0 0.5 0.5 0.1 0.1  # {sp}{i}\n")
+    (ds / "data.yaml").write_text(yaml.dump({"task": "detect", "names": ["a"]}))
+
+    r = resplit_dataset(ds, val_ratio=0.5, seed=seed)
+    assert r["ok"], r
+    imgs = {p.read_bytes().decode(): p for p in ds.glob("images/*/*.png")}
+    assert len(imgs) == 8
+    for tag, img in imgs.items():
+        lbl = ds / "labels" / img.parent.name / f"{img.stem}.txt"
+        assert tag in lbl.read_text(), f"{img} のラベルが入れ替わった"
