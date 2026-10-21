@@ -29,12 +29,12 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "/opt/nuclio/model.pt")
 # （L2 ノルムで RGB 平均の 1.03 倍）を割り当てており、深度は補助ではなく主入力。
 # 一定値で埋めると、その値そのものが強い偽の手がかりになる（40 枚平均の実測）:
 #
-#     depth=-1.0 … fruit  0.003% / peduncle 0.000%
-#     depth= 0.0 … fruit 24.190% / peduncle 0.032%   ← 0 埋め
-#     depth= 0.5 … fruit  0.529% / peduncle 1.623%
+#     depth=-1.0 … object_a  0.003% / object_b 0.000%
+#     depth= 0.0 … object_a 24.190% / object_b 0.032%   ← 0 埋め
+#     depth= 0.5 … object_a  0.529% / object_b 1.623%
 #
 # 0 は「全画素が基準面と同じ深度にある」という主張になるため、
-# モデルは fruit を過剰に出し peduncle をほぼ出さなくなる。
+# モデルは object_a を過剰に出し object_b をほぼ出さなくなる。
 # 「学習時も欠測画素は 0 だから」は理由にならない。
 # 部分的に 0 が混じるのと全画素が 0 なのは、学習中に現れない別の入力。
 #
