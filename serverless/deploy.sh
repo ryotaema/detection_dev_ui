@@ -22,6 +22,7 @@ BUILD_DIR="$SCRIPT_DIR/.build"
 COMMON_DIR="$SCRIPT_DIR/_common"
 CUSTOM_DIR="$SCRIPT_DIR/custom"
 SAM_DIR="$SCRIPT_DIR/sam"
+UNET_DIR="$SCRIPT_DIR/unet_seg"
 
 # --- 引数解析 -------------------------------------------------------------
 # 既定は GPU。CPU で動かす場合は --cpu を付ける
@@ -262,8 +263,17 @@ for name in "${TARGETS[@]}"; do
   rm -rf "$stage"; mkdir -p "$stage"
   # ハンドラは常に function.yaml という名前で配置 (main.py が /opt/nuclio/function.yaml を読むため)
   cp "$src_yaml" "$stage/function.yaml"
-  cp "$COMMON_DIR/main.py" "$COMMON_DIR/model_handler.py" "$stage/"
-  cp "$best_pt" "$stage/best.pt"
+  # ハンドラはモデルの種類で決まる。
+  #   既定  … Ultralytics YOLO (_common/)
+  #   unet  … state_dict しか持たないセマンティックセグメンテーション (unet_seg/)。
+  #           アーキテクチャ定義 (smallunet.py) を一緒に持っていかないと重みを読めない
+  if [ "${MODEL_KIND:-}" = "unet" ]; then
+    cp "$UNET_DIR/main.py" "$UNET_DIR/model_handler.py" "$UNET_DIR/smallunet.py" "$stage/"
+    cp "$best_pt" "$stage/model.pt"
+  else
+    cp "$COMMON_DIR/main.py" "$COMMON_DIR/model_handler.py" "$stage/"
+    cp "$best_pt" "$stage/best.pt"
+  fi
 
   echo ""
   echo "=========================================================="

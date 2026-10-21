@@ -249,8 +249,35 @@ else
   warn "ログイン" "CVAT が応答しないため確認できません"
 fi
 
-# --- 7. サービスの応答 -------------------------------------------------------
-head_ "7. サービスの応答"
+# --- 7. 自動アノテーション（Nuclio）-----------------------------------------
+# CVAT は関数を host.docker.internal:<ポート> で呼ぶ。この名前は
+# docker-compose.serverless.yml の extra_hosts で足しているので、
+# -f を付けずに `docker compose up -d` すると cvat_server だけ作り直されて消える。
+# CVAT 上は「Detection error occurred ... Name or service not known」としか出ない
+# （関数は healthy のままなので、原因がそこに見えない。実際に踏んだ）
+if docker ps -q --filter name='^nuclio-nuclio-' 2>/dev/null | grep -q .; then
+  head_ "7. 自動アノテーション"
+  for c in cvat_server cvat_worker_annotation; do
+    if ! docker ps -q --filter name="^${c}\$" | grep -q .; then
+      continue
+    elif docker exec "$c" getent hosts host.docker.internal >/dev/null 2>&1; then
+      ok "$c" "関数（host.docker.internal）に届きます"
+    else
+      bad "$c" "host.docker.internal を引けません（serverless の設定なしで作り直されています）"
+      act "docker compose -f docker-compose.yml -f docker-compose.serverless.yml up -d $c"
+    fi
+  done
+  # 素の `docker compose` に serverless が含まれていなければ、また同じことが起きる
+  if cfg services nuclio >/dev/null; then
+    ok "compose の既定" "serverless の設定を含みます"
+  else
+    warn "compose の既定" "-f なしの docker compose では serverless の設定が外れます"
+    act ".env に COMPOSE_FILE=docker-compose.yml:docker-compose.serverless.yml を足す"
+  fi
+fi
+
+# --- 8. サービスの応答 -------------------------------------------------------
+head_ "8. サービスの応答"
 probe() {  # 表示名 URL 期待コード
   code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$2" 2>/dev/null)"
   case "$code" in

@@ -21,9 +21,13 @@ nuclio ダッシュボード (:8070)  ── cvat_net ──  関数コンテナ
 serverless/
 ├── deploy.sh              # 関数のビルド & デプロイ (nuctl 自動導入)
 ├── remove.sh              # 関数の削除
-├── _common/              # 全関数で共有するハンドラ
+├── _common/              # 全関数で共有するハンドラ (Ultralytics)
 │   ├── main.py           #   Nuclio エントリポイント
 │   └── model_handler.py  #   Ultralytics 推論ラッパ
+├── unet_seg/             # Ultralytics 以外のセグメンテーション用ハンドラ
+│   ├── main.py           #   Nuclio エントリポイント
+│   ├── model_handler.py  #   マスク → polygon 変換つき推論
+│   └── smallunet.py      #   アーキテクチャ定義 (学習側と同一であること)
 └── custom/                # 関数定義（各自のモデルごとに 1 ディレクトリ）
     └── <関数名>/
         ├── function.yaml       # CPU 用定義 (ラベル spec を含む)
@@ -191,6 +195,52 @@ MODEL_WEIGHTS=.sam3/sam3.pt   # SAM 3 のみ（models/ からの相対パス）
 - **GPU メモリを数 GB 常時占有する。** `concept` と `interactive` を両方デプロイすると
   そのぶん増える。学習と同時に使うなら片方だけにするか、`SAM3_HALF=1`（FP16）にする
 - 起動には重みの読み込みぶんの時間がかかるため、`readinessTimeoutSeconds` を延ばしてある
+
+## Ultralytics 以外のモデルを載せる（セマンティックセグメンテーション）
+
+`state_dict` しか持たない PyTorch のセグメンテーションモデル（小型 U-Net）も
+detector として載せられる。`model.env` に `MODEL_KIND=unet` を書くと、
+`deploy.sh` は `_common/` ではなく `unet_seg/` のハンドラを使う。
+
+```sh
+MODEL_KIND=unet
+MODEL_WEIGHTS=.unet/<run>/weights/<name>.pt   # models/ からの相対パス
+```
+
+チェックポイントに必要なキー:
+
+| キー | 内容 |
+|---|---|
+| `model` | `state_dict` |
+| `config` | `in_channels` / `num_classes` / `base_channels` / `image_width` / `image_height` |
+| `labels` | `{クラス名: id}`。`background` と `ignore` は CVAT へ返さない |
+
+### 仕組み上の注意
+
+- **`unet_seg/smallunet.py` は学習側の定義と同一でなければならない。**
+  `state_dict` しか無いので、層の名前や並びがずれると読み込みに失敗する
+  （最悪、読めたように見えて別のモデルになる）
+- **出力は画素ごとのクラスであって、インスタンスではない。** ハンドラはクラスごとに
+  連結成分へ分け、輪郭を `approxPolyDP` で単純化して polygon として返す。
+  輪郭の点をそのまま返すと数百点になり、人が CVAT 上で編集できない
+- **入力が 3ch を超えるモデル（RGB-D など）に、CVAT は RGB しか渡してこない。**
+  余りのチャンネルは `DEPTH_MODE`（`zero` / `const:<値>`）で埋めるが、
+  **これは代用であって復元ではなく、精度は大きく落ちる。**
+  ある RGB-D モデルで実測したところ、第 1 層は深度チャンネルに RGB と同等の重み
+  （L2 ノルムで RGB 平均の 1.03 倍）を割り当てており、埋めた定数そのものが
+  強い偽の手がかりになっていた（40 枚平均で、埋める値によって
+  あるクラスの検出画素が 0.03% ↔ 1.62% と 50 倍動いた）。
+  「学習時も欠測画素は 0 だから」は理由になりません。部分的に 0 が混じるのと
+  全画素が 0 なのは、学習中に一度も現れない別の入力です。
+  **深度が要るモデルを CVAT に載せるのは下書き用途に限る**か、
+  RGB だけで学習し直したモデルを使ってください
+- **`numpy` は 1 系に固定すること。** 2 系が入ると opencv 4.10 が ABI 不一致
+  （`numpy.core.multiarray failed to import`）で import できず、関数は起動しない。
+  CVAT からは「デプロイに失敗した」としか見えない。Ultralytics 経路では
+  ultralytics 側が numpy を固定するので表に出なかった
+- 重みは `models/.unet/` のような**ドット始まり**のディレクトリに置く。
+  Ultralytics では読めないので、学習・推論のモデル一覧に混ざると
+  選んだ人が理由の分からないエラーに当たる
 
 ## トラブルシューティング
 
