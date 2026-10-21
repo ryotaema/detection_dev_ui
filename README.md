@@ -586,6 +586,8 @@ AGPL のコードを取り込んだソフトウェアを配布する場合、全
 | [Streamlit](https://github.com/streamlit/streamlit) | Apache 2.0 |
 | [Optuna](https://github.com/optuna/optuna) | MIT |
 | [OpenCV](https://github.com/opencv/opencv) | Apache 2.0 |
+| [timm](https://github.com/huggingface/pytorch-image-models)（SAM 3 の関数内のみ） | Apache 2.0 |
+| [CLIP](https://github.com/ultralytics/CLIP)（SAM 3 のテキスト指定の関数内のみ） | MIT |
 
 **SAM 3 の重みは配布物に含まれません。** CVAT の自動アノテーションで SAM 3 を使う場合、
 重み (`sam3.pt`) は [HuggingFace](https://huggingface.co/facebook/sam3) でアクセス承認を

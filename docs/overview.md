@@ -450,6 +450,13 @@ CVAT 経由だけを前提にしないでください。ZIP、画像単体、他
   **点の数だけ別々のオブジェクト**として扱われます。
   「N 個の点で指した 1 個」が欲しいときは自分で 3 次元にしてください。
   ボックスは点列の先頭に連結されるので、点と併用しても 1 個として扱われます。
+- **SAM 3 のクリック用（`SAM3Predictor`）には `compile=None` を渡す**
+  8.4.48 は `compile=False` を `compile_mode` としてそのまま渡し、`is not None` で
+  判定するため、**False を渡すと `torch.compile` が有効になります**。
+  C コンパイラの無い環境では最初の推論で `Failed to find C compiler` になります。
+- **SAM は推論 1 回で GPU メモリを大きく確保したまま持ち続ける**
+  SAM 3 で約 8GB。自動アノテーションの関数は、使われていないあいだは
+  モデルを降ろすようにしてあります（`SAM_IDLE_UNLOAD_SEC`、既定 600 秒）。
 - **SAM 3 の `quantize` は 8.4.48 では受け付けない**
   公式ドキュメントの例には載っていますが `DEFAULT_CFG_DICT` に無く、
   `overrides` に入れると `SyntaxError` になります。FP16 にしたいときは `half` を使います。

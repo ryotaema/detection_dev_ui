@@ -1692,7 +1692,8 @@ def _render_cleanup() -> None:
                 "run": r["name"],
                 "学習日時": r["trained_at"] or "—",
                 "使ったデータ": r["dataset"] or "—",
-                "進んだエポック": r["epochs"] if r["epochs"] is not None else "—",
+                # 数値と "—" が混ざると Arrow 変換に失敗してログが汚れるので文字列に揃える
+                "進んだエポック": str(r["epochs"]) if r["epochs"] is not None else "—",
                 "ファイル数": r["files"],
                 "サイズ": _fmt_size(r["size"]),
             } for r in _runs]),

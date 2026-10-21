@@ -283,6 +283,32 @@ def test_sam3_起動猶予を延ばしてある(fn_dir: Path):
     assert _load(out / "function.yaml")["spec"]["readinessTimeoutSeconds"] >= 600
 
 
+def test_sam3_実行時に自動インストールされるものはビルド時に入れる(fn_dir: Path):
+    """Ultralytics は足りないものを最初の推論で pip install する。
+    コンテナを作り直すたびに取り直し、オフラインでは推論が落ちる（実測）。"""
+    def _build(variant, pairs=None):
+        out, _ = sl.generate_sam_function_files("sam3", variant, pairs)
+        return "\n".join(d["value"] for d in
+                         _load(out / "function-gpu.yaml")["spec"]["build"]["directives"]["preCopy"])
+
+    inter = _build("interactive")
+    assert "timm" in inter
+    assert "CLIP" not in inter                  # テキストを使わないなら要らない
+
+    concept = _build("concept", [("object_a", "cat")])
+    assert "timm" in concept
+    assert "git+https://github.com/ultralytics/CLIP.git" in concept
+    assert " git " in concept or " git&&" in concept or "git &&" in concept   # pip が git を呼ぶ
+    # 古い pip は pyproject.toml だけのパッケージを UNKNOWN として入れてしまう
+    assert concept.index("-U pip") < concept.index("ultralytics/CLIP.git")
+
+
+def test_sam_待機中は_GPU_から降ろす設定を書き出す(fn_dir: Path):
+    out, _ = sl.generate_sam_function_files("sam3", "interactive")
+    env = {e["name"]: e["value"] for e in _load(out / "function-gpu.yaml")["spec"]["env"]}
+    assert float(env["SAM_IDLE_UNLOAD_SEC"]) > 0
+
+
 def test_sam3_deploy_sh_が専用の経路を持っている():
     """model.env の MODEL_KIND=sam3 を deploy.sh 側が見ていること。
     見ていないと重みの解決に失敗して黙って SKIP される。"""

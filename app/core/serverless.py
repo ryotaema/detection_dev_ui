@@ -365,6 +365,11 @@ SAM_VARIANTS = {
     },
 }
 
+# 使われないまま待機している SAM を GPU から降ろすまでの秒数。
+# SAM は推論 1 回で数 GB を確保したまま持ち続けるので（SAM 3 で約 7.9GB を実測）、
+# 常駐させると学習と GPU メモリを取り合う。読み直しは数秒〜十数秒
+SAM_IDLE_UNLOAD_SEC = 600
+
 # 新しい版が出たらここに 1 つ足すだけで UI の選択肢に現れる
 SAM_MODELS = {
     "sam3": {
@@ -565,6 +570,10 @@ def generate_sam_function_files(
         if half:
             lines += ["    - name: SAM_HALF", '      value: "1"']
         lines += [
+            "    # この秒数だけ使われなければ GPU からモデルを降ろす（次に使うとき読み直す）。",
+            "    # 0 にすると起動時に読んで常駐させる",
+            "    - name: SAM_IDLE_UNLOAD_SEC",
+            f'      value: "{SAM_IDLE_UNLOAD_SEC}"',
             "    - name: YOLO_CONFIG_DIR",
             "      value: /tmp/Ultralytics",
             "    - name: MPLCONFIGDIR",
@@ -590,6 +599,23 @@ def generate_sam_function_files(
         mountPath: {SAM3_MOUNT_PATH}
         readOnly: true
 """
+
+    # Ultralytics が**最初の推論で**自動インストールしようとするものは、ビルド時に入れておく。
+    # 実行時に入れると、コンテナを作り直すたびに取り直し、オフラインでは推論が落ちる
+    # （SAM 3 の画像エンコーダが timm を、テキストエンコーダが CLIP を要求する。実測）
+    extra_apt = ""
+    extra_pip = ""
+    pip_upgrade = ""
+    if version == "sam3":
+        extra_pip = " timm==1.0.30"
+        if variant == "concept":
+            # Ultralytics が要求するのと同じ取得元（PyPI の clip は別物）
+            extra_apt = " git"
+            extra_pip += " ftfy regex git+https://github.com/ultralytics/CLIP.git"
+            # **pip を先に上げること。** Ubuntu 22.04 の pip 22.0.2 は pyproject.toml だけの
+            # パッケージを `UNKNOWN 0.0.0`（中身なし）として入れ、エラーにならない。
+            # ビルドは成功するのに `import clip` が実行時に失敗する（実際に踏んだ）
+            pip_upgrade = "python -m pip install --no-cache-dir -U pip && "
 
     def _weight_directive() -> str:
         if not auto_weights:
@@ -645,7 +671,8 @@ spec:
   runtime: "python:3.10"
   handler: main:handler
   eventTimeout: 120s
-  # 重みを読み終えるまで起動完了にならない。既定 (120秒) では足りないことがある
+  # 常駐させる設定 (SAM_IDLE_UNLOAD_SEC=0) では重みを読み終えるまで起動完了にならない。
+  # 既定 (120秒) では足りないことがある
   readinessTimeoutSeconds: 900
 
 {_env()}
@@ -656,11 +683,11 @@ spec:
     directives:
       preCopy:
         - kind: RUN
-          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+          value: apt-get update && apt-get install --no-install-recommends -y python3-pip python-is-python3 libgl1 libglib2.0-0{extra_apt} && rm -rf /var/lib/apt/lists/*
         - kind: RUN
           value: pip install --no-cache-dir torch torchvision --index-url {torch_url}
         - kind: RUN
-          value: pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml
+          value: {pip_upgrade}pip install --no-cache-dir ultralytics==8.4.48 opencv-python-headless==4.10.0.82 pillow pyyaml{extra_pip}
         - kind: WORKDIR
           value: /opt/nuclio{_weight_directive()}
 {_volumes()}

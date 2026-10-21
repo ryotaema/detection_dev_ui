@@ -16,9 +16,12 @@
 # mask_to_rle() は CVAT 公式の serverless 関数の実装をそのまま使っている。
 #   https://github.com/cvat-ai/cvat  (Copyright (C) CVAT.ai Corporation / MIT License)
 # =============================================================================
+import gc
 import hashlib
 import json
 import os
+import threading
+import time
 
 import numpy as np
 
@@ -30,6 +33,10 @@ SAM_VERSION  = os.environ.get("SAM_VERSION", "sam3").lower()      # sam2 / sam3
 WEIGHTS_PATH = os.environ.get("SAM_WEIGHTS_PATH", "/opt/nuclio/sam3/sam3.pt")
 # FP16。GPU メモリを減らせるが、環境によっては精度・安定性に影響するため既定はオフ
 USE_HALF = os.environ.get("SAM_HALF", "0").lower() not in ("0", "", "false", "no")
+# この秒数だけ呼ばれなければ GPU からモデルを降ろす。0 以下なら起動時に読んで常駐させる。
+# SAM は推論 1 回で数 GB を確保したまま持ち続けるので、待機中に学習の邪魔をしないよう
+# **使うときだけ載せる**のを既定にしている（読み込みは数秒〜十数秒）
+IDLE_UNLOAD_SEC = float(os.environ.get("SAM_IDLE_UNLOAD_SEC", "600"))
 
 
 def mask_to_rle(mask):
@@ -111,21 +118,100 @@ def parse_prompt_map(raw, labels):
 
 
 class _Base:
-    """set_image の結果を使い回すための土台。
+    """モデルの出し入れと、set_image の結果の使い回しを受け持つ土台。
 
-    CVAT は同じ画像に対して何度も呼んでくる（特に interactor は 1 クリック 1 回）。
-    毎回エンコーダを通すと待ち時間がそのぶん伸びるので、画像が変わったときだけ
-    set_image する。
+    - モデルは最初に呼ばれたときに読み、`IDLE_UNLOAD_SEC` 呼ばれなければ降ろす。
+      降ろしても CUDA の初期化分（数百 MB）はプロセスが終わるまで残る
+    - CVAT は同じ画像に対して何度も呼んでくる（特に interactor は 1 クリック 1 回）。
+      毎回エンコーダを通すと待ち時間がそのぶん伸びるので、画像が変わったときだけ
+      set_image する
+
+    派生クラスは `_build_predictor()` を実装し、推論は `with self._use() as predictor:`
+    の中で行うこと（見張りのスレッドが推論中に降ろさないよう、ロックを握る）。
     """
 
-    def __init__(self):
+    def __init__(self, idle_unload_sec=None):
+        self.idle_unload_sec = IDLE_UNLOAD_SEC if idle_unload_sec is None else idle_unload_sec
+        self.predictor = None
         self._image_key = None
+        self._last_used = 0.0
+        self._lock = threading.RLock()
 
-    def _set_image(self, image):
+    def _start(self):
+        """派生クラスの __init__ の最後に呼ぶ。"""
+        if self.idle_unload_sec <= 0:
+            # 常駐させる。最初のリクエストで待たせないよう init_context で読む
+            self._load()
+            return
+        threading.Thread(target=self._watch_idle, daemon=True).start()
+
+    def _build_predictor(self):
+        raise NotImplementedError
+
+    def _load(self):
+        with self._lock:
+            if self.predictor is None:
+                t0 = time.monotonic()
+                self.predictor = self._build_predictor()
+                print(f"[sam] モデルを読み込みました ({time.monotonic() - t0:.1f}s)", flush=True)
+            self._last_used = time.monotonic()
+            return self.predictor
+
+    def unload(self):
+        with self._lock:
+            if self.predictor is None:
+                return False
+            self.predictor = None
+            self._image_key = None
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+            print("[sam] 使われていないのでモデルを降ろしました", flush=True)
+            return True
+
+    def unload_if_idle(self, now=None):
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if self.predictor is not None and now - self._last_used >= self.idle_unload_sec:
+                return self.unload()
+        return False
+
+    def _watch_idle(self):
+        interval = max(1.0, min(30.0, self.idle_unload_sec / 4))
+        while True:
+            time.sleep(interval)
+            self.unload_if_idle()
+
+    class _Using:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def __enter__(self):
+            self.owner._lock.acquire()
+            try:
+                return self.owner._load()
+            except BaseException:
+                self.owner._lock.release()
+                raise
+
+        def __exit__(self, *exc):
+            # 推論にかかった時間を待機時間に数えないよう、終わった時刻で記録し直す
+            self.owner._last_used = time.monotonic()
+            self.owner._lock.release()
+            return False
+
+    def _use(self):
+        return self._Using(self)
+
+    def _set_image(self, predictor, image):
         bgr = to_bgr(image)
         key = hashlib.sha1(bgr.tobytes()).hexdigest()
         if key != self._image_key:
-            self.predictor.set_image(bgr)
+            predictor.set_image(bgr)
             self._image_key = key
 
 
@@ -136,10 +222,12 @@ class ConceptHandler(_Base):
         # pairs: [(CVAT ラベル名, テキストプロンプト), ...]
         # 並び順がそのまま SAM 3 のクラス index になるので、順序を崩さないこと
         super().__init__()
-        from ultralytics.models.sam import SAM3SemanticPredictor
-
         self.labels = [p[0] for p in pairs]
         self.prompts = [p[1] for p in pairs]
+        self._start()
+
+    def _build_predictor(self):
+        from ultralytics.models.sam import SAM3SemanticPredictor
 
         overrides = {
             "model": WEIGHTS_PATH,
@@ -149,18 +237,18 @@ class ConceptHandler(_Base):
         }
         if USE_HALF:
             overrides["half"] = True
-        self.predictor = SAM3SemanticPredictor(overrides=overrides)
-        # 重みの読み込みは 3.45GB 分かかる。最初のリクエストで待たせないよう
-        # init_context の時点で済ませておく（function.yaml で readiness を延ばしてある）
-        self.predictor.setup_model()
+        predictor = SAM3SemanticPredictor(overrides=overrides)
+        predictor.setup_model()
+        return predictor
 
     def infer(self, image, threshold):
         if not self.prompts:
             return []
 
-        self.predictor.args.conf = float(threshold)
-        self._set_image(image)
-        results = self.predictor(text=self.prompts)
+        with self._use() as predictor:
+            predictor.args.conf = float(threshold)
+            self._set_image(predictor, image)
+            results = predictor(text=self.prompts)
         if not results:
             return []
 
@@ -204,6 +292,9 @@ class InteractiveHandler(_Base):
 
     def __init__(self):
         super().__init__()
+        self._start()
+
+    def _build_predictor(self):
         # 点・ボックスの受け取り方は SAM 2 / SAM 3 で共通（SAM3Predictor は
         # SAM2Predictor の _prepare_prompts をそのまま継承している）ので、
         # 差し替えるのは Predictor のクラスだけでよい
@@ -222,15 +313,20 @@ class InteractiveHandler(_Base):
             # 「反応しない」ようにしか見えない）。人が指した以上は何かを返し、
             # 採否は人に決めてもらう
             "conf": float(os.environ.get("SAM_INTERACTIVE_CONF", "0.05")),
+            # **False ではなく None を渡すこと。** 8.4.48 の build_interactive_sam3 は
+            # この値を compile_mode として素通しし、`compile_mode is not None` で
+            # 判定するので、False だと torch.compile が有効になる。
+            # 関数のイメージには C コンパイラが無く、最初の推論で
+            # `Failed to find C compiler` になって落ちる（実測）
+            "compile": None,
         }
         if USE_HALF:
             overrides["half"] = True
-        self.predictor = _Predictor(overrides=overrides)
-        self.predictor.setup_model()
+        predictor = _Predictor(overrides=overrides)
+        predictor.setup_model()
+        return predictor
 
     def handle(self, image, pos_points, neg_points, obj_bbox):
-        self._set_image(image)
-
         pos = [[float(p[0]), float(p[1])] for p in (pos_points or [])]
         neg = [[float(p[0]), float(p[1])] for p in (neg_points or [])]
 
@@ -251,7 +347,9 @@ class InteractiveHandler(_Base):
         if not kwargs:
             return []
 
-        results = self.predictor(**kwargs)
+        with self._use() as predictor:
+            self._set_image(predictor, image)
+            results = predictor(**kwargs)
         if not results:
             return []
 

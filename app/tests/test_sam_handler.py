@@ -99,3 +99,89 @@ def test_obj_bbox_が無い_足りないときは使わない(mh):
     assert mh.flatten_bbox(None) is None
     assert mh.flatten_bbox([]) is None
     assert mh.flatten_bbox([[1, 2]]) is None        # 点が 1 つでは矩形にならない
+
+
+class _FakePredictor:
+    def __init__(self):
+        self.images = 0
+
+    def set_image(self, _bgr):
+        self.images += 1
+
+    def __call__(self, **_kw):
+        return []
+
+
+def _lazy(mh, idle):
+    """重みも GPU も使わずに出し入れだけを確かめるための土台。"""
+    class _H(mh._Base):
+        def __init__(self):
+            super().__init__(idle_unload_sec=idle)
+            self.built = 0
+
+        def _start(self):
+            # 見張りのスレッドは立てない（時刻を渡して unload_if_idle を直接呼ぶ）
+            if self.idle_unload_sec <= 0:
+                self._load()
+
+        def _build_predictor(self):
+            self.built += 1
+            return _FakePredictor()
+
+    h = _H()
+    h._start()
+    return h
+
+
+def test_モデルは使うまで読まない(mh):
+    """待機中に GPU を何 GB も占有しないよう、最初の呼び出しまで読まない。"""
+    h = _lazy(mh, idle=600)
+    assert h.predictor is None
+    with h._use() as p:
+        assert p is h.predictor
+    assert h.built == 1
+
+
+def test_しばらく使われなければ降ろし_次に使うとき読み直す(mh):
+    h = _lazy(mh, idle=600)
+    with h._use():
+        pass
+    t = h._last_used
+    assert not h.unload_if_idle(now=t + 599)    # まだ待つ
+    assert h.unload_if_idle(now=t + 600)
+    assert h.predictor is None
+    with h._use():
+        pass
+    assert h.built == 2
+
+
+def test_降ろしたら画像の特徴も捨てる(mh):
+    """降ろした後に「同じ画像だから set_image を省く」と、
+    読み直した predictor には特徴が無いまま推論することになる。"""
+    from PIL import Image
+
+    h = _lazy(mh, idle=600)
+    img = Image.new("RGB", (2, 2))
+    with h._use() as p:
+        h._set_image(p, img)
+    h.unload()
+    with h._use() as p:
+        h._set_image(p, img)
+        assert p.images == 1                    # 新しい predictor に入れ直している
+
+
+def test_0_以下なら起動時に読んで降ろさない(mh):
+    h = _lazy(mh, idle=0)
+    assert h.built == 1
+    # idle=0 だと「経過 >= 0」は常に真になるので、見張りのスレッドは立てない。
+    # unload_if_idle を呼ぶのは見張りだけなので、ここでは呼ばれないことを前提にする
+    assert h.predictor is not None
+
+
+def test_interactive_は_torch_compile_を切って作る(mh):
+    """8.4.48 は compile=False を compile_mode として素通しし、
+    `is not None` で判定するので torch.compile が有効になる。
+    関数のイメージには C コンパイラが無く、最初の推論で落ちる。"""
+    import inspect
+    src = inspect.getsource(mh.InteractiveHandler._build_predictor)
+    assert '"compile": None' in src
