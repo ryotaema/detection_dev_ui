@@ -489,7 +489,7 @@ def render_evaluate() -> None:
                     _zdet = prediction_detail(_zjf, box_index=_zidx,
                                               margin=float(_zmargin))
                     if _zdet:
-                        st.image(_zdet["image"], use_column_width=True,
+                        st.image(_zdet["image"], width="stretch",
                                  caption=(f"検出 {_zdet['n_boxes']} 件"
                                           + (f"　切り出し {_zdet['crop_rect']}"
                                              if _zdet["crop_rect"] else "")))
@@ -529,7 +529,7 @@ def render_evaluate() -> None:
                         if _res:
                             _img, _n_boxes, _stem = _res
                             st.image(_img, caption=f"{_stem} ({_n_boxes}件検出)",
-                                     use_column_width=True)
+                                     width="stretch")
                         else:
                             st.caption(prediction_display_name(_jf))
                         _is_flagged = _jf.name in st.session_state.reanno_set
@@ -613,7 +613,7 @@ def render_evaluate() -> None:
                             _res = _draw_predictions(_jf)
                             if _res:
                                 _img, _n_boxes, _stem = _res
-                                st.image(_img, caption=f"{_stem} ({_n_boxes}件)", use_column_width=True)
+                                st.image(_img, caption=f"{_stem} ({_n_boxes}件)", width="stretch")
                             else:
                                 st.caption(prediction_display_name(_jf))
                                 st.markdown("_(プレビュー不可)_")
@@ -967,10 +967,10 @@ def render_evaluate() -> None:
                         _pcols = st.columns(2)
                         if _cm.exists():
                             _pcols[0].image(str(_cm), caption="混同行列（正規化）",
-                                            use_column_width=True)
+                                            width="stretch")
                         if _pr.exists():
                             _pcols[1].image(str(_pr), caption="Precision-Recall 曲線",
-                                            use_column_width=True)
+                                            width="stretch")
             else:
                 st.caption(f"`{_ev_key}` での評価結果はまだありません。")
 
@@ -1094,7 +1094,7 @@ def render_evaluate() -> None:
                                 _rr = _draw_predictions(_rj)
                                 if _rr:
                                     _ri, _rn, _rs = _rr
-                                    st.image(_ri, caption=f"{_rs} ({_rn}件)", use_column_width=True)
+                                    st.image(_ri, caption=f"{_rs} ({_rn}件)", width="stretch")
                                 else:
                                     st.caption(_rj.stem)
 

@@ -1464,9 +1464,9 @@ def _render_mosaic(ds) -> None:
                     st.caption(f"`{_r['name']}`")
                     _ac1, _ac2 = st.columns(2)
                     _ac1.image(_r["original"], caption="処理前",
-                               use_column_width=True)
+                               width="stretch")
                     _ac2.image(_r["current"], caption="処理後",
-                               use_column_width=True)
+                               width="stretch")
             st.markdown("---")
 
     _regions, _how_desc = _mosaic_regions_ui(ds, _key)
@@ -1535,8 +1535,8 @@ def _render_mosaic(ds) -> None:
             if _pv_c:
                 _b, _a, _ = _pv_c
                 _cc1, _cc2 = st.columns(2)
-                _cc1.image(_b, caption="処理前", use_column_width=True)
-                _cc2.image(_a, caption="処理後", use_column_width=True)
+                _cc1.image(_b, caption="処理前", width="stretch")
+                _cc2.image(_a, caption="処理後", width="stretch")
 
         _ack = st.checkbox(
             "上の内容を確認しました。承知のうえで適用します",
@@ -1560,8 +1560,8 @@ def _render_mosaic(ds) -> None:
             _before, _after, _n = _pv
             st.caption(f"`{Path(_p).name}` — {_n} 箇所")
             _pc1, _pc2 = st.columns(2)
-            _pc1.image(_before, caption="処理前", use_column_width=True)
-            _pc2.image(_after, caption="処理後", use_column_width=True)
+            _pc1.image(_before, caption="処理前", width="stretch")
+            _pc2.image(_after, caption="処理後", width="stretch")
 
     # --- 適用 ---
     st.markdown("---")

@@ -779,9 +779,9 @@ def render_train() -> None:
                     st.error("画像を読み込めませんでした。")
                 else:
                     _cols = st.columns(len(_vars) + 1)
-                    _cols[0].image(_orig, caption="元画像", use_column_width=True)
+                    _cols[0].image(_orig, caption="元画像", width="stretch")
                     for _c, (_lbl, _im) in zip(_cols[1:], _vars):
-                        _c.image(_im, caption=_lbl, use_column_width=True)
+                        _c.image(_im, caption=_lbl, width="stretch")
                     st.caption(
                         "⚠ 実際の学習では拡張が**確率的に**適用され、"
                         "ここでは効果が見えるよう必ず適用しています。"

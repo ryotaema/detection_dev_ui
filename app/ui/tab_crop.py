@@ -313,7 +313,7 @@ def _render_generate() -> None:
                 )
                 st.image(cv2.cvtColor(_vis, cv2.COLOR_BGR2RGB),
                          caption=f"青枠 = target_scale {_tgt_scale} の範囲",
-                         use_column_width=True)
+                         width="stretch")
 
     # ── ④ 書き出し ──────────────────────────────────────────────────────
     st.markdown("#### ④ 書き出す")
@@ -410,7 +410,7 @@ def _render_generate() -> None:
                         if _t.size:
                             _grid[_shown % len(_grid)].image(
                                 cv2.cvtColor(_t, cv2.COLOR_BGR2RGB),
-                                caption=f"r{_r}_c{_c}", use_column_width=True)
+                                caption=f"r{_r}_c{_c}", width="stretch")
                             _shown += 1
                 st.caption(
                     "中身が薄く見えるタイルも自動では捨てません"
@@ -600,7 +600,7 @@ def _render_bg_selection() -> None:
                 _im = cv2.imread(str(_hit[0]))
                 if _im is not None:
                     st.image(cv2.cvtColor(_im, cv2.COLOR_BGR2RGB),
-                             use_column_width=True)
+                             width="stretch")
             _new = st.checkbox(f"採用　`{_stem[-22:]}`", value=_cur,
                                key=f"bgsel_cb_{_sel}_{_stem}")
             if _new != _state.get(_stem, False):
@@ -672,7 +672,7 @@ def _render_contact_sheet(bgdir, state: dict) -> None:
         _sheets = sorted((bgdir / CONTACT_DIR).glob("sheet_*"))
         if _sheets:
             for _f in _sheets:
-                st.image(str(_f), use_column_width=True, caption=_f.name)
+                st.image(str(_f), width="stretch", caption=_f.name)
                 st.download_button(f"⬇ {_f.name}", _f.read_bytes(),
                                    file_name=_f.name, key=f"cs_dl_{_f.name}")
 
