@@ -516,10 +516,20 @@ CVAT 経由だけを前提にしないでください。ZIP、画像単体、他
   iframe として描画されるため、`var(--accent)` などは効きません。
   `ui/theme.py` の `active_theme()` から実際の色を取り出して埋め込んでください
   （学習ログのビューアがこの形です）。
-- バージョンは 1.35.0 固定です。`st.image()` は `use_column_width` を使います
-  （`use_container_width` は未対応）。
-- バックグラウンド処理の状態は `@st.cache_resource` で共有し、
-  `st.session_state` はスレッドから触らないでください。
+- バージョンは 1.64.0 固定です。幅は `width="stretch"` で指定します
+  （`st.image()` の `use_column_width` は削除済みで `TypeError`、
+  `use_container_width` は非推奨）。`requirements.txt` を上げたら
+  **イメージの再ビルドが必要**です（`app/` はマウントなのでコードだけが新しくなり、
+  古い Streamlit のまま動いて「`width` という引数は無い」と言われます）。
+- バックグラウンド処理の状態は **`@st.cache_resource` で共有しないでください**。
+  1.35 では、キャッシュの取り出しに実行中の画面の文脈（ScriptRunContext）が要り、
+  `threading.Thread` の中では毎回まっさらな値が返って、書き込んでも画面に届きませんでした。
+  版によって挙動が変わりうるものに頼らず、`core/state.py` のモジュール変数で共有します。
+  `st.session_state` もスレッドから触らないでください。
+- `main.py` の CSS は Streamlit が生成する DOM に依存しています。
+  1.35 → 1.64 でタブ（`role="tablist"` / `data-testid="stTab"`）・
+  カラム（`stColumn`）・進捗バーの構造が変わり、指定が黙って効かなくなっていました。
+  バージョンを上げたら、セレクタが実際に当たるかを確認してください。
 
 ### Nuclio（CVAT 自動アノテーション）
 

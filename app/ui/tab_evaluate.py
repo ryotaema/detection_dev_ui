@@ -438,7 +438,8 @@ def render_evaluate() -> None:
             # ── 拡大パネル ──────────────────────────────────────────────
             #   一覧のままだと 1 枚が画面の 1/3 程度で「合っているか」を判断できない。
             #   選んだ 1 枚をここで大きく出し、閉じずに前後へ動けるようにする。
-            #   st.dialog は 1.35 では experimental なので使っていない。
+            #   st.dialog は使っていない（導入時の 1.35 では experimental だった。
+            #   1.64 では正式版だが、AppTest で検査しづらいのでインラインのまま）。
             _zoom = st.session_state.get("pv_zoom")
             if _zoom is not None:
                 _zoom = min(max(0, int(_zoom)), len(_preview_jsons) - 1)

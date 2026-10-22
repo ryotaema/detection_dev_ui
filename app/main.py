@@ -135,32 +135,34 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
     word-break: break-all;
 }
 
-.stProgress > div > div > div > div {
+[data-testid="stProgressBarTrack"] > div {
     background: linear-gradient(90deg, var(--accent-dark), var(--accent));
 }
 
 /* ── Streamlit 標準ウィジェットの色合わせ ──────────────────────────────────
    ここから下は Streamlit が生成する DOM 構造に依存する。
    構造が変わってもセレクタが当たらなくなるだけで壊れはしないが、
-   バージョンを上げたときは見た目を確認すること（現在 1.35.0）。 */
+   バージョンを上げたときは見た目を確認すること（現在 1.64.0）。
+   1.35 → 1.64 で変わったもの: タブ（data-baseweb → role="tablist" / data-testid="stTab"）・
+   カラム（"column" → "stColumn"）・進捗バー（入れ子の深さ）。 */
 
 /* タブ。Step4 の内部タブが増えたので、選択中がはっきり分かるようにする。
    タブは 6 固定 + オプション機能 + 拡張の数だけ増えるので、
    入りきらないときは横スクロールさせる（折り返すと選択中の下線がずれる）。 */
-.stTabs [data-baseweb="tab-list"] {
+.stTabs [role="tablist"] {
     gap: 4px;
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: thin;
 }
-.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar { height: 6px; }
-.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar-thumb {
+.stTabs [role="tablist"]::-webkit-scrollbar { height: 6px; }
+.stTabs [role="tablist"]::-webkit-scrollbar-thumb {
     background: var(--border-accent);
     border-radius: 3px;
 }
 /* スクロールしても選ぶ対象が潰れないように、タブ自体は縮めない */
-.stTabs [data-baseweb="tab"] { flex: 0 0 auto; white-space: nowrap; }
+.stTabs [data-testid="stTab"] { flex: 0 0 auto; white-space: nowrap; }
 
 /* 横並びのラジオ（データセットの操作など）。
    選択肢が増えると 1 行に収まらず、折り返しもスクロールもしないため
@@ -169,21 +171,22 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
     flex-wrap: wrap;
     row-gap: 4px;
 }
-.stTabs [data-baseweb="tab"] {
+.stTabs [data-testid="stTab"] {
     color: var(--text-secondary);
     border-radius: 6px 6px 0 0;
     padding: 6px 14px;
 }
-.stTabs [data-baseweb="tab"]:hover { color: var(--accent); }
+.stTabs [data-testid="stTab"]:hover { color: var(--accent); }
 .stTabs [aria-selected="true"] {
     color: var(--accent);
     background: var(--bg-card-inner);
     font-weight: 600;
 }
-.stTabs [data-baseweb="tab-highlight"] { background: var(--accent); }
+/* 選択中の下線。1.64 では選択中のタブの中に置かれる飾りの div で、
+   指定しないと Streamlit 既定の赤になり、テーマの文字色と食い違う */
+.stTabs [data-testid="stTab"][aria-selected="true"] > div:not([data-testid]) { background: var(--accent); }
 
 /* expander の見出し */
-.streamlit-expanderHeader,
 [data-testid="stExpander"] summary {
     color: var(--text-primary);
     font-size: .88rem;
@@ -209,7 +212,7 @@ code, pre, .stCode { font-family: 'JetBrains Mono', monospace; }
     [data-testid="stHorizontalBlock"] {
         flex-wrap: wrap;
     }
-    [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
         flex: 1 1 240px;
         min-width: 240px;
     }
